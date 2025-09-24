@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/traces"
 )
 
 // Consumer wraps a Kafka consumer.
@@ -16,11 +17,12 @@ type Consumer struct {
 // NewConsumer creates a confluent consumer with safe defaults.
 func newConsumer(brokers []string, groupID string) (*Consumer, error) {
 	cfg := &kafka.ConfigMap{
-		"bootstrap.servers":  strings.Join(brokers, ","),
-		"group.id":           groupID,
-		"auto.offset.reset":  "earliest",
-		"enable.auto.commit": false,
-		"session.timeout.ms": 6000,
+		"bootstrap.servers":        strings.Join(brokers, ","),
+		"group.id":                 groupID,
+		"auto.offset.reset":        "earliest",
+		"enable.auto.commit":       false,
+		"session.timeout.ms":       6000,
+		"allow.auto.create.topics": true,
 	}
 
 	cr, err := kafka.NewConsumer(cfg)
@@ -51,14 +53,13 @@ func (c *Consumer) SubscribeAndConsume(ctx context.Context, topics []string, han
 			}
 			switch ev := e.(type) {
 			case *kafka.Message:
-				if err := handler(ctx, ev); err != nil {
+				if err := traces.TracedConsumer(ev, handler); err != nil {
 					log.Printf("Error handling message: %v", err)
 					continue
 				}
 				if ev.Headers != nil {
 					log.Printf("Headers: %v\n", ev.Headers)
 				}
-				log.Printf("Message on %v: %s\n", ev.TopicPartition, string(ev.Value))
 				if _, err := c.cr.CommitMessage(ev); err != nil {
 					log.Printf("Failed to commit message: %v", err)
 				}

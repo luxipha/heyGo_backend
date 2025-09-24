@@ -3,7 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -11,6 +11,7 @@ import (
 	"github.com/cprakhar/uber-clone/shared/contracts"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 )
 
 type TripConsumer struct {
@@ -27,20 +28,19 @@ func (tc *TripConsumer) Consume(ctx context.Context, topics []string) error {
 		func(ctx context.Context, m *ckafka.Message) error {
 			var kafkaMsg contracts.KafkaMessage
 			if err := json.Unmarshal(m.Value, &kafkaMsg); err != nil {
-				log.Printf("Failed to unmarshal message: %v", err)
+				return fmt.Errorf("failed to unmarshal message: %w", err)
 			}
 
 			var payload messaging.PaymentTripResponseData
 			if kafkaMsg.Data != nil {
 				if err := json.Unmarshal(kafkaMsg.Data, &payload); err != nil {
-					log.Printf("Failed to unmarshal payload: %v", err)
+					return fmt.Errorf("failed to unmarshal payload: %w", err)
 				}
 			}
 
 			switch *m.TopicPartition.Topic {
 			case contracts.PaymentCmdCreateSession:
 				if err := tc.handleTripAccepted(ctx, payload); err != nil {
-					log.Printf("Failed to handle trip accepted: %v", err)
 					return err
 				}
 			}
@@ -50,7 +50,7 @@ func (tc *TripConsumer) Consume(ctx context.Context, topics []string) error {
 }
 
 func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messaging.PaymentTripResponseData) error {
-	log.Printf("Processing payment for trip %s with amount %.2f", payload.TripID, payload.Amount)
+	logs.L().Infow("Processing payment for trip", "tripID", payload.TripID, "amount", payload.Amount)
 
 	paymentSession, err := tc.svc.CreatePaymentSession(ctx,
 		payload.TripID,
@@ -61,11 +61,8 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 	)
 
 	if err != nil {
-		log.Printf("Failed to create payment session: %v", err)
 		return err
 	}
-
-	log.Printf("Payment session created: %s", paymentSession.StripeSessionID)
 
 	paymentPayload := messaging.PaymentEventSessionCreatedData{
 		TripID:    payload.TripID,
@@ -76,8 +73,7 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 
 	data, err := json.Marshal(paymentPayload)
 	if err != nil {
-		log.Printf("Failed to marshal payload: %v", err)
-		return err
+		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
 	if err := tc.kfClient.Producer.SendMessageAndWait(ctx, contracts.PaymentEventSessionCreated,
@@ -87,10 +83,9 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 		},
 		30*time.Second,
 	); err != nil {
-		log.Printf("Failed to send payment session created message: %v", err)
 		return err
 	}
 
-	log.Printf("Payment session created message sent for trip %s", payload.TripID)
+	logs.L().Infow("Payment session created message sent for trip", "tripID", payload.TripID)
 	return nil
 }

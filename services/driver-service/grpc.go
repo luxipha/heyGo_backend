@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net"
 
 	"github.com/cprakhar/uber-clone/services/driver-service/handler"
 	"github.com/cprakhar/uber-clone/services/driver-service/service"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
+	"github.com/cprakhar/uber-clone/shared/observe/traces"
 	"google.golang.org/grpc"
 )
 
@@ -25,12 +27,13 @@ func (s *gRPCServer) run(ctx context.Context) error {
 	// Start listening on the specified address
 	lis, err := net.Listen("tcp", s.addr)
 	if err != nil {
-		log.Printf("Failed to listen on %s: %v", s.addr, err)
-		return err
+		return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
 	}
 
-	// gRPC server setup
-	srv := grpc.NewServer()
+	// gRPC server setup with observability
+	srv := grpc.NewServer(
+		traces.WithTracingInterceptors()...,
+	)
 	handler.NewgRPCHandler(srv, s.driverService)
 
 	// Graceful shutdown on context cancellation
@@ -40,10 +43,9 @@ func (s *gRPCServer) run(ctx context.Context) error {
 	}()
 
 	// Start serving
-	log.Printf("gRPC server running on %s", s.addr)
+	logs.L().Infow("gRPC server running", "addr", s.addr)
 	if err := srv.Serve(lis); err != nil && ctx.Err() == nil {
-		log.Printf("Failed to serve gRPC server: %v", err)
-		return err
+		return fmt.Errorf("failed to serve gRPC on %s: %w", s.addr, err)
 	}
 	return nil
 }

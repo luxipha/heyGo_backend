@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/cprakhar/uber-clone/services/payment-service/repo"
@@ -32,7 +31,7 @@ func (s *paymentService) CreatePaymentSession(
 
 	sessionID, err := s.paymentProcessor.CreatePaymentSession(ctx, amount, currency, metadata)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create payment session: %w", err)
+		return nil, err
 	}
 
 	return &types.PaymentIntent{

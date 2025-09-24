@@ -14,6 +14,8 @@ export const StripePaymentButton = ({
   paymentSession,
   isLoading = false,
 }: StripePaymentButtonProps) => {
+
+  console.log("Session ID:", paymentSession.sessionID, "json:", JSON.stringify(paymentSession))
   const handlePayment = async () => {
     const stripe = await stripePromise
 

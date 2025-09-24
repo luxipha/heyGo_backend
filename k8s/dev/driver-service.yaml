@@ -4,7 +4,7 @@ metadata:
   name: driver-service
   namespace: uber-clone
   labels:
-    component: backend
+    app: driver-service
 spec:
   selector:
     matchLabels:
@@ -17,7 +17,7 @@ spec:
       containers:
       - name: driver-service
         image: uber-clone/driver-service:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         resources:
           limits:
             memory: "256Mi"
@@ -39,6 +39,11 @@ spec:
             secretKeyRef:
               name: external-apis
               key: osrm
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: exporter-endpoint
 ---
 apiVersion: v1
 kind: Service

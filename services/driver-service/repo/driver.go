@@ -7,7 +7,7 @@ import (
 )
 
 type inMemoRepo struct {
-	sync.RWMutex
+	mu      sync.RWMutex
 	drivers []*pb.Driver
 }
 
@@ -24,21 +24,21 @@ func NewDriverRepository() *inMemoRepo {
 }
 
 func (r *inMemoRepo) Create(driver *pb.Driver) (*pb.Driver, error) {
-	r.Lock()
+	r.mu.Lock()
 	r.drivers = append(r.drivers, driver)
-	r.Unlock()
+	r.mu.Unlock()
 	return driver, nil
 }
 
 func (r *inMemoRepo) Delete(driverID string) error {
-	r.Lock()
+	r.mu.Lock()
 	for i, d := range r.drivers {
 		if d.Id == driverID {
 			r.drivers = append(r.drivers[:i], r.drivers[i+1:]...)
 			break
 		}
 	}
-	r.Unlock()
+	r.mu.Unlock()
 	return nil
 }
 

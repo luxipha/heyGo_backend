@@ -2,9 +2,9 @@ package handler
 
 import (
 	"context"
-	"log"
 
 	"github.com/cprakhar/uber-clone/services/driver-service/service"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -29,13 +29,21 @@ func (h *gRPCHandler) RegisterDriver(ctx context.Context, req *pb.RegisterDriver
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to register driver: %v", err)
 	}
-	log.Printf("Driver registered: %s", driver.Id)
+	logs.L().Infow("Driver registered", "driverID", driver.Id)
 	return &pb.RegisterDriverResponse{
 		Driver: driver,
 	}, nil
 }
 
 func (h *gRPCHandler) UnregisterDriver(ctx context.Context, req *pb.RegisterDriverRequest) (*pb.RegisterDriverResponse, error) {
-	// Implement the logic to unregister a driver
-	return nil, nil
+	if err := h.svc.UnregisterDriver(ctx, req.GetDriverID()); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to unregister driver: %v", err)
+	}
+	logs.L().Infow("Driver unregistered", "driverID", req.GetDriverID())
+
+	return &pb.RegisterDriverResponse{
+		Driver: &pb.Driver{
+			Id: req.GetDriverID(),
+		},
+	}, nil
 }

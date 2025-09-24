@@ -2,11 +2,11 @@ package handler
 
 import (
 	"context"
-	"log"
 
 	"github.com/cprakhar/uber-clone/services/trip-service/events"
 	"github.com/cprakhar/uber-clone/services/trip-service/service"
 	"github.com/cprakhar/uber-clone/services/trip-service/types"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
 	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
 	"google.golang.org/grpc"
@@ -73,10 +73,10 @@ func (h *gRPCHandler) CreateTrip(ctx context.Context, req *pb.CreateTripRequest)
 	}
 
 	// Notify other services about the new trip
-	if err := h.producer.PublishTripCreated(trip); err != nil {
+	if err := h.producer.PublishTripCreated(ctx, trip); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to publish trip created event: %v", err)
 	}
-	log.Printf("Published trip created event for trip ID: %s", trip.ID.Hex())
+	logs.L().Infof("Published trip created event for trip ID: %s", trip.ID.Hex())
 
 	return &pb.CreateTripResponse{
 		TripID: trip.ID.Hex(),

@@ -2,6 +2,7 @@ package grpcclient
 
 import (
 	"github.com/cprakhar/uber-clone/shared/env"
+	"github.com/cprakhar/uber-clone/shared/observe/traces"
 	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -15,7 +16,10 @@ type driverServiceClient struct {
 // NewDriverServiceClient creates a new gRPC client for the Driver Service.
 func NewDriverServiceClient() (*driverServiceClient, error) {
 	driverServiceURL := env.GetString("DRIVER_SERVICE_URL", "driver-service:9100")
-	conn, err := grpc.NewClient(driverServiceURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(driverServiceURL,
+		append(traces.DialOptionsWithTracing(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()))...,
+	)
 	if err != nil {
 		return nil, err
 	}

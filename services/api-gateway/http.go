@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/cprakhar/uber-clone/services/api-gateway/handler"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 )
 
 type httpServer struct {
@@ -35,7 +35,7 @@ func (s *httpServer) run(ctx context.Context) error {
 	// Start the server in a separate goroutine
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("http server running on %s", s.addr)
+		logs.L().Infow("http server running", "addr", s.addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -59,6 +59,6 @@ func (s *httpServer) run(ctx context.Context) error {
 		return fmt.Errorf("http server shutdown error: %w", err)
 	}
 
-	log.Println("http server gracefully stopped")
+	logs.L().Info("http server gracefully stopped")
 	return nil
 }

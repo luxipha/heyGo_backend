@@ -58,18 +58,18 @@ func (s *tripService) GetRoute(ctx context.Context, pickup, destination *sharedt
 
 	res, err := http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch route from OSRM api: %v", err)
+		return nil, err
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	var routeResponse types.OSRMApiResponse
 	if err := json.Unmarshal(body, &routeResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
 	return &routeResponse, nil
@@ -99,7 +99,7 @@ func (s *tripService) GenerateTripFares(ctx context.Context, rideFares []*types.
 		}
 
 		if err := s.repo.SaveRideFare(ctx, f); err != nil {
-			return nil, fmt.Errorf("failed to save ride fare: %v", err)
+			return nil, err
 		}
 		fares[i] = f
 	}
@@ -111,7 +111,7 @@ func (s *tripService) GenerateTripFares(ctx context.Context, rideFares []*types.
 func (s *tripService) GetAndValidateRideFare(ctx context.Context, fareID, riderID string) (*types.RideFareModel, error) {
 	fare, err := s.repo.GetRideFareByID(ctx, fareID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get ride fare: %v", err)
+		return nil, err
 	}
 
 	if fare == nil {
@@ -119,7 +119,7 @@ func (s *tripService) GetAndValidateRideFare(ctx context.Context, fareID, riderI
 	}
 
 	if fare.RiderID != riderID {
-		return nil, fmt.Errorf("ride fare does not belong to the rider")
+		return nil, fmt.Errorf("ride fare does not belong to rider")
 	}
 
 	return fare, nil

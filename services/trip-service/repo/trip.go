@@ -14,7 +14,7 @@ var (
 )
 
 type inMemoRepo struct {
-	sync.RWMutex
+	mu        sync.RWMutex
 	trips     map[string]*types.TripModel
 	rideFares map[string]*types.RideFareModel
 }
@@ -36,9 +36,9 @@ func NewInMemoRepository() *inMemoRepo {
 }
 
 func (r *inMemoRepo) GetByID(ctx context.Context, tripID string) (*types.TripModel, error) {
-	r.RLock()
+	r.mu.RLock()
 	trip, exists := r.trips[tripID]
-	r.RUnlock()
+	r.mu.RUnlock()
 	if !exists {
 		return nil, ErrNotFound
 	}
@@ -47,25 +47,25 @@ func (r *inMemoRepo) GetByID(ctx context.Context, tripID string) (*types.TripMod
 
 // Create adds a new trip to the in-memory store
 func (r *inMemoRepo) Create(ctx context.Context, trip *types.TripModel) (*types.TripModel, error) {
-	r.Lock()
+	r.mu.Lock()
 	r.trips[trip.ID.Hex()] = trip
-	r.Unlock()
+	r.mu.Unlock()
 	return trip, nil
 }
 
 // SaveRideFare saves a ride fare to the in-memory store
 func (r *inMemoRepo) SaveRideFare(ctx context.Context, fare *types.RideFareModel) error {
-	r.Lock()
+	r.mu.Lock()
 	r.rideFares[fare.ID.Hex()] = fare
-	r.Unlock()
+	r.mu.Unlock()
 	return nil
 }
 
 // GetRideFareByID retrieves a ride fare by its ID
 func (r *inMemoRepo) GetRideFareByID(ctx context.Context, fareID string) (*types.RideFareModel, error) {
-	r.RLock()
+	r.mu.RLock()
 	fare, exists := r.rideFares[fareID]
-	r.RUnlock()
+	r.mu.RUnlock()
 	if !exists {
 		return nil, ErrNotFound
 	}
@@ -74,12 +74,12 @@ func (r *inMemoRepo) GetRideFareByID(ctx context.Context, fareID string) (*types
 
 // UpdateWithDriver updates a trip with the given driver details and changes its status to "accepted"
 func (r *inMemoRepo) UpdateWithDriver(ctx context.Context, tripID string, driver *pbd.TripDriver) (*types.TripModel, error) {
-	r.Lock()
+	r.mu.Lock()
 	r.trips[tripID].Driver = driver
 	r.trips[tripID].Status = "accepted"
-	r.Unlock()
+	r.mu.Unlock()
 
-	r.RLock()
-	defer r.RUnlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.trips[tripID], nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/cprakhar/uber-clone/shared/observe/traces"
 )
 
 type Producer struct {
@@ -19,15 +20,12 @@ type Producer struct {
 // NewProducer creates a confluent producer with safe defaults.
 func newProducer(brokers []string) (*Producer, error) {
 	cfg := &kafka.ConfigMap{
-		"bootstrap.servers":                     strings.Join(brokers, ","),
-		"security.protocol":                     "PLAINTEXT",
-		"acks":                                  "all",
-		"enable.idempotence":                    true,
-		"max.in.flight.requests.per.connection": 1,
-		"retries":                               5,
-		"linger.ms":                             5,
-		"batch.size":                            32 * 1024, // 32KB
-		"compression.type":                      "zstd",
+		"bootstrap.servers":  strings.Join(brokers, ","),
+		"security.protocol":  "PLAINTEXT",
+		"acks":               "all",
+		"enable.idempotence": true,
+		"batch.size":         32 * 1024, // 32KB
+		"compression.type":   "zstd",
 	}
 
 	pr, err := kafka.NewProducer(cfg)
@@ -60,7 +58,7 @@ func newProducer(brokers []string) (*Producer, error) {
 	return &Producer{pr: pr}, nil
 }
 
-func (p *Producer) SendMessage(topic string, message *contracts.KafkaMessage) error {
+func (p *Producer) SendMessage(ctx context.Context, topic string, message *contracts.KafkaMessage) error {
 	data, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to marshal the message: %w", err)
@@ -72,7 +70,7 @@ func (p *Producer) SendMessage(topic string, message *contracts.KafkaMessage) er
 		Value:          data,
 	}
 
-	return p.pr.Produce(msg, nil)
+	return traces.TracedProducer(ctx, topic, msg, p.pr.Produce)
 }
 
 func (p *Producer) SendMessageAndWait(ctx context.Context, topic string, message *contracts.KafkaMessage, timeout time.Duration) error {

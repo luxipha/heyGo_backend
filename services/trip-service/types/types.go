@@ -99,7 +99,7 @@ type PricingConfig struct {
 // DefaultPricingConfig returns a default pricing configuration
 func DefaultPricingConfig() *PricingConfig {
 	return &PricingConfig{
-		PricePerUnitDistance: 10.0, // 10 Rs per km
-		PricePerMinute:       2.0,  // 2 Rs per minute
+		PricePerUnitDistance: 10.0, // 10 paise per meter
+		PricePerMinute:       5.0,  // 5 paise per minute
 	}
 }

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"log"
 	"net/http"
 
 	grpcclient "github.com/cprakhar/uber-clone/services/api-gateway/grpc-client"
@@ -9,22 +8,30 @@ import (
 	"github.com/cprakhar/uber-clone/shared/contracts"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"go.opentelemetry.io/otel"
 )
 
 // NewHTTPHandler initializes the HTTP handler with routes and middleware
 func NewHTTPHandler(kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager) *gin.Engine {
 	r := gin.Default()
 
+	middleware := otelgin.Middleware("api-gateway", otelgin.WithTracerProvider(otel.GetTracerProvider()))
+
+	// Structured logging middleware
+	r.Use(logs.HTTPLoggingMiddleware)
+
 	r.GET("/health", healthHandler)
 	r.GET("/ready", readinessHandler)
 
-	r.POST("/trip/preview", enableCORS, previewTripHandler)
-	r.POST("/trip/start", enableCORS, tripStartHandler)
-	r.GET("/ws/riders", func(ctx *gin.Context) {
+	r.POST("/trip/preview", middleware, enableCORS, previewTripHandler)
+	r.POST("/trip/start", middleware, enableCORS, tripStartHandler)
+	r.GET("/ws/riders", middleware, func(ctx *gin.Context) {
 		RidersWSHandler(ctx, kfc, connMgr)
 	})
-	r.GET("/ws/drivers", func(ctx *gin.Context) {
+	r.GET("/ws/drivers", middleware, func(ctx *gin.Context) {
 		DriversWSHandler(ctx, kfc, connMgr)
 	})
 
@@ -46,18 +53,13 @@ func readinessHandler(ctx *gin.Context) {
 func tripStartHandler(ctx *gin.Context) {
 	var payload types.TripStartRequest
 	if err := ctx.ShouldBindJSON(&payload); err != nil {
-		ctx.JSON(http.StatusBadRequest, contracts.APIResponse{
-			Error: &contracts.APIError{
-				Code:    http.StatusBadRequest,
-				Message: "invalid request payload",
-			},
-		})
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
 	tripService, err := grpcclient.NewTripServiceClient()
 	if err != nil {
-		log.Fatal(err)
+		logs.L().Fatal(err)
 	}
 	defer tripService.Close()
 
@@ -75,12 +77,7 @@ func tripStartHandler(ctx *gin.Context) {
 func previewTripHandler(ctx *gin.Context) {
 	var payload types.PreviewTripRequest
 	if err := ctx.ShouldBindJSON(&payload); err != nil {
-		ctx.JSON(http.StatusBadRequest, contracts.APIResponse{
-			Error: &contracts.APIError{
-				Code:    http.StatusBadRequest,
-				Message: "invalid request payload",
-			},
-		})
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -91,7 +88,7 @@ func previewTripHandler(ctx *gin.Context) {
 
 	tripService, err := grpcclient.NewTripServiceClient()
 	if err != nil {
-		log.Fatal(err)
+		logs.L().Fatal(err)
 	}
 	defer tripService.Close()
 

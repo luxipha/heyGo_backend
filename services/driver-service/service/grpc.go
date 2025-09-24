@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"log"
 	"math/rand/v2"
 
 	"github.com/cprakhar/uber-clone/services/driver-service/repo"
@@ -51,7 +50,6 @@ func (s *driverService) RegisterDriver(ctx context.Context, driverID, packageSlu
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("All drivers: %v", s.repo.GetAll())
 	return driver, nil
 }
 

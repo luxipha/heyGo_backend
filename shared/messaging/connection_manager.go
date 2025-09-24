@@ -14,12 +14,12 @@ var ErrConnectionNotFound = fmt.Errorf("connection not found")
 
 type connWrapper struct {
 	conn *websocket.Conn
-	mu sync.Mutex
+	mu   sync.Mutex
 }
 
 type ConnectionManager struct {
 	connections map[string]*connWrapper
-	mu sync.RWMutex
+	mu          sync.RWMutex
 }
 
 var upgrader = websocket.Upgrader{
@@ -47,7 +47,7 @@ func (cm *ConnectionManager) Add(id string, conn *websocket.Conn) {
 	defer cm.mu.Unlock()
 	cm.connections[id] = &connWrapper{
 		conn: conn,
-		mu: sync.Mutex{},
+		mu:   sync.Mutex{},
 	}
 
 	log.Printf("Connection added for ID: %s", id)

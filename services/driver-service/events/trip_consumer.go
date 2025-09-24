@@ -3,7 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
 	"math/rand/v2"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -11,6 +11,7 @@ import (
 	"github.com/cprakhar/uber-clone/shared/contracts"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	kf "github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 )
 
 type TripConsumer struct {
@@ -30,15 +31,14 @@ func (tec *TripConsumer) Consume(ctx context.Context, topics []string) error {
 
 			var kafkaMsg contracts.KafkaMessage
 			if err := json.Unmarshal(msg.Value, &kafkaMsg); err != nil {
-				log.Printf("failed to unmarshal message: %v", err)
-				return err
+				return fmt.Errorf("failed to unmarshal message: %w", err)
 			}
 
-			log.Printf("Received message on topic %s: %+v", *msg.TopicPartition.Topic, kafkaMsg)
+			logs.L().Infow("Received message on topic", "topic", *msg.TopicPartition.Topic)
 
 			var payload messaging.TripEventData
 			if err := json.Unmarshal(kafkaMsg.Data, &payload); err != nil {
-				log.Printf("failed to unmarshal payload: %v", err)
+				return fmt.Errorf("failed to unmarshal payload: %w", err)
 			}
 
 			// Handle different event types
@@ -47,7 +47,7 @@ func (tec *TripConsumer) Consume(ctx context.Context, topics []string) error {
 				return tec.handleFindAndNotifyDrivers(ctx, &payload)
 			}
 
-			log.Printf("Unknown trip event: %v", payload)
+			logs.L().Warnw("Unknown trip event", "topic", *msg.TopicPartition.Topic)
 			return nil
 		},
 	)
@@ -55,15 +55,14 @@ func (tec *TripConsumer) Consume(ctx context.Context, topics []string) error {
 
 func (tec *TripConsumer) handleFindAndNotifyDrivers(ctx context.Context, payload *messaging.TripEventData) error {
 	drivers := tec.svc.FindAvailableDrivers(ctx, payload.Trip.SelectedFare.PackageSlug)
-	log.Printf("Available drivers for trip %s: %v", payload.Trip.Id, drivers)
 	if len(drivers) == 0 {
-		log.Printf("No drivers available for trip %s", payload.Trip.Id)
+		logs.L().Infow("No drivers available for trip", "tripID", payload.Trip.Id)
 
 		// Notify trip service about unavailability of drivers
-		if err := tec.kfClient.Producer.SendMessage(contracts.TripEventNoDriversFound, &contracts.KafkaMessage{
+		if err := tec.kfClient.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.KafkaMessage{
 			EntityID: payload.Trip.RiderID,
 		}); err != nil {
-			log.Printf("failed to notify trip service about no drivers found: %v", err)
+			return err
 		}
 		return nil
 	}
@@ -71,19 +70,19 @@ func (tec *TripConsumer) handleFindAndNotifyDrivers(ctx context.Context, payload
 	randIdx := rand.IntN(len(drivers))
 	selectedDriverID := drivers[randIdx]
 
-	marshalledEvent, err := json.Marshal(payload)
+	data, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("failed to marshal data: %v", err)
+		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
 	// Notify trip service about the selected driver
-	if err := tec.kfClient.Producer.SendMessage(contracts.DriverCmdTripRequest, &contracts.KafkaMessage{
+	if err := tec.kfClient.Producer.SendMessage(ctx, contracts.DriverCmdTripRequest, &contracts.KafkaMessage{
 		EntityID: selectedDriverID,
-		Data:     marshalledEvent,
+		Data:     data,
 	}); err != nil {
-		log.Printf("failed to notify trip service about selected driver: %v", err)
 		return err
 	}
-	log.Printf("Found a suitable driver %s for trip %s", selectedDriverID, payload.Trip.Id)
+
+	logs.L().Infow("Found a suitable driver for trip", "driverID", selectedDriverID, "tripID", payload.Trip.Id)
 	return nil
 }

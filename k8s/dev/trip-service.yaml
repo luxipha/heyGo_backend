@@ -4,7 +4,7 @@ metadata:
   name: trip-service
   namespace: uber-clone
   labels:
-    component: backend
+    app: trip-service
 spec:
   replicas: 1
   selector:
@@ -18,7 +18,7 @@ spec:
       containers:
       - name: trip-service
         image: uber-clone/trip-service:latest
-        imagePullPolicy: Never  # For local minikube builds
+        imagePullPolicy: IfNotPresent
         ports:
           - containerPort: 9000
             name: grpc
@@ -40,6 +40,11 @@ spec:
             secretKeyRef:
               name: external-apis
               key: osrm
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: exporter-endpoint
 ---
 apiVersion: v1
 kind: Service

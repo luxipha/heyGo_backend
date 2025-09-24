@@ -16,3 +16,4 @@ data:
   app-url: "http://localhost:3000"
   stripe-success-url: "http://localhost:3000?payment=success"
   stripe-cancel-url: "http://localhost:3000?payment=cancel"
+  exporter-endpoint: "http://jaeger-collector:4318"

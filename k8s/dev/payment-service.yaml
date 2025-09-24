@@ -27,7 +27,7 @@ spec:
               cpu: "500m"
             requests:
               memory: "128Mi"
-              cpu: "250m"
+              cpu: "100m"
           env:
             - name: STRIPE_SECRET_KEY
               valueFrom:
@@ -53,6 +53,11 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: app-url
+                  name: uber-clone-config
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  key: exporter-endpoint
                   name: uber-clone-config
 ---
 apiVersion: v1

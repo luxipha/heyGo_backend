@@ -2,12 +2,12 @@ package handler
 
 import (
 	"encoding/json"
-	"log"
 
 	grpcclient "github.com/cprakhar/uber-clone/services/api-gateway/grpc-client"
 	"github.com/cprakhar/uber-clone/shared/contracts"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 	"github.com/cprakhar/uber-clone/shared/proto/driver"
 	"github.com/gin-gonic/gin"
 )
@@ -16,14 +16,14 @@ import (
 func RidersWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *messaging.ConnectionManager) {
 	conn, err := connManager.Upgrade(ctx.Writer, ctx.Request)
 	if err != nil {
-		log.Printf("Websocket upgrade failed: %v", err)
+		logs.L().Errorw("websocket upgrade failed", "error", err)
 		return
 	}
 	defer conn.Close()
 
 	riderID := ctx.Query("riderID")
 	if riderID == "" {
-		log.Println("No riderID provided")
+		logs.L().Info("No riderID provided")
 		return
 	}
 
@@ -32,12 +32,12 @@ func RidersWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mess
 	defer connManager.Remove(riderID)
 
 	for {
-		_, message, err := conn.ReadMessage()
+		_, _, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading message: %v", err)
+			logs.L().Errorw("Error reading message", "error", err)
 			break
 		}
-		log.Printf("Received message to rider %s: %s", riderID, message)
+		logs.L().Infow("Received message to rider", "riderID", riderID)
 	}
 }
 
@@ -45,20 +45,20 @@ func RidersWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mess
 func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *messaging.ConnectionManager) {
 	conn, err := connManager.Upgrade(ctx.Writer, ctx.Request)
 	if err != nil {
-		log.Printf("Websocket upgrade failed: %v", err)
+		logs.L().Errorw("websocket upgrade failed", "error", err)
 		return
 	}
 	defer conn.Close()
 
 	driverID := ctx.Query("driverID")
 	if driverID == "" {
-		log.Println("No driverID provided")
+		logs.L().Info("No driverID provided")
 		return
 	}
 
 	packageSlug := ctx.Query("packageSlug")
 	if packageSlug == "" {
-		log.Println("No packageSlug provided")
+		logs.L().Info("No packageSlug provided")
 		return
 	}
 
@@ -67,7 +67,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 
 	driverService, err := grpcclient.NewDriverServiceClient()
 	if err != nil {
-		log.Fatal(err)
+		logs.L().Fatal(err)
 	}
 
 	defer func() {
@@ -79,7 +79,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 		})
 
 		driverService.Close()
-		log.Printf("Driver unregistered %s: ", driverID)
+		logs.L().Infow("Driver unregistered", "driverID", driverID)
 	}()
 
 	driver, err := driverService.Client.RegisterDriver(ctx, &driver.RegisterDriverRequest{
@@ -87,7 +87,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 		PackageSlug: packageSlug,
 	})
 	if err != nil {
-		log.Printf("Failed to register driver: %v", err)
+		logs.L().Errorw("failed to register driver", "driverID", driverID, "error", err)
 		return
 	}
 
@@ -97,14 +97,14 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 	}
 
 	if err := connManager.SendMessage(driverID, msg); err != nil {
-		log.Printf("Failed to send register message to driver %s: %v", driverID, err)
+		logs.L().Errorw("failed to send register message to driver", "driverID", driverID, "error", err)
 		return
 	}
 
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Error reading message: %v", err)
+			logs.L().Errorw("error reading message", "error", err)
 			break
 		}
 
@@ -115,7 +115,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 
 		var dm driverMessage
 		if err := json.Unmarshal(message, &dm); err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
+			logs.L().Warnw("Failed to unmarshal message", "error", err)
 			continue
 		}
 
@@ -125,14 +125,14 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 			continue
 		case contracts.DriverCmdTripAccept, contracts.DriverCmdTripDecline:
 			// Notify trip service about trip acceptance/decline
-			if err := kfc.Producer.SendMessage(dm.Type, &contracts.KafkaMessage{
+			if err := kfc.Producer.SendMessage(ctx, dm.Type, &contracts.KafkaMessage{
 				EntityID: driverID,
 				Data:     dm.Data,
 			}); err != nil {
-				log.Printf("Failed to send message to trip service: %v", err)
+				logs.L().Errorw("failed to send message to trip service", "error", err)
 			}
 		default:
-			log.Printf("Unknown message type from driver %s: %s", driverID, dm.Type)
+			logs.L().Warnw("Unknown message from driver", "driverID", driverID, "type", dm.Type)
 		}
 	}
 }

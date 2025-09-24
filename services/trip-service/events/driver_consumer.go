@@ -3,13 +3,14 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/cprakhar/uber-clone/services/trip-service/service"
 	"github.com/cprakhar/uber-clone/shared/contracts"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/cprakhar/uber-clone/shared/observe/logs"
 	pbd "github.com/cprakhar/uber-clone/shared/proto/driver"
 	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
 )
@@ -26,41 +27,44 @@ func NewDriverConsumer(kfClient *kafka.KafkaClient, svc service.TripService) *Dr
 
 // Consume starts consuming messages from the specified topics and processes them.
 func (dc *DriverConsumer) Consume(ctx context.Context, topics []string) error {
-	return dc.kfClient.Consumer.SubscribeAndConsume(ctx, topics, func(ctx context.Context, msg *ckafka.Message) error {
-
-		var kafkaMsg contracts.KafkaMessage
-		if err := json.Unmarshal(msg.Value, &kafkaMsg); err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
-			return err
-		}
-
-		var payload messaging.DriverTripResponseData
-		if kafkaMsg.Data != nil {
-			if err := json.Unmarshal(kafkaMsg.Data, &payload); err != nil {
-				log.Printf("Failed to unmarshal payload: %v", err)
-				return err
+	return dc.kfClient.Consumer.SubscribeAndConsume(ctx, topics,
+		func(ctx context.Context, msg *ckafka.Message) error {
+			var kafkaMsg contracts.KafkaMessage
+			if err := json.Unmarshal(msg.Value, &kafkaMsg); err != nil {
+				return fmt.Errorf("failed to unmarshal message: %w", err)
 			}
-		}
 
-		switch *msg.TopicPartition.Topic {
-		case contracts.DriverCmdTripAccept:
-			if err := dc.handleTripAccept(ctx, payload.TripID, payload.Driver); err != nil {
-				log.Printf("Failed to handle trip accept: %v", err)
-				return err
+			var payload messaging.DriverTripResponseData
+			if kafkaMsg.Data != nil {
+				if err := json.Unmarshal(kafkaMsg.Data, &payload); err != nil {
+					return fmt.Errorf("failed to unmarshal payload: %w", err)
+				}
 			}
-		case contracts.DriverCmdTripDecline:
-			log.Printf("Driver declined trip %s", payload.TripID)
-			dc.handleTripDecline(ctx, payload.TripID)
-		}
 
-		return nil
-	})
+			// Handle different driver commands
+			switch *msg.TopicPartition.Topic {
+			case contracts.DriverCmdTripAccept:
+				if err := dc.handleTripAccept(ctx, payload.TripID, payload.Driver); err != nil {
+					return err
+				}
+			case contracts.DriverCmdTripDecline:
+				if err := dc.handleTripDecline(ctx, payload.TripID); err != nil {
+					return err
+				}
+			default:
+				logs.L().Warnw("Unknown topic", "topic", *msg.TopicPartition.Topic)
+				return nil
+			}
+
+			logs.L().Infow("Processed message", "topic", *msg.TopicPartition.Topic)
+			return nil
+		},
+	)
 }
 
 func (dc *DriverConsumer) handleTripDecline(ctx context.Context, tripID string) error {
 	trip, err := dc.svc.GetTripByID(ctx, tripID)
 	if err != nil {
-		log.Printf("Failed to get trip by ID: %v", err)
 		return err
 	}
 
@@ -70,15 +74,15 @@ func (dc *DriverConsumer) handleTripDecline(ctx context.Context, tripID string) 
 
 	data, err := json.Marshal(tripEventData)
 	if err != nil {
-		log.Printf("Failed to marshal trip event data: %v", err)
+		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
 	// Notify driver service to find another driver
-	if err := dc.kfClient.Producer.SendMessage(contracts.TripEventDriverNotInterested, &contracts.KafkaMessage{
+	if err := dc.kfClient.Producer.SendMessage(ctx, contracts.TripEventDriverNotInterested, &contracts.KafkaMessage{
 		EntityID: trip.RiderID,
 		Data:     data,
 	}); err != nil {
-		log.Printf("Failed to send driver not interested message: %v", err)
+		return err
 	}
 
 	return nil
@@ -93,22 +97,19 @@ func (dc *DriverConsumer) handleTripAccept(ctx context.Context, tripID string, d
 		CarPlate:   driver.CarPlate,
 	})
 	if err != nil {
-		log.Printf("Failed to update trip with driver: %v", err)
 		return err
 	}
 
 	data, err := json.Marshal(updatedTrip)
 	if err != nil {
-		log.Printf("Failed to marshal updated trip: %v", err)
-		return err
+		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
 	// Notify rider about driver assignment
-	if err := dc.kfClient.Producer.SendMessage(contracts.TripEventDriverAssigned, &contracts.KafkaMessage{
+	if err := dc.kfClient.Producer.SendMessage(ctx, contracts.TripEventDriverAssigned, &contracts.KafkaMessage{
 		EntityID: updatedTrip.RiderID,
 		Data:     data,
 	}); err != nil {
-		log.Printf("Failed to send driver assigned message: %v", err)
 		return err
 	}
 
@@ -122,19 +123,17 @@ func (dc *DriverConsumer) handleTripAccept(ctx context.Context, tripID string, d
 
 	data, err = json.Marshal(paymentTripResponseData)
 	if err != nil {
-		log.Printf("Failed to marshal payment trip response data: %v", err)
-		return err
+		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
 	// Notify payment service to create a payment session
-	if err := dc.kfClient.Producer.SendMessage(contracts.PaymentCmdCreateSession, &contracts.KafkaMessage{
+	if err := dc.kfClient.Producer.SendMessage(ctx, contracts.PaymentCmdCreateSession, &contracts.KafkaMessage{
 		EntityID: updatedTrip.RiderID,
 		Data:     data,
 	}); err != nil {
-		log.Printf("Failed to send payment command create session message: %v", err)
 		return err
 	}
 
-	log.Printf("Trip %s accepted by driver %s", tripID, driver.Id)
+	logs.L().Infow("Trip accepted by driver", "tripID", tripID, "driverID", driver.Id)
 	return nil
 }

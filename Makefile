@@ -1,6 +1,7 @@
 PROTO_DIR := proto
 PROTO_SRC := $(wildcard $(PROTO_DIR)/*.proto)
 GO_OUT := .
+SCRIPTS_DIR := scripts/
 
 .PHONY: generate-proto
 generate-proto:
@@ -9,3 +10,11 @@ generate-proto:
 		--go_out=$(GO_OUT) \
 		--go-grpc_out=$(GO_OUT) \
 		$(PROTO_SRC)
+	
+.PHONY: deploy
+deploy:
+	./$(SCRIPTS_DIR)/deploy.sh
+
+.PHONY: build
+build:
+	./$(SCRIPTS_DIR)/build.sh

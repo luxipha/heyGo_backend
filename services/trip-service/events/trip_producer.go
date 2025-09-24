@@ -1,6 +1,7 @@
 package events
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -21,17 +22,17 @@ func NewTripEventProducer(k *kafka.KafkaClient) *TripEventProducer {
 }
 
 // PublishTripCreated publishes a "trip.event.created" event with the given payload and entity ID.
-func (tep *TripEventProducer) PublishTripCreated(trip *types.TripModel, timeout ...time.Duration) error {
+func (tep *TripEventProducer) PublishTripCreated(ctx context.Context, trip *types.TripModel, timeout ...time.Duration) error {
 	msg := messaging.TripEventData{
 		Trip: trip.ToProto(),
 	}
 
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal data: %v", err)
+		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
-	return tep.k.Producer.SendMessage(contracts.TripEventCreated, &contracts.KafkaMessage{
+	return tep.k.Producer.SendMessage(ctx, contracts.TripEventCreated, &contracts.KafkaMessage{
 		EntityID: trip.RiderID,
 		Data:     data,
 	})

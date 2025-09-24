@@ -2,6 +2,7 @@ package grpcclient
 
 import (
 	"github.com/cprakhar/uber-clone/shared/env"
+	"github.com/cprakhar/uber-clone/shared/observe/traces"
 	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -15,7 +16,13 @@ type tripServiceClient struct {
 // NewTripServiceClient creates a new gRPC client for the Trip Service.
 func NewTripServiceClient() (*tripServiceClient, error) {
 	tripServiceURL := env.GetString("TRIP_SERVICE_URL", "trip-service:9000")
-	conn, err := grpc.NewClient(tripServiceURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		tripServiceURL,
+		append(
+			traces.DialOptionsWithTracing(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)...,
+	)
 	if err != nil {
 		return nil, err
 	}

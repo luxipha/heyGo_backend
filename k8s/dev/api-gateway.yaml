@@ -4,7 +4,7 @@ metadata:
   name: api-gateway
   namespace: uber-clone
   labels:
-    component: backend
+    app: api-gateway
 spec:
   replicas: 1
   selector:
@@ -28,6 +28,11 @@ spec:
             configMapKeyRef:
               name: uber-clone-config
               key: http-addr
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: exporter-endpoint
         resources:
           requests:
             cpu: 100m
@@ -64,4 +69,5 @@ spec:
   ports:
   - port: 8080
     targetPort: 8080
+    nodePort: 30080
     name: http

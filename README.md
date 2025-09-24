@@ -22,7 +22,7 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-A production-ready ride-sharing application built with Go microservices, featuring real-time tracking, payment processing, and comprehensive observability.
+A production-ready ride-booking application built with Go microservices, featuring real-time tracking, payment processing, and comprehensive observability.
 
 **Key Features:**
 * Real-time trip tracking with WebSocket updates

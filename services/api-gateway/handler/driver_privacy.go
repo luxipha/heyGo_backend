@@ -14,9 +14,9 @@ import (
 	"path/filepath"
 	"time"
 
-	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/storage"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

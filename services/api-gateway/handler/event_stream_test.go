@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/gorilla/websocket"
 )
 

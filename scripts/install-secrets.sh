@@ -10,7 +10,7 @@ for name in $required; do
   fi
 done
 
-namespace="${K8S_NAMESPACE:-uber-clone}"
+namespace="${K8S_NAMESPACE:-heygo}"
 output="${SECRETS_FILE:-infra/kubernetes/dev/secrets.yaml}"
 umask 077
 

@@ -5,7 +5,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/cprakhar/uber-clone/shared/env"
+	"github.com/luxipha/heyGo_backend/shared/env"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"

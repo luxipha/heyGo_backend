@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/trip-service/types"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
-	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
+	"github.com/luxipha/heyGo_backend/services/trip-service/types"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
+	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 // KafkaClient is a wrapper around Kafka producer and consumer.

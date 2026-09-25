@@ -9,7 +9,7 @@ import (
 	"slices"
 	"time"
 
-	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

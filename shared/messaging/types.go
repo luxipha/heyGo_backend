@@ -1,8 +1,8 @@
 package messaging
 
 import (
-	pbd "github.com/cprakhar/uber-clone/shared/proto/driver"
-	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
+	pbd "github.com/luxipha/heyGo_backend/shared/proto/driver"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
 
 type TripEventData struct {

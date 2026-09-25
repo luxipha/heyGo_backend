@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	paymenttypes "github.com/cprakhar/uber-clone/services/payment-service/types"
-	shareddb "github.com/cprakhar/uber-clone/shared/db"
+	paymenttypes "github.com/luxipha/heyGo_backend/services/payment-service/types"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/google/uuid"
 )
 

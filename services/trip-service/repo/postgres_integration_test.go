@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	triptypes "github.com/cprakhar/uber-clone/services/trip-service/types"
-	shareddb "github.com/cprakhar/uber-clone/shared/db"
-	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
+	triptypes "github.com/luxipha/heyGo_backend/services/trip-service/types"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
+	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 	"github.com/google/uuid"
 )
 

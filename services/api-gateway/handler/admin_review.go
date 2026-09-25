@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/driverstate"
-	"github.com/cprakhar/uber-clone/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/driverstate"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

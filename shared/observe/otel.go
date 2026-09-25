@@ -71,7 +71,7 @@ func newMeterProvider(cfg Config, exporter metric.Exporter) (*metric.MeterProvid
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(cfg.ServiceName),
 			semconv.DeploymentEnvironmentNameKey.String(cfg.Environment),
-			semconv.ServiceNamespaceKey.String("uber-clone"),
+			semconv.ServiceNamespaceKey.String("heygo"),
 			semconv.HostArchAMD64,
 			semconv.OSTypeLinux),
 		resource.WithHost(),
@@ -111,7 +111,7 @@ func newLogProvider(cfg Config, exporter log.Exporter) (*log.LoggerProvider, err
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(cfg.ServiceName),
 			semconv.DeploymentEnvironmentNameKey.String(cfg.Environment),
-			semconv.ServiceNamespaceKey.String("uber-clone"),
+			semconv.ServiceNamespaceKey.String("heygo"),
 			semconv.HostArchAMD64,
 			semconv.OSTypeLinux),
 		resource.WithHost(),

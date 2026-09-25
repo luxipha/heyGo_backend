@@ -1,8 +1,8 @@
 package types
 
 import (
-	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
-	"github.com/cprakhar/uber-clone/shared/types"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/shared/types"
 )
 
 type PreviewTripRequest struct {

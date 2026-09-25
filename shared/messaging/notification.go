@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 type InboxNotification struct {

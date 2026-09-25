@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"

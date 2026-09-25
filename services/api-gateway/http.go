@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"time"
 
-	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
-	"github.com/cprakhar/uber-clone/services/api-gateway/handler"
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
-	"github.com/cprakhar/uber-clone/shared/storage"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/services/api-gateway/handler"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	"github.com/luxipha/heyGo_backend/shared/storage"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/statutory"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/statutory"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

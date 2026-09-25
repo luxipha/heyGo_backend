@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	shareddb "github.com/cprakhar/uber-clone/shared/db"
-	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

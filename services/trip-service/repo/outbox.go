@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/cprakhar/uber-clone/services/trip-service/types"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/observe/correlation"
+	"github.com/luxipha/heyGo_backend/services/trip-service/types"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	"github.com/jackc/pgx/v5"
 )
 

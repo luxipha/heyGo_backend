@@ -1,10 +1,10 @@
 package grpcclient
 
 import (
-	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
-	"github.com/cprakhar/uber-clone/shared/env"
-	"github.com/cprakhar/uber-clone/shared/observe/traces"
-	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	"github.com/luxipha/heyGo_backend/shared/env"
+	"github.com/luxipha/heyGo_backend/shared/observe/traces"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

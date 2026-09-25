@@ -82,7 +82,7 @@ func newTracProvider(cfg Config, exporter sdktrace.SpanExporter) (*sdktrace.Trac
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(cfg.ServiceName),
 			semconv.DeploymentEnvironmentNameKey.String(cfg.Environment),
-			semconv.ServiceNamespaceKey.String("uber-clone"),
+			semconv.ServiceNamespaceKey.String("heygo"),
 			semconv.HostArchAMD64,
 			semconv.OSTypeLinux,
 			semconv.TelemetrySDKLanguageGo,

@@ -3,7 +3,7 @@ package service
 import (
 	"testing"
 
-	triptypes "github.com/cprakhar/uber-clone/services/trip-service/types"
+	triptypes "github.com/luxipha/heyGo_backend/services/trip-service/types"
 )
 
 func TestEstimateFareRoute(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"strings"
 
-	"github.com/cprakhar/uber-clone/shared/observe/correlation"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"

@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: api-gateway
-  namespace: uber-clone
+  namespace: heygo
   labels:
     app: api-gateway
 spec:
@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: api-gateway
-        image: uber-clone/api-gateway:0.1.0
+        image: heygo/api-gateway:0.1.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
@@ -26,12 +26,12 @@ spec:
         - name: HTTP_ADDR
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: http-addr
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: exporter-endpoint
         - name: DATABASE_URL
           valueFrom:
@@ -56,34 +56,34 @@ spec:
         - name: CASPERID_TOKEN_URL
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: casperid-token-url
         - name: CASPERID_DRIVER_REDIRECT_URI
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: casperid-driver-redirect-uri
         - name: CASPERID_JWKS_URL
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: casperid-jwks-url
         - name: CASPERID_ISSUER
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: casperid-issuer
         - name: ALLOWED_ORIGINS
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: allowed-origins
         - name: KAFKA_BROKERS
-          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-brokers}}
+          valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-brokers}}
         - name: KAFKA_TOPIC_PARTITIONS
-          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-topic-partitions}}
+          valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-topic-partitions}}
         - name: KAFKA_REPLICATION_FACTOR
-          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-replication-factor}}
+          valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-replication-factor}}
         resources:
           requests:
             cpu: 100m
@@ -112,7 +112,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: api-gateway
-  namespace: uber-clone
+  namespace: heygo
 spec:
   type: LoadBalancer
   selector:

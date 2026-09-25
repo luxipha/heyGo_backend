@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

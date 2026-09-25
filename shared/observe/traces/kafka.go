@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"

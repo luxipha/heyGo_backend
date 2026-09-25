@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

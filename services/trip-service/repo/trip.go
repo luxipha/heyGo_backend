@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/cprakhar/uber-clone/services/trip-service/types"
-	pbd "github.com/cprakhar/uber-clone/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/services/trip-service/types"
+	pbd "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
 
 var (

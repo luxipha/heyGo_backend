@@ -8,15 +8,15 @@ import (
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	"github.com/cprakhar/uber-clone/services/trip-service/repo"
-	"github.com/cprakhar/uber-clone/services/trip-service/service"
-	trustclient "github.com/cprakhar/uber-clone/services/trip-service/trust"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
-	pbd "github.com/cprakhar/uber-clone/shared/proto/driver"
-	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
+	"github.com/luxipha/heyGo_backend/services/trip-service/service"
+	trustclient "github.com/luxipha/heyGo_backend/services/trip-service/trust"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	pbd "github.com/luxipha/heyGo_backend/shared/proto/driver"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
 
 type DriverConsumer struct {

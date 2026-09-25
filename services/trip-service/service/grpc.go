@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/trip-service/repo"
-	"github.com/cprakhar/uber-clone/services/trip-service/types"
-	"github.com/cprakhar/uber-clone/shared/env"
-	"github.com/cprakhar/uber-clone/shared/proto/trip"
-	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
+	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
+	"github.com/luxipha/heyGo_backend/services/trip-service/types"
+	"github.com/luxipha/heyGo_backend/shared/env"
+	"github.com/luxipha/heyGo_backend/shared/proto/trip"
+	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 	"github.com/google/uuid"
 )
 

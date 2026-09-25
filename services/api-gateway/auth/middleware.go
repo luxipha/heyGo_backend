@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 )
 

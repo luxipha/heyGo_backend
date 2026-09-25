@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/adminauth"
-	"github.com/cprakhar/uber-clone/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/adminauth"
+	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/google/uuid"
 	"golang.org/x/term"
 )

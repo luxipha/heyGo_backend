@@ -7,8 +7,8 @@ import (
 	"net/mail"
 	"strings"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/repo"
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

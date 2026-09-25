@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 )
 
 func TestMonnifyCheckoutFlow(t *testing.T) {

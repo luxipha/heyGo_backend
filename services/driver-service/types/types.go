@@ -1,7 +1,7 @@
 package types
 
 import (
-	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
+	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 )
 
 type DriverModel struct {

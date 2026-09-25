@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	tripproto "github.com/cprakhar/uber-clone/shared/proto/trip"
+	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
 
 func TestMergeNoShowDebtOfferFields(t *testing.T) {

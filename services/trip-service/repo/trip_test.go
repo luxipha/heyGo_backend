@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	triptypes "github.com/cprakhar/uber-clone/services/trip-service/types"
-	tripproto "github.com/cprakhar/uber-clone/shared/proto/trip"
+	triptypes "github.com/luxipha/heyGo_backend/services/trip-service/types"
+	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	"github.com/google/uuid"
 )
 

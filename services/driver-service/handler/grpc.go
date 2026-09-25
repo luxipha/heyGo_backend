@@ -3,9 +3,9 @@ package handler
 import (
 	"context"
 
-	"github.com/cprakhar/uber-clone/services/driver-service/service"
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
-	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
+	"github.com/luxipha/heyGo_backend/services/driver-service/service"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

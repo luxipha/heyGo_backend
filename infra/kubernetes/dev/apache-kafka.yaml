@@ -2,7 +2,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: kafka-pvc
-  namespace: uber-clone
+  namespace: heygo
 spec:
   resources:
     requests:
@@ -15,7 +15,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: apache-kafka
-  namespace: uber-clone
+  namespace: heygo
   labels:
     app: apache-kafka
 spec:
@@ -35,7 +35,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: apache-kafka
-  namespace: uber-clone
+  namespace: heygo
   labels:
     app: apache-kafka
 spec:
@@ -75,13 +75,13 @@ spec:
             - name: KAFKA_LISTENERS
               value: "PLAINTEXT://:9092,CONTROLLER://:9093"
             - name: KAFKA_ADVERTISED_LISTENERS
-              value: "PLAINTEXT://apache-kafka-0.apache-kafka.uber-clone.svc.cluster.local:9092"
+              value: "PLAINTEXT://apache-kafka-0.apache-kafka.heygo.svc.cluster.local:9092"
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
               value: "CONTROLLER"
             - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
               value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-              value: "1@apache-kafka-0.apache-kafka.uber-clone.svc.cluster.local:9093"
+              value: "1@apache-kafka-0.apache-kafka.heygo.svc.cluster.local:9093"
             - name: KAFKA_LOG_DIRS
               value: "/var/lib/kafka/data"
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR

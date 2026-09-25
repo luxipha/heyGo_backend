@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
-	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
-	shareddb "github.com/cprakhar/uber-clone/shared/db"
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/google/uuid"
 )
 

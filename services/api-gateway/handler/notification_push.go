@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

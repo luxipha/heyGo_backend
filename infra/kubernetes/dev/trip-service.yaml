@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: trip-service
-  namespace: uber-clone
+  namespace: heygo
   labels:
     app: trip-service
 spec:
@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: trip-service
-        image: uber-clone/trip-service:0.1.0
+        image: heygo/trip-service:0.1.0
         imagePullPolicy: IfNotPresent
         ports:
           - containerPort: 9000
@@ -48,7 +48,7 @@ spec:
         - name: CASPERID_BASE_URL
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: casperid-base-url
         - name: DATABASE_URL
           valueFrom:
@@ -63,14 +63,14 @@ spec:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           valueFrom:
             configMapKeyRef:
-              name: uber-clone-config
+              name: heygo-config
               key: exporter-endpoint
         - name: KAFKA_BROKERS
-          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-brokers}}
+          valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-brokers}}
         - name: KAFKA_TOPIC_PARTITIONS
-          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-topic-partitions}}
+          valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-topic-partitions}}
         - name: KAFKA_REPLICATION_FACTOR
-          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-replication-factor}}
+          valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-replication-factor}}
         readinessProbe:
           grpc: {port: 9000}
           initialDelaySeconds: 10
@@ -84,7 +84,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: trip-service
-  namespace: uber-clone
+  namespace: heygo
 spec:
   selector:
     app: trip-service

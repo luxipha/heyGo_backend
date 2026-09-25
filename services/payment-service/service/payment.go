@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/repo"
-	"github.com/cprakhar/uber-clone/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 	"github.com/google/uuid"
 )
 

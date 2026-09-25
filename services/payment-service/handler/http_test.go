@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/types"
-	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 func TestValidMonnifySignature(t *testing.T) {

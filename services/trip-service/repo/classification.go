@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	triptypes "github.com/cprakhar/uber-clone/services/trip-service/types"
-	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
+	triptypes "github.com/luxipha/heyGo_backend/services/trip-service/types"
+	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 	"github.com/jackc/pgx/v5"
 )
 

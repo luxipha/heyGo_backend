@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	shareddb "github.com/cprakhar/uber-clone/shared/db"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/google/uuid"
 )
 

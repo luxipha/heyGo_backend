@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 )
 
 var ErrNotFound = errors.New("payment not found")

@@ -7,8 +7,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/statutory"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/statutory"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )

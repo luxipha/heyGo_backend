@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	paymentrepo "github.com/cprakhar/uber-clone/services/payment-service/repo"
-	shareddb "github.com/cprakhar/uber-clone/shared/db"
+	paymentrepo "github.com/luxipha/heyGo_backend/services/payment-service/repo"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/google/uuid"
 )
 

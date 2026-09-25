@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

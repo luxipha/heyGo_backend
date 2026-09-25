@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/driver-service/repo"
-	driverpb "github.com/cprakhar/uber-clone/shared/proto/driver"
-	trippb "github.com/cprakhar/uber-clone/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/services/driver-service/repo"
+	driverpb "github.com/luxipha/heyGo_backend/shared/proto/driver"
+	trippb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
 
 type matchingRepo struct {

@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/observe/correlation"
-	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

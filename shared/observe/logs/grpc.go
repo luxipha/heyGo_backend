@@ -2,7 +2,7 @@ package logs
 
 import (
 	"context"
-	"github.com/cprakhar/uber-clone/shared/observe/correlation"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	"time"
 
 	"google.golang.org/grpc"

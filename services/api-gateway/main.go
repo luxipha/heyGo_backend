@@ -9,17 +9,17 @@ import (
 	"syscall"
 	"time"
 
-	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
-	"github.com/cprakhar/uber-clone/services/api-gateway/handler"
-	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/db"
-	"github.com/cprakhar/uber-clone/shared/env"
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
-	"github.com/cprakhar/uber-clone/shared/observe/traces"
-	"github.com/cprakhar/uber-clone/shared/storage"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/services/api-gateway/handler"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/env"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	"github.com/luxipha/heyGo_backend/shared/observe/traces"
+	"github.com/luxipha/heyGo_backend/shared/storage"
 )
 
 var (

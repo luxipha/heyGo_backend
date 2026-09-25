@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/driver-service/repo"
-	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
-	tripproto "github.com/cprakhar/uber-clone/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/services/driver-service/repo"
+	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
+	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
 
 type driverService struct {

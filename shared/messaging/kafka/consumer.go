@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/observe/correlation"
-	"github.com/cprakhar/uber-clone/shared/observe/traces"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
+	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 )
 
 // Consumer wraps a Kafka consumer.

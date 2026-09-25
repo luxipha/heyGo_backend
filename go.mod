@@ -1,4 +1,4 @@
-module github.com/cprakhar/uber-clone
+module github.com/luxipha/heyGo_backend
 
 go 1.24.2
 

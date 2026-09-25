@@ -8,17 +8,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cprakhar/uber-clone/services/trip-service/events"
-	"github.com/cprakhar/uber-clone/services/trip-service/repo"
-	"github.com/cprakhar/uber-clone/services/trip-service/service"
-	trustclient "github.com/cprakhar/uber-clone/services/trip-service/trust"
-	"github.com/cprakhar/uber-clone/shared/contracts"
-	"github.com/cprakhar/uber-clone/shared/db"
-	"github.com/cprakhar/uber-clone/shared/env"
-	"github.com/cprakhar/uber-clone/shared/messaging"
-	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
-	"github.com/cprakhar/uber-clone/shared/observe/logs"
-	"github.com/cprakhar/uber-clone/shared/observe/traces"
+	"github.com/luxipha/heyGo_backend/services/trip-service/events"
+	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
+	"github.com/luxipha/heyGo_backend/services/trip-service/service"
+	trustclient "github.com/luxipha/heyGo_backend/services/trip-service/trust"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/env"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 )
 
 var (

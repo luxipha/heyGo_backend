@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	grpcclient "github.com/luxipha/heyGo_backend/services/api-gateway/grpc-client"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
@@ -14,9 +17,6 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	driverpb "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	"github.com/luxipha/heyGo_backend/shared/storage"
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type driverAPI struct {
@@ -40,6 +40,7 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.POST("/documents/:id/resubmit", api.submitDocument)
 	driver.GET("/inspection", api.inspection)
 	driver.GET("/dashboard", api.dashboard)
+	driver.GET("/earnings", api.earnings)
 	driver.GET("/operating-balance", api.operatingBalance)
 	driver.GET("/operating-balance/transactions", api.operatingBalanceTransactions)
 	driver.POST("/operating-balance/topups", api.createOperatingTopup)

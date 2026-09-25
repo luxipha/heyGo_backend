@@ -18,9 +18,23 @@ system. The target app contract is
 | Operating Balance | Admin-approved market minimum/warning/negative and top-up bounds; 30-minute GPS rule for online, matching and offline top-ups; balance read; driver-scoped, cursor-paginated ledger history; Monnify checkout initiation and status read; authenticated webhook with server-side verification and idempotent ledger credit. No policy or statutory rate is seeded. |
 | Statutory charges | Admin draft/list/detail/two-person approval/retirement routes; validated fixed, percentage, progressive-tier and restricted-formula calculations; market/region/tag/package selection; whole-naira upward rounding; completion-time snapshots and Operating Balance debits; unpaid charge tracking, balance-floor enforcement, arrears-first confirmed top-ups, and eligibility blocking. No statutory rule or rate is seeded. |
 | Trip, history, receipt, and earnings core | Driver-started trip with no prepayment; recorded arrival; queued completion/cancellation/rating commands; validated Driver-authored feedback tags; rider-authored optional comments up to 250 characters; one-star Rider ratings are flagged for Admin review; cursor-paginated Driver reviews/comments and Admin review queue; driver-scoped active-trip/detail reads; cursor-paginated trip history with cancellation actor and no-show claim status; completed-trip receipt read; one-time completed-trip earnings accrual; Today's Earnings in the Africa/Lagos calendar. Completion atomically opens a pending direct-payment settlement for the rounded trip fare. Driver can read it and manually confirm or dispute; events are transactional. This records the driver's assertion only, without bank verification. |
+| Driver earnings reports | `GET /driver/earnings?period=day|week|month` returns accrued fare, commission, earnings, completed trips, average per day, zero bonus amount, prior-period totals and aligned chart series in the Africa/Lagos calendar. Day compares with the same elapsed hours yesterday; week compares rolling seven-day windows; month-to-date compares the same elapsed dates in the prior month. This is reporting over completed-trip accruals, not a payout or Operating Balance. |
 | Account and privacy | Driver performance percentile (among drivers with at least 25 Rider ratings), profile/vehicle/package, and safety-contact APIs; account preferences are not yet implemented. Driver export creates a private ZIP of HeyGo records and private documents, emails a seven-day link to the CasperID-verified email through Admin-configured Resend, and exposes request status. Account deletion is a pending staff-reviewed request; approval blocks active trips/offers, deactivates the account, removes/anonymizes personal profile data, preserves trip/financial records, tombstones CasperID identity hashes, and queues private R2 objects for deletion. CasperID's signed `email_verified: true` claim is required for export. |
 | Notifications and devices | Paginated Driver inbox/unread count, mark-one/all-read, owner-scoped device routes, and durable `notification.created` events. Document/inspection/approval, trip/settlement, no-show, top-up and statutory balance events enqueue inbox and socket notifications transactionally. FCM HTTP v1 worker claims deliveries with leases, retries transient errors, and removes unregistered device tokens. Credentials use a mounted Firebase service-account JSON file via `FCM_SERVICE_ACCOUNT_FILE` and optional `FCM_PROJECT_ID`. |
 | Rider-driver chat | Text-only trip message history/send/read APIs for the rider and accepted driver; active-trip send gate, participant authorization, duplicate client-message protection, read receipts, 30-day read-only post-trip access, and durable `trip.message.created` / `trip.message.read` events using the shared event log. Masked calls are deferred until a telephony provider is selected. |
+| Rider/Driver issues and support | Shared support topics; trip-linked issue reporting and general support cases; private R2 evidence reservations and ownership-checked completed uploads; cursor-paginated cases and case messages; idempotent case messaging; read receipts; durable user events for case creation and staff replies/status changes. HeyGo staff can list/search by status, read and reply, assign cases, change status, manage topics, and mark messages read. Staff replies and case/topic changes are written to the Admin audit log. |
+
+The authenticated Rider/Driver routes are `GET /support/topics?kind=support|trip_issue`,
+`POST /support/uploads`, `POST /support/tickets`, `POST /trips/:tripID/issues`,
+`GET /support/cases`, `GET /support/cases/:caseID`,
+`GET /support/cases/:caseID/messages?cursor=&limit=`,
+`POST /support/cases/:caseID/messages`, and
+`POST /support/cases/:caseID/read`. Admin routes under `/admin` are
+`GET/POST /support/topics`, `PATCH /support/topics/:code`,
+`GET /support/cases`, `GET /support/cases/:caseID`,
+`GET /support/cases/:caseID/messages`, `POST /support/cases/:caseID/messages`,
+`PATCH /support/cases/:caseID`, and `POST /support/cases/:caseID/read`.
+Admin mutations use the staff session and CSRF protections.
 
 ## Still to implement
 
@@ -36,9 +50,13 @@ system. The target app contract is
    queued command; read settlement after `trip.event.completed`. The plural mutation routes exist;
    unused singular lifecycle aliases have been removed; rider preview/start
    paths remain because `apps/web` calls them.
-3. **Remaining Driver APIs:** earnings history/charts, the wallet or payout
-   features confirmed for direct rider-to-driver payment, masked contact,
-   issues/support, and account preferences. Trip chat is implemented. Account export/deletion APIs are
+3. **Remaining Driver APIs:** masked contact,
+   and account preferences. A separate Driver Wallet, payout-account, and
+   withdrawal API are not required for the current direct rider-to-driver
+   payment model: per-trip manual confirmation/dispute and the distinct
+   Operating Balance APIs cover the agreed launch flows. Revisit payouts only
+   if HeyGo later collects rider fares or becomes responsible for paying
+   drivers. Trip chat and support APIs are implemented. Account export/deletion APIs are
    implemented; the Admin UI still needs to call the Resend-configuration and
    deletion-review endpoints. Rider name/photo in offers await CasperID's exact
    profile contract.

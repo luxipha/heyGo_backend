@@ -58,6 +58,7 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	registerAdminStatutoryChargeRoutes(admin, api)
 	registerNoShowAdminRoutes(admin, api)
 	registerAdminPrivacyRoutes(admin, api)
+	registerAdminSupportRoutes(admin, pool, files, api.requireCSRF)
 }
 
 func adminTokenHash(raw string) string {

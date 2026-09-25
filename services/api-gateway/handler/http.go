@@ -57,6 +57,7 @@ func NewHTTPHandler(kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager
 	authenticated.POST("/auth/register", func(ctx *gin.Context) { registerRoleHandler(ctx, users) })
 	registerDeviceRoutes(authenticated, pool)
 	registerDriverRoutes(authenticated, pool, files)
+	registerSupportRoutes(authenticated, pool, files)
 	registerNoShowRiderRoutes(authenticated, pool)
 	riderRatings := authenticated.Group("/rider", gatewayauth.RequireRole("rider"))
 	riderRatings.POST("/trips/:tripID/rating", func(ctx *gin.Context) {

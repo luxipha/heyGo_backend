@@ -10,7 +10,9 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/cprakhar/uber-clone/shared/observe/correlation"
 	"github.com/cprakhar/uber-clone/shared/observe/traces"
+	"github.com/google/uuid"
 )
 
 type Producer struct {
@@ -59,6 +61,7 @@ func newProducer(brokers []string) (*Producer, error) {
 }
 
 func (p *Producer) SendMessage(ctx context.Context, topic string, message *contracts.KafkaMessage) error {
+	p.prepare(ctx, message)
 	data, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to marshal the message: %w", err)
@@ -74,8 +77,10 @@ func (p *Producer) SendMessage(ctx context.Context, topic string, message *contr
 }
 
 func (p *Producer) SendMessageAndWait(ctx context.Context, topic string, message *contracts.KafkaMessage, timeout time.Duration) error {
-	deliveryChan := make(chan kafka.Event)
-	defer close(deliveryChan)
+	p.prepare(ctx, message)
+	// The producer may send a delivery report after a timeout. Never close a
+	// per-message delivery channel while librdkafka still owns that send.
+	deliveryChan := make(chan kafka.Event, 1)
 
 	data, err := json.Marshal(message)
 	if err != nil {
@@ -102,6 +107,44 @@ func (p *Producer) SendMessageAndWait(ctx context.Context, topic string, message
 		}
 		return nil
 	case <-time.After(timeout):
+		return context.DeadlineExceeded
+	}
+}
+
+func (p *Producer) prepare(ctx context.Context, message *contracts.KafkaMessage) {
+	if message.Version == "" {
+		message.Version = contracts.EventSchemaVersion
+	}
+	if message.EventID == "" {
+		message.EventID = uuid.NewString()
+	}
+	if message.CorrelationID == "" {
+		message.CorrelationID = correlation.FromContext(ctx)
+	}
+}
+
+func (p *Producer) SendDeadLetter(ctx context.Context, sourceTopic string, message *kafka.Message, handlerErr error) error {
+	topic := sourceTopic + ".dlq"
+	headers := append([]kafka.Header(nil), message.Headers...)
+	headers = append(headers, kafka.Header{Key: "x-source-topic", Value: []byte(sourceTopic)}, kafka.Header{Key: "x-error", Value: []byte(handlerErr.Error())})
+	dlq := &kafka.Message{TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny}, Key: message.Key, Value: message.Value, Headers: headers}
+	delivery := make(chan kafka.Event, 1)
+	if err := p.pr.Produce(dlq, delivery); err != nil {
+		return fmt.Errorf("produce dead-letter message: %w", err)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case event := <-delivery:
+		delivered, ok := event.(*kafka.Message)
+		if !ok {
+			return fmt.Errorf("unexpected dead-letter delivery event")
+		}
+		if delivered.TopicPartition.Error != nil {
+			return fmt.Errorf("deliver dead-letter message: %w", delivered.TopicPartition.Error)
+		}
+		return nil
+	case <-time.After(10 * time.Second):
 		return context.DeadlineExceeded
 	}
 }

@@ -6,30 +6,44 @@ import (
 	"net/http"
 	"time"
 
+	gatewayauth "github.com/cprakhar/uber-clone/services/api-gateway/auth"
 	"github.com/cprakhar/uber-clone/services/api-gateway/handler"
 	"github.com/cprakhar/uber-clone/shared/messaging"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
 	"github.com/cprakhar/uber-clone/shared/observe/logs"
+	"github.com/cprakhar/uber-clone/shared/storage"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type httpServer struct {
 	addr        string
 	kfClient    *kafka.KafkaClient
 	connManager *messaging.ConnectionManager
+	auth        *gatewayauth.Middleware
+	users       gatewayauth.UserStore
+	pool        *pgxpool.Pool
+	files       storage.ObjectStore
+	origins     []string
+	oauth       handler.CasperIDOAuthConfig
+	readiness   func(context.Context) error
 }
 
 // NewhttpServer creates a new http server instance
-func NewhttpServer(addr string, kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager) *httpServer {
-	return &httpServer{addr: addr, kfClient: kfc, connManager: connMgr}
+func NewhttpServer(addr string, kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, origins []string, oauth handler.CasperIDOAuthConfig, readiness func(context.Context) error) *httpServer {
+	return &httpServer{addr: addr, kfClient: kfc, connManager: connMgr, auth: authMiddleware, users: users, pool: pool, files: files, origins: origins, oauth: oauth, readiness: readiness}
 }
 
 // run starts the http server
 func (s *httpServer) run(ctx context.Context) error {
 	// http server setup
-	h := handler.NewHTTPHandler(s.kfClient, s.connManager)
+	h := handler.NewHTTPHandler(s.kfClient, s.connManager, s.auth, s.users, s.pool, s.files, s.origins, s.oauth, s.readiness)
 	srv := &http.Server{
-		Addr:    s.addr,
-		Handler: h,
+		Addr:              s.addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Start the server in a separate goroutine

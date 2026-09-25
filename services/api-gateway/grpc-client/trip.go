@@ -1,6 +1,7 @@
 package grpcclient
 
 import (
+	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
 	"github.com/cprakhar/uber-clone/shared/env"
 	"github.com/cprakhar/uber-clone/shared/observe/traces"
 	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
@@ -21,6 +22,7 @@ func NewTripServiceClient() (*tripServiceClient, error) {
 		append(
 			traces.DialOptionsWithTracing(),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithUnaryInterceptor(sharedauth.UnaryClientInterceptor(env.GetString("INTERNAL_SERVICE_TOKEN", ""))),
 		)...,
 	)
 	if err != nil {

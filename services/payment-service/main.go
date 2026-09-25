@@ -6,11 +6,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cprakhar/uber-clone/services/payment-service/events"
+	"github.com/cprakhar/uber-clone/services/payment-service/handler"
+	"github.com/cprakhar/uber-clone/services/payment-service/repo"
 	"github.com/cprakhar/uber-clone/services/payment-service/service"
 	"github.com/cprakhar/uber-clone/services/payment-service/types"
 	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/cprakhar/uber-clone/shared/db"
 	"github.com/cprakhar/uber-clone/shared/env"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
 	"github.com/cprakhar/uber-clone/shared/observe/logs"
@@ -18,10 +22,11 @@ import (
 )
 
 var (
-	brokers = []string{"apache-kafka:9092"}
-	groupID = "payment-service-group"
-	appURL  = env.GetString("APP_URL", "http://localhost:3000")
-	topics  = []string{contracts.PaymentCmdCreateSession}
+	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
+	groupID  = "payment-service-group"
+	appURL   = env.GetString("APP_URL", "http://localhost:3000")
+	httpAddr = env.GetString("PAYMENT_HTTP_ADDR", ":9200")
+	topics   = []string{contracts.PaymentCmdCreateSession}
 )
 
 func main() {
@@ -61,19 +66,45 @@ func main() {
 	}
 	defer kfClient.Close()
 	logs.L().Info("Kafka client connected")
-
-	stripeCfg := &types.PaymentConfig{
-		StripeSecretKey: env.GetString("STRIPE_SECRET_KEY", ""),
-		SuccessURL:      env.GetString("STRIPE_SUCCESS_URL", appURL+"?payment=success"),
-		CancelURL:       env.GetString("STRIPE_CANCEL_URL", appURL+"?payment=cancel"),
+	if err := kfClient.EnsureTopics(ctx, brokers, kafka.DefaultTopics(), env.GetInt("KAFKA_TOPIC_PARTITIONS", 3), env.GetInt("KAFKA_REPLICATION_FACTOR", 1)); err != nil {
+		logs.L().Fatalw("Failed to provision Kafka topics", "error", err)
 	}
 
-	if stripeCfg.StripeSecretKey == "" {
-		logs.L().Fatal("STRIPE_SECRET_KEY is not set")
+	paymentCfg := &types.PaymentConfig{
+		BaseURL:      env.GetString("MONNIFY_BASE_URL", "https://sandbox.monnify.com"),
+		APIKey:       env.GetString("MONNIFY_API_KEY", ""),
+		SecretKey:    env.GetString("MONNIFY_SECRET_KEY", ""),
+		ContractCode: env.GetString("MONNIFY_CONTRACT_CODE", ""),
+		RedirectURL:  env.GetString("MONNIFY_REDIRECT_URL", appURL+"?payment=pending"),
 	}
 
-	paymentProcessor := service.NewStripeClient(stripeCfg)
-	paymentService := service.NewPaymentService(paymentProcessor)
+	if paymentCfg.APIKey == "" || paymentCfg.SecretKey == "" || paymentCfg.ContractCode == "" {
+		logs.L().Fatal("MONNIFY_API_KEY, MONNIFY_SECRET_KEY, and MONNIFY_CONTRACT_CODE are required")
+	}
+	internalServiceToken := env.GetString("INTERNAL_SERVICE_TOKEN", "")
+	if internalServiceToken == "" {
+		logs.L().Fatal("INTERNAL_SERVICE_TOKEN is required")
+	}
+
+	databaseURL := env.GetString("DATABASE_URL", "")
+	if databaseURL == "" {
+		logs.L().Fatal("DATABASE_URL is required")
+	}
+	databasePool, err := db.NewPostgresPool(ctx, db.Config{
+		URL: databaseURL, MaxConnIdleTime: 30 * time.Second,
+		MaxConns: 20, MinConns: 1,
+	})
+	if err != nil {
+		logs.L().Fatalw("Failed to connect to PostgreSQL", "error", err)
+	}
+	defer databasePool.Close()
+	if err := db.Migrate(ctx, databasePool); err != nil {
+		logs.L().Fatalw("Failed to run PostgreSQL/PostGIS migrations", "error", err)
+	}
+	paymentRepo := repo.NewPostgresPaymentRepository(databasePool)
+
+	paymentProcessor := service.NewMonnifyClient(paymentCfg)
+	paymentService := service.NewPaymentService(paymentProcessor, paymentRepo)
 
 	tripConsumer := events.NewTripConsumer(kfClient, paymentService)
 	go func() {
@@ -81,6 +112,25 @@ func main() {
 			logs.L().Warnw("Error consuming payment topics", "error", err)
 		}
 		stop()
+	}()
+
+	readiness := func(checkCtx context.Context) error {
+		if err := databasePool.Ping(checkCtx); err != nil {
+			return err
+		}
+		if err := kfClient.Ping(checkCtx); err != nil {
+			return err
+		}
+		return paymentProcessor.Ping(checkCtx)
+	}
+	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, kfClient,
+		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
+			Initializer: paymentProcessor, Verifier: paymentProcessor}, readiness)
+	go func() {
+		if err := handler.ListenAndServe(ctx.Done(), httpAddr, router); err != nil && ctx.Err() == nil {
+			logs.L().Errorw("Payment HTTP server failed", "error", err)
+			stop()
+		}
 	}()
 
 	<-ctx.Done()

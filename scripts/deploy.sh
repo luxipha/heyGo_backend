@@ -4,16 +4,19 @@ set -e
 
 echo "Deploying to Kubernetes cluster..."
 
-kubectl apply -f k8s/dev/namespace.yaml
-sleep 2
-kubectl apply -f k8s/dev/secrets.yaml
-
-kubectl apply -n uber-clone -f k8s/dev/
+kubectl apply -f infra/kubernetes/dev/namespace.yaml
+kubectl apply -f infra/kubernetes/dev/secrets.yaml
+kubectl apply -f infra/kubernetes/dev/apache-kafka.yaml
+kubectl apply -f infra/kubernetes/dev/api-gateway.yaml
+kubectl apply -f infra/kubernetes/dev/trip-service.yaml
+kubectl apply -f infra/kubernetes/dev/driver-service.yaml
+kubectl apply -f infra/kubernetes/dev/payment-service.yaml
 
 echo "Waiting for deployments to be ready..."
-kubectl wait --for=condition=available deployment/api-gateway -n uber-clone --timeout=300s || true
-kubectl wait --for=condition=available deployment/trip-service -n uber-clone --timeout=300s || true
-kubectl wait --for=condition=available deployment/driver-service -n uber-clone --timeout=300s || true
-kubectl wait --for=condition=available deployment/payment-service -n uber-clone --timeout=300s || true
+kubectl rollout status statefulset/apache-kafka -n uber-clone --timeout=300s
+kubectl rollout status deployment/api-gateway -n uber-clone --timeout=300s
+kubectl rollout status deployment/trip-service -n uber-clone --timeout=300s
+kubectl rollout status deployment/driver-service -n uber-clone --timeout=300s
+kubectl rollout status deployment/payment-service -n uber-clone --timeout=300s
 
 echo "✅ Deployment completed successfully!"

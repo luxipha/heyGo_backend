@@ -1,4 +1,12 @@
 secrets.yaml
+.DS_Store
 
 # Environment variables
 .env
+.env.local
+
+# Local dev artifacts (scripts/dev.sh, air)
+.dev/
+tmp/
+coverage.out
+/trip-service

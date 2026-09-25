@@ -1,0 +1,7 @@
+.git
+.dev
+tmp
+.env
+.env.*
+coverage.out
+trip-service

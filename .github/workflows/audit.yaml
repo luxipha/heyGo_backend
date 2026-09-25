@@ -8,25 +8,51 @@ on:
 jobs:
     audit:
         runs-on: ubuntu-latest
+        services:
+            postgres:
+                image: postgis/postgis:16-3.4
+                env:
+                    POSTGRES_USER: heygo
+                    POSTGRES_PASSWORD: heygo-test
+                    POSTGRES_DB: heygo_test
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd "pg_isready -U heygo -d heygo_test"
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+        env:
+            TEST_DATABASE_URL: postgres://heygo:heygo-test@localhost:5432/heygo_test?sslmode=disable
         steps:
             - uses: actions/checkout@v5
+            - name: Install native dependencies
+              run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
             - name: Set up Go
               uses: actions/setup-go@v6
               with:
-                go-version: 1.25.1
+                go-version-file: go.mod
 
             - name: Verify dependencies
               run: go mod verify
-            
+
             - name: Build
               run: go build -v ./...
 
+            - name: Run tests
+              run: go test -race -coverprofile=coverage.out ./...
+
             - name: Run go vet
               run: go vet ./...
-            
+
             - name: Install staticcheck
-              run: go install honnef.co/go/tools/cmd/staticcheck@latest
+              run: go install honnef.co/go/tools/cmd/staticcheck@v0.6.1
             
             - name: Run staticcheck
               run: staticcheck ./...
-  
+
+            - name: Install govulncheck
+              run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+            - name: Run vulnerability scan
+              run: govulncheck ./...

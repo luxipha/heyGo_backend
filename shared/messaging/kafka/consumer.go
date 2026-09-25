@@ -2,27 +2,34 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/cprakhar/uber-clone/shared/contracts"
+	"github.com/cprakhar/uber-clone/shared/observe/correlation"
 	"github.com/cprakhar/uber-clone/shared/observe/traces"
 )
 
 // Consumer wraps a Kafka consumer.
 type Consumer struct {
-	cr *kafka.Consumer // Kafka consumer instance
+	cr         *kafka.Consumer // Kafka consumer instance
+	producer   *Producer
+	maxRetries int
 }
 
 // NewConsumer creates a confluent consumer with safe defaults.
-func newConsumer(brokers []string, groupID string) (*Consumer, error) {
+func newConsumer(brokers []string, groupID string, producer *Producer) (*Consumer, error) {
 	cfg := &kafka.ConfigMap{
 		"bootstrap.servers":        strings.Join(brokers, ","),
 		"group.id":                 groupID,
 		"auto.offset.reset":        "earliest",
 		"enable.auto.commit":       false,
 		"session.timeout.ms":       6000,
-		"allow.auto.create.topics": true,
+		"allow.auto.create.topics": false,
 	}
 
 	cr, err := kafka.NewConsumer(cfg)
@@ -30,7 +37,7 @@ func newConsumer(brokers []string, groupID string) (*Consumer, error) {
 		return nil, err
 	}
 
-	return &Consumer{cr: cr}, nil
+	return &Consumer{cr: cr, producer: producer, maxRetries: 3}, nil
 }
 
 // MessageHandler defines the function signature for processing Kafka messages.
@@ -53,9 +60,45 @@ func (c *Consumer) SubscribeAndConsume(ctx context.Context, topics []string, han
 			}
 			switch ev := e.(type) {
 			case *kafka.Message:
-				if err := traces.TracedConsumer(ev, handler); err != nil {
-					log.Printf("Error handling message: %v", err)
+				var envelope contracts.KafkaMessage
+				if err := json.Unmarshal(ev.Value, &envelope); err != nil || envelope.Validate() != nil {
+					if err == nil {
+						err = envelope.Validate()
+					}
+					if dlqErr := c.producer.SendDeadLetter(ctx, *ev.TopicPartition.Topic, ev, err); dlqErr != nil {
+						return fmt.Errorf("publish invalid message to DLQ: %w", dlqErr)
+					}
+					if _, err := c.cr.CommitMessage(ev); err != nil {
+						return err
+					}
 					continue
+				}
+				if err := contracts.ValidateTopicPayload(*ev.TopicPartition.Topic, envelope.Data); err != nil {
+					if dlqErr := c.producer.SendDeadLetter(correlation.WithID(ctx, envelope.CorrelationID), *ev.TopicPartition.Topic, ev, err); dlqErr != nil {
+						return fmt.Errorf("publish invalid payload to DLQ: %w", dlqErr)
+					}
+					if _, err := c.cr.CommitMessage(ev); err != nil {
+						return err
+					}
+					continue
+				}
+				var handlerErr error
+				for attempt := 0; attempt <= c.maxRetries; attempt++ {
+					handlerErr = traces.TracedConsumer(ev, func(traceCtx context.Context, msg *kafka.Message) error {
+						return handler(correlation.WithID(traceCtx, envelope.CorrelationID), msg)
+					})
+					if handlerErr == nil {
+						break
+					}
+					if attempt < c.maxRetries {
+						time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+					}
+				}
+				if handlerErr != nil {
+					log.Printf("Message handler exhausted retries: %v", handlerErr)
+					if err := c.producer.SendDeadLetter(correlation.WithID(ctx, envelope.CorrelationID), *ev.TopicPartition.Topic, ev, handlerErr); err != nil {
+						return err
+					}
 				}
 				if ev.Headers != nil {
 					log.Printf("Headers: %v\n", ev.Headers)

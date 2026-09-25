@@ -1,0 +1,18 @@
+groups:
+  - name: heygo-backend
+    rules:
+      - alert: HeyGoHighHTTPErrorRate
+        expr: sum(rate(heygo_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(heygo_http_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "HeyGo HTTP 5xx rate exceeds 5%"}
+      - alert: HeyGoHighHTTPP95Latency
+        expr: histogram_quantile(0.95, sum by (le,service) (rate(heygo_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "HeyGo HTTP p95 latency exceeds one second"}
+      - alert: HeyGoServiceDown
+        expr: up{job=~"heygo-.*"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "A HeyGo backend target is down"}

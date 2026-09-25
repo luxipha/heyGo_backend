@@ -2,6 +2,7 @@ package logs
 
 import (
 	"context"
+	"github.com/cprakhar/uber-clone/shared/observe/correlation"
 	"time"
 
 	"google.golang.org/grpc"
@@ -30,6 +31,9 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		requestFields := map[string]interface{}{
 			"method":  info.FullMethod,
 			"service": extractService(info.FullMethod),
+		}
+		if correlationID := correlation.FromContext(ctx); correlationID != "" {
+			requestFields["correlationID"] = correlationID
 		}
 
 		responseFields := map[string]interface{}{

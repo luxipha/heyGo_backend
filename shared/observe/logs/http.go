@@ -1,9 +1,12 @@
 package logs
 
 import (
+	"strings"
 	"time"
 
+	"github.com/cprakhar/uber-clone/shared/observe/correlation"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // HTTPLoggingMiddleware returns a handler that logs structured request/response data.
@@ -23,10 +26,13 @@ func HTTPLoggingMiddleware(c *gin.Context) {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	reqID := r.Header.Get("X-Request-ID")
-	if reqID == "" {
-		reqID = "-"
+	reqID := strings.TrimSpace(r.Header.Get("X-Correlation-ID"))
+	if reqID == "" || len(reqID) > 128 {
+		reqID = uuid.NewString()
 	}
+	r = r.WithContext(correlation.WithID(r.Context(), reqID))
+	c.Request = r
+	c.Header("X-Correlation-ID", reqID)
 
 	remoteIP := c.ClientIP()
 	ua := r.UserAgent()

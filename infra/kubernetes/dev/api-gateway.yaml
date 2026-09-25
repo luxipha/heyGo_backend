@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: uber-clone
+  labels:
+    app: api-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+      - name: api-gateway
+        image: uber-clone/api-gateway:0.1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: HTTP_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: http-addr
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: exporter-endpoint
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres
+              key: url
+        - name: INTERNAL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: postgres
+              key: internal-service-token
+        - name: CASPERID_APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: casperid
+              key: app-id
+        - name: CASPERID_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: casperid
+              key: api-secret
+        - name: CASPERID_TOKEN_URL
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: casperid-token-url
+        - name: CASPERID_DRIVER_REDIRECT_URI
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: casperid-driver-redirect-uri
+        - name: CASPERID_JWKS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: casperid-jwks-url
+        - name: CASPERID_ISSUER
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: casperid-issuer
+        - name: ALLOWED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: allowed-origins
+        - name: KAFKA_BROKERS
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-brokers}}
+        - name: KAFKA_TOPIC_PARTITIONS
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-topic-partitions}}
+        - name: KAFKA_REPLICATION_FACTOR
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-replication-factor}}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 20
+          timeoutSeconds: 10
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: uber-clone
+spec:
+  type: LoadBalancer
+  selector:
+    app: api-gateway
+  ports:
+  - port: 8080
+    targetPort: 8080
+    nodePort: 30080
+    name: http

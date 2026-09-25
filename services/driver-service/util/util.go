@@ -20,7 +20,6 @@ func GenerateRandomPlate() string {
 	return plate
 }
 
-
 // Predefined routes for drivers (used for the gRPC Streaming module)
 // (these are San Francisco routes, get these coordinates from Google Maps for example and build a custom route if you want)
 var PredefinedRoutes = [][][]float64{

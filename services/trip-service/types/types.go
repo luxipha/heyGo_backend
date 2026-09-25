@@ -2,11 +2,11 @@ package types
 
 import (
 	pb "github.com/cprakhar/uber-clone/shared/proto/trip"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	sharedtypes "github.com/cprakhar/uber-clone/shared/types"
 )
 
 type TripModel struct {
-	ID       primitive.ObjectID
+	ID       string
 	RiderID  string
 	Status   string
 	RideFare *RideFareModel
@@ -16,7 +16,7 @@ type TripModel struct {
 // ToProto converts TripModel to its protobuf representation
 func (t *TripModel) ToProto() *pb.Trip {
 	return &pb.Trip{
-		Id:           t.ID.Hex(),
+		Id:           t.ID,
 		RiderID:      t.RiderID,
 		Route:        t.RideFare.Route.ToProto(),
 		Status:       t.Status,
@@ -27,17 +27,20 @@ func (t *TripModel) ToProto() *pb.Trip {
 }
 
 type RideFareModel struct {
-	ID               primitive.ObjectID
+	ID               string
 	RiderID          string
 	PackageSlug      string
 	TotalFareInPaise float64
+	NoShowDebtKobo   int64
 	Route            *OSRMApiResponse
+	Pickup           *sharedtypes.Coordinate
+	Destination      *sharedtypes.Coordinate
 }
 
 // ToProto converts RideFareModel to its protobuf representation
 func (r *RideFareModel) ToProto() *pb.RideFare {
 	return &pb.RideFare{
-		Id:               r.ID.Hex(),
+		Id:               r.ID,
 		RiderID:          r.RiderID,
 		PackageSlug:      r.PackageSlug,
 		TotalFareInPaise: r.TotalFareInPaise,
@@ -67,8 +70,8 @@ func (o *OSRMApiResponse) ToProto() *pb.Route {
 			continue
 		}
 		coordinates[i] = &pb.Coordinate{
-			Latitude:  coord[0],
-			Longitude: coord[1],
+			Latitude:  coord[1],
+			Longitude: coord[0],
 		}
 	}
 	return &pb.Route{
@@ -99,7 +102,7 @@ type PricingConfig struct {
 // DefaultPricingConfig returns a default pricing configuration
 func DefaultPricingConfig() *PricingConfig {
 	return &PricingConfig{
-		PricePerUnitDistance: 10.0, // 10 paise per meter
-		PricePerMinute:       5.0,  // 5 paise per minute
+		PricePerUnitDistance: 10.0, // 10 minor currency units per meter
+		PricePerMinute:       5.0,  // 5 minor currency units per minute
 	}
 }

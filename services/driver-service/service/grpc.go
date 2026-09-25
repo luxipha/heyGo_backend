@@ -2,13 +2,12 @@ package service
 
 import (
 	"context"
-	"math/rand/v2"
+	"fmt"
+	"time"
 
 	"github.com/cprakhar/uber-clone/services/driver-service/repo"
-	"github.com/cprakhar/uber-clone/services/driver-service/util"
 	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
-	sharedUtil "github.com/cprakhar/uber-clone/shared/util"
-	"github.com/mmcloughlin/geohash"
+	tripproto "github.com/cprakhar/uber-clone/shared/proto/trip"
 )
 
 type driverService struct {
@@ -18,7 +17,10 @@ type driverService struct {
 type DriverService interface {
 	RegisterDriver(ctx context.Context, driverID, packageSlug string) (*pb.Driver, error)
 	UnregisterDriver(ctx context.Context, driverID string) error
-	FindAvailableDrivers(ctx context.Context, packageSlug string) []string
+	UpdateLocation(ctx context.Context, driverID string, latitude, longitude float64) (string, error)
+	MatchAndReserve(ctx context.Context, trip *tripproto.Trip, payload []byte) (*repo.Candidate, error)
+	Decline(ctx context.Context, tripID, driverID string) (*repo.RetryTrip, error)
+	ExpireOffers(ctx context.Context) ([]repo.RetryTrip, error)
 }
 
 func NewDriverService(repo repo.DriverRepo) *driverService {
@@ -26,27 +28,7 @@ func NewDriverService(repo repo.DriverRepo) *driverService {
 }
 
 func (s *driverService) RegisterDriver(ctx context.Context, driverID, packageSlug string) (*pb.Driver, error) {
-	randomIdx := rand.IntN(len(util.PredefinedRoutes))
-	profilePic := sharedUtil.GetRandomProfilePic(randomIdx)
-	randomRoute := util.PredefinedRoutes[randomIdx]
-	carPlate := util.GenerateRandomPlate()
-
-	geohash := geohash.Encode(randomRoute[0][0], randomRoute[0][1])
-
-	driver := &pb.Driver{
-		Id:          driverID,
-		Name:        "Prakhar Chhalotre",
-		ProfilePic:  profilePic,
-		CarPlate:    carPlate,
-		PackageSlug: packageSlug,
-		Geohash:     geohash,
-		Location: &pb.Location{
-			Latitude:  randomRoute[0][0],
-			Longitude: randomRoute[0][1],
-		},
-	}
-
-	driver, err := s.repo.Create(driver)
+	driver, err := s.repo.UpsertOnline(ctx, &pb.Driver{Id: driverID, PackageSlug: packageSlug})
 	if err != nil {
 		return nil, err
 	}
@@ -54,16 +36,25 @@ func (s *driverService) RegisterDriver(ctx context.Context, driverID, packageSlu
 }
 
 func (s *driverService) UnregisterDriver(ctx context.Context, driverID string) error {
-	return s.repo.Delete(driverID)
+	return s.repo.SetOffline(ctx, driverID)
 }
 
-func (s *driverService) FindAvailableDrivers(ctx context.Context, packageSlug string) []string {
-	matchingDrivers := []string{}
-	for _, d := range s.repo.GetAll() {
-		if d.PackageSlug == packageSlug {
-			matchingDrivers = append(matchingDrivers, d.Id)
-		}
-	}
+func (s *driverService) UpdateLocation(ctx context.Context, driverID string, latitude, longitude float64) (string, error) {
+	return s.repo.UpdateLocation(ctx, driverID, latitude, longitude)
+}
 
-	return matchingDrivers
+func (s *driverService) MatchAndReserve(ctx context.Context, trip *tripproto.Trip, payload []byte) (*repo.Candidate, error) {
+	if trip == nil || trip.SelectedFare == nil || trip.Route == nil || len(trip.Route.Geometry) == 0 || len(trip.Route.Geometry[0].Coordinates) == 0 {
+		return nil, fmt.Errorf("trip has no pickup location")
+	}
+	pickup := trip.Route.Geometry[0].Coordinates[0]
+	return s.repo.MatchAndReserve(ctx, trip.Id, trip.SelectedFare.PackageSlug, pickup.Latitude, pickup.Longitude, 15_000, 20*time.Second, payload)
+}
+
+func (s *driverService) Decline(ctx context.Context, tripID, driverID string) (*repo.RetryTrip, error) {
+	return s.repo.DeclineAssignment(ctx, tripID, driverID)
+}
+
+func (s *driverService) ExpireOffers(ctx context.Context) ([]repo.RetryTrip, error) {
+	return s.repo.ExpireOffers(ctx, 100)
 }

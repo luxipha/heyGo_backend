@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -14,13 +15,19 @@ type TopicConsumer struct {
 	kf      *kafka.KafkaClient
 	connMgr *ConnectionManager
 	topics  []string
+	events  *EventStore
 }
 
-func NewTopicConsumer(kf *kafka.KafkaClient, connMgr *ConnectionManager, topics []string) *TopicConsumer {
+func NewTopicConsumer(kf *kafka.KafkaClient, connMgr *ConnectionManager, topics []string, events ...*EventStore) *TopicConsumer {
+	var store *EventStore
+	if len(events) > 0 {
+		store = events[0]
+	}
 	return &TopicConsumer{
 		kf:      kf,
 		connMgr: connMgr,
 		topics:  topics,
+		events:  store,
 	}
 }
 
@@ -47,7 +54,21 @@ func (tc *TopicConsumer) Consume(ctx context.Context) error {
 				Type: *msg.TopicPartition.Topic,
 				Data: payload,
 			}
+			if tc.events != nil {
+				sourceID := kfMsg.EventID
+				if sourceID == "" {
+					sourceID = fmt.Sprintf("legacy:%s:%d:%d", clientMsg.Type, msg.TopicPartition.Partition, msg.TopicPartition.Offset)
+				}
+				stored, err := tc.events.Append(ctx, entityID, sourceID, clientMsg.Type, kfMsg.Data)
+				if err != nil {
+					return err
+				}
+				clientMsg = stored
+			}
 
+			if tc.events != nil {
+				return nil // Each gateway delivers from the shared event log in cursor order.
+			}
 			return tc.connMgr.SendMessage(entityID, clientMsg)
 		},
 	)

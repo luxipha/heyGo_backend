@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trip-service
+  namespace: uber-clone
+  labels:
+    app: trip-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trip-service
+  template:
+    metadata:
+      labels:
+        app: trip-service
+    spec:
+      containers:
+      - name: trip-service
+        image: uber-clone/trip-service:0.1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+          - containerPort: 9000
+            name: grpc
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        env:
+        - name: INTERNAL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: postgres
+              key: internal-service-token
+        - name: CASPERID_APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: casperid
+              key: app-id
+        - name: CASPERID_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: casperid
+              key: api-secret
+        - name: CASPERID_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: casperid-base-url
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres
+              key: url
+        - name: OSRM_API
+          valueFrom:
+            secretKeyRef:
+              name: external-apis
+              key: osrm
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: exporter-endpoint
+        - name: KAFKA_BROKERS
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-brokers}}
+        - name: KAFKA_TOPIC_PARTITIONS
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-topic-partitions}}
+        - name: KAFKA_REPLICATION_FACTOR
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-replication-factor}}
+        readinessProbe:
+          grpc: {port: 9000}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          grpc: {port: 9000}
+          initialDelaySeconds: 20
+          periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trip-service
+  namespace: uber-clone
+spec:
+  selector:
+    app: trip-service
+  ports:
+  - port: 9000
+    targetPort: 9000
+    name: grpc

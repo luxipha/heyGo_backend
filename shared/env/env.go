@@ -3,6 +3,7 @@ package env
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,24 @@ func GetString(key, defaultValue string) string {
 		return defaultValue
 	}
 	return val
+}
+
+func GetCSV(key string, defaultValues []string) []string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return append([]string(nil), defaultValues...)
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	if len(result) == 0 {
+		return append([]string(nil), defaultValues...)
+	}
+	return result
 }
 
 // GetInt retrieves the value of the environment variable named by the key and converts it to an integer.

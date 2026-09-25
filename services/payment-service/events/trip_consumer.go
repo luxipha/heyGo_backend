@@ -65,10 +65,13 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 	}
 
 	paymentPayload := messaging.PaymentEventSessionCreatedData{
-		TripID:    payload.TripID,
-		SessionID: paymentSession.StripeSessionID,
-		Amount:    float64(payload.Amount) / 100, // converting paise to rupees
-		Currency:  payload.Currency,
+		TripID:               payload.TripID,
+		SessionID:            paymentSession.TransactionReference,
+		PaymentReference:     paymentSession.PaymentReference,
+		TransactionReference: paymentSession.TransactionReference,
+		CheckoutURL:          paymentSession.CheckoutURL,
+		Amount:               float64(payload.Amount) / 100,
+		Currency:             payload.Currency,
 	}
 
 	data, err := json.Marshal(paymentPayload)

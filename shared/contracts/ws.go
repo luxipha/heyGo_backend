@@ -1,10 +1,15 @@
 package contracts
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type WSMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
+	ID         string      `json:"id,omitempty"`
+	Type       string      `json:"type"`
+	OccurredAt time.Time   `json:"occurredAt,omitempty"`
+	Data       interface{} `json:"data"`
 }
 
 type WSDriverMessage struct {

@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: uber-clone
+  labels:
+    app: payment-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+        - name: payment-service
+          image: uber-clone/payment-service:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9200
+          resources:
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+          env:
+            - name: MONNIFY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moniepoint
+                  key: api-key
+            - name: MONNIFY_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moniepoint
+                  key: secret-key
+            - name: MONNIFY_CONTRACT_CODE
+              valueFrom:
+                secretKeyRef:
+                  name: moniepoint
+                  key: contract-code
+            - name: MONNIFY_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  key: monnify-base-url
+                  name: uber-clone-config
+            - name: MONNIFY_REDIRECT_URL
+              valueFrom:
+                configMapKeyRef:
+                  key: monnify-redirect-url
+                  name: uber-clone-config
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: url
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: internal-service-token
+            - name: APP_URL
+              valueFrom:
+                configMapKeyRef:
+                  key: app-url
+                  name: uber-clone-config
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  key: exporter-endpoint
+                  name: uber-clone-config
+            - name: KAFKA_BROKERS
+              valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-brokers}}
+            - name: KAFKA_TOPIC_PARTITIONS
+              valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-topic-partitions}}
+            - name: KAFKA_REPLICATION_FACTOR
+              valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-replication-factor}}
+          readinessProbe:
+            httpGet: {path: /ready, port: 9200}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: {path: /health, port: 9200}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: uber-clone
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http
+  type: ClusterIP

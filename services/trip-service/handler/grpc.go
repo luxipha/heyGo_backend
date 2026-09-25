@@ -2,8 +2,9 @@ package handler
 
 import (
 	"context"
+	"errors"
 
-	"github.com/cprakhar/uber-clone/services/trip-service/events"
+	"github.com/cprakhar/uber-clone/services/trip-service/repo"
 	"github.com/cprakhar/uber-clone/services/trip-service/service"
 	"github.com/cprakhar/uber-clone/services/trip-service/types"
 	"github.com/cprakhar/uber-clone/shared/observe/logs"
@@ -16,13 +17,12 @@ import (
 
 type gRPCHandler struct {
 	pb.UnimplementedTripServiceServer
-	svc      service.TripService
-	producer *events.TripEventProducer
+	svc service.TripService
 }
 
 // NewgRPCHandler registers the gRPC handler with the given gRPC server
-func NewgRPCHandler(srv *grpc.Server, svc service.TripService, producer *events.TripEventProducer) {
-	handler := &gRPCHandler{svc: svc, producer: producer}
+func NewgRPCHandler(srv *grpc.Server, svc service.TripService) {
+	handler := &gRPCHandler{svc: svc}
 	pb.RegisterTripServiceServer(srv, handler)
 }
 
@@ -47,7 +47,7 @@ func (h *gRPCHandler) PreviewTrip(ctx context.Context, req *pb.PreviewTripReques
 
 	estimatedFares := h.svc.EstimatePackagesPriceWithRoute(route)
 
-	fares, err := h.svc.GenerateTripFares(ctx, estimatedFares, req.GetRiderID(), route)
+	fares, err := h.svc.GenerateTripFares(ctx, estimatedFares, req.GetRiderID(), route, pickupCoords, destinationCoords)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate trip fares: %v", err)
 	}
@@ -69,16 +69,15 @@ func (h *gRPCHandler) CreateTrip(ctx context.Context, req *pb.CreateTripRequest)
 
 	trip, err := h.svc.CreateTrip(ctx, fare)
 	if err != nil {
+		if errors.Is(err, repo.ErrTripClassificationUnavailable) {
+			return nil, status.Error(codes.FailedPrecondition, "pickup or destination is outside an approved market or has overlapping geofences")
+		}
 		return nil, status.Errorf(codes.Internal, "failed to create trip: %v", err)
 	}
 
-	// Notify other services about the new trip
-	if err := h.producer.PublishTripCreated(ctx, trip); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to publish trip created event: %v", err)
-	}
-	logs.L().Infof("Published trip created event for trip ID: %s", trip.ID.Hex())
+	logs.L().Infof("Created trip and queued event for trip ID: %s", trip.ID)
 
 	return &pb.CreateTripResponse{
-		TripID: trip.ID.Hex(),
+		TripID: trip.ID,
 	}, nil
 }

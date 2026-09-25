@@ -1,6 +1,7 @@
 package grpcclient
 
 import (
+	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
 	"github.com/cprakhar/uber-clone/shared/env"
 	"github.com/cprakhar/uber-clone/shared/observe/traces"
 	pb "github.com/cprakhar/uber-clone/shared/proto/driver"
@@ -18,7 +19,8 @@ func NewDriverServiceClient() (*driverServiceClient, error) {
 	driverServiceURL := env.GetString("DRIVER_SERVICE_URL", "driver-service:9100")
 	conn, err := grpc.NewClient(driverServiceURL,
 		append(traces.DialOptionsWithTracing(),
-			grpc.WithTransportCredentials(insecure.NewCredentials()))...,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithUnaryInterceptor(sharedauth.UnaryClientInterceptor(env.GetString("INTERNAL_SERVICE_TOKEN", ""))))...,
 	)
 	if err != nil {
 		return nil, err

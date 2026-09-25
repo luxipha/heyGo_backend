@@ -3,10 +3,12 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"math/rand/v2"
+	"time"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/cprakhar/uber-clone/services/driver-service/repo"
 	"github.com/cprakhar/uber-clone/services/driver-service/service"
 	"github.com/cprakhar/uber-clone/shared/contracts"
 	"github.com/cprakhar/uber-clone/shared/messaging"
@@ -19,70 +21,78 @@ type TripConsumer struct {
 	svc      service.DriverService
 }
 
-// NewTripEventConsumer creates a new TripEventConsumer with the given Kafka consumer.
-func NewTripConsumer(kfClient *kf.KafkaClient, svc service.DriverService) *TripConsumer {
-	return &TripConsumer{kfClient: kfClient, svc: svc}
+func NewTripConsumer(client *kf.KafkaClient, svc service.DriverService) *TripConsumer {
+	return &TripConsumer{kfClient: client, svc: svc}
 }
 
-// Consume starts consuming to the specified topics and processes messages.
-func (tec *TripConsumer) Consume(ctx context.Context, topics []string) error {
-	return tec.kfClient.Consumer.SubscribeAndConsume(ctx, topics,
-		func(ctx context.Context, msg *kafka.Message) error {
-
-			var kafkaMsg contracts.KafkaMessage
-			if err := json.Unmarshal(msg.Value, &kafkaMsg); err != nil {
-				return fmt.Errorf("failed to unmarshal message: %w", err)
-			}
-
-			logs.L().Infow("Received message on topic", "topic", *msg.TopicPartition.Topic)
-
-			var payload messaging.TripEventData
-			if err := json.Unmarshal(kafkaMsg.Data, &payload); err != nil {
-				return fmt.Errorf("failed to unmarshal payload: %w", err)
-			}
-
-			// Handle different event types
-			switch *msg.TopicPartition.Topic {
-			case contracts.TripEventCreated, contracts.TripEventDriverNotInterested:
-				return tec.handleFindAndNotifyDrivers(ctx, &payload)
-			}
-
-			logs.L().Warnw("Unknown trip event", "topic", *msg.TopicPartition.Topic)
-			return nil
-		},
-	)
-}
-
-func (tec *TripConsumer) handleFindAndNotifyDrivers(ctx context.Context, payload *messaging.TripEventData) error {
-	drivers := tec.svc.FindAvailableDrivers(ctx, payload.Trip.SelectedFare.PackageSlug)
-	if len(drivers) == 0 {
-		logs.L().Infow("No drivers available for trip", "tripID", payload.Trip.Id)
-
-		// Notify trip service about unavailability of drivers
-		if err := tec.kfClient.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.KafkaMessage{
-			EntityID: payload.Trip.RiderID,
-		}); err != nil {
-			return err
+func (c *TripConsumer) Consume(ctx context.Context, topics []string) error {
+	return c.kfClient.Consumer.SubscribeAndConsume(ctx, topics, func(ctx context.Context, msg *ckafka.Message) error {
+		var envelope contracts.KafkaMessage
+		if err := json.Unmarshal(msg.Value, &envelope); err != nil {
+			return fmt.Errorf("decode Kafka envelope: %w", err)
 		}
-		return nil
+		switch *msg.TopicPartition.Topic {
+		case contracts.TripEventCreated, contracts.TripEventDriverNotInterested:
+			return c.match(ctx, envelope.Data)
+		case contracts.DriverCmdTripDecline:
+			var response messaging.DriverTripResponseData
+			if err := json.Unmarshal(envelope.Data, &response); err != nil {
+				return err
+			}
+			_, err := c.svc.Decline(ctx, response.TripID, envelope.EntityID)
+			return err // Trigger queues the acknowledgement and durable retry.
+		case contracts.DriverCmdLocation:
+			var location messaging.DriverLocationData
+			if err := json.Unmarshal(envelope.Data, &location); err != nil {
+				return err
+			}
+			riderID, err := c.svc.UpdateLocation(ctx, envelope.EntityID, location.Location.Latitude, location.Location.Longitude)
+			if err != nil {
+				return err
+			}
+			if riderID == "" {
+				return nil
+			}
+			return c.kfClient.Producer.SendMessage(ctx, contracts.DriverEventLocationUpdated, &contracts.KafkaMessage{EntityID: riderID, Data: envelope.Data})
+		default:
+			return nil
+		}
+	})
+}
+
+func (c *TripConsumer) RunExpiryWorker(ctx context.Context) error {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			_, err := c.svc.ExpireOffers(ctx)
+			if err != nil {
+				logs.L().Warnw("Failed to expire driver offers", "error", err)
+				continue
+			}
+			// The outbox retry event drives rematching after commit.
+		}
 	}
+}
 
-	randIdx := rand.IntN(len(drivers))
-	selectedDriverID := drivers[randIdx]
-
-	data, err := json.Marshal(payload)
+func (c *TripConsumer) match(ctx context.Context, raw []byte) error {
+	var payload messaging.TripEventData
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return fmt.Errorf("decode trip event: %w", err)
+	}
+	candidate, err := c.svc.MatchAndReserve(ctx, payload.Trip, raw)
+	if errors.Is(err, repo.ErrTripAlreadyMatched) {
+		return nil // The durable offer from the first reservation is still pending.
+	}
+	if errors.Is(err, repo.ErrNoAvailableDriver) {
+		return c.kfClient.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.KafkaMessage{EntityID: payload.Trip.RiderID, Data: raw})
+	}
 	if err != nil {
-		return fmt.Errorf("failed to marshal data: %w", err)
-	}
-
-	// Notify trip service about the selected driver
-	if err := tec.kfClient.Producer.SendMessage(ctx, contracts.DriverCmdTripRequest, &contracts.KafkaMessage{
-		EntityID: selectedDriverID,
-		Data:     data,
-	}); err != nil {
 		return err
 	}
-
-	logs.L().Infow("Found a suitable driver for trip", "driverID", selectedDriverID, "tripID", payload.Trip.Id)
+	logs.L().Infow("Reserved nearby driver", "tripID", payload.Trip.Id, "driverID", candidate.Driver.Id, "distanceMeters", candidate.Distance)
 	return nil
 }

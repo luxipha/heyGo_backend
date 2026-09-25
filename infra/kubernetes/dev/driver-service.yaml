@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: driver-service
+  namespace: uber-clone
+  labels:
+    app: driver-service
+spec:
+  selector:
+    matchLabels:
+      app: driver-service
+  template:
+    metadata:
+      labels:
+        app: driver-service
+    spec:
+      containers:
+      - name: driver-service
+        image: uber-clone/driver-service:0.1.0
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+        ports:
+        - containerPort: 9100
+          name: grpc
+        env:
+        - name: INTERNAL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: postgres
+              key: internal-service-token
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres
+              key: url
+        - name: OSRM_API
+          valueFrom:
+            secretKeyRef:
+              name: external-apis
+              key: osrm
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: uber-clone-config
+              key: exporter-endpoint
+        - name: KAFKA_BROKERS
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-brokers}}
+        - name: KAFKA_TOPIC_PARTITIONS
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-topic-partitions}}
+        - name: KAFKA_REPLICATION_FACTOR
+          valueFrom: {configMapKeyRef: {name: uber-clone-config, key: kafka-replication-factor}}
+        readinessProbe:
+          grpc: {port: 9100}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          grpc: {port: 9100}
+          initialDelaySeconds: 20
+          periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: driver-service
+  namespace: uber-clone
+spec:
+  selector:
+    app: driver-service
+  ports:
+  - port: 9100
+    targetPort: 9100
+    name: grpc

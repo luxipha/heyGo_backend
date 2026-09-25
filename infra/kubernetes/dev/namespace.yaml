@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: uber-clone
+  labels:
+    app: uber-clone
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uber-clone-config
+  namespace: uber-clone
+data:
+  environment: "development"
+  http-addr: ":8080"
+  app-url: "http://localhost:3000"
+  allowed-origins: "http://localhost:3000"
+  casperid-jwks-url: "https://casperid.com/.well-known/jwks.json"
+  casperid-issuer: "casperid.com"
+  casperid-base-url: "https://casperid.com"
+  casperid-token-url: "https://apis.casperid.com/api/oauth/token"
+  casperid-driver-redirect-uri: "com.heygo.driver://oauth/callback"
+  monnify-base-url: "https://sandbox.monnify.com"
+  monnify-redirect-url: "http://localhost:3000?payment=pending"
+  exporter-endpoint: "http://jaeger-collector:4318"
+  kafka-brokers: "apache-kafka-0.apache-kafka.uber-clone.svc.cluster.local:9092"
+  kafka-topic-partitions: "3"
+  kafka-replication-factor: "1"

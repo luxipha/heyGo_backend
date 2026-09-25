@@ -4,23 +4,29 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/cprakhar/uber-clone/services/driver-service/handler"
 	"github.com/cprakhar/uber-clone/services/driver-service/service"
+	sharedauth "github.com/cprakhar/uber-clone/shared/auth"
+	"github.com/cprakhar/uber-clone/shared/env"
 	"github.com/cprakhar/uber-clone/shared/messaging/kafka"
 	"github.com/cprakhar/uber-clone/shared/observe/logs"
 	"github.com/cprakhar/uber-clone/shared/observe/traces"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 type gRPCServer struct {
 	addr          string
 	kfClient      *kafka.KafkaClient
 	driverService service.DriverService
+	healthCheck   func(context.Context) error
 }
 
-func NewgRPCServer(addr string, kfc *kafka.KafkaClient, svc service.DriverService) *gRPCServer {
-	return &gRPCServer{addr: addr, kfClient: kfc, driverService: svc}
+func NewgRPCServer(addr string, kfc *kafka.KafkaClient, svc service.DriverService, healthCheck func(context.Context) error) *gRPCServer {
+	return &gRPCServer{addr: addr, kfClient: kfc, driverService: svc, healthCheck: healthCheck}
 }
 
 func (s *gRPCServer) run(ctx context.Context) error {
@@ -32,9 +38,31 @@ func (s *gRPCServer) run(ctx context.Context) error {
 
 	// gRPC server setup with observability
 	srv := grpc.NewServer(
-		traces.WithTracingInterceptors()...,
+		append(traces.WithTracingInterceptors(), grpc.ChainUnaryInterceptor(sharedauth.UnaryServerInterceptor(env.GetString("INTERNAL_SERVICE_TOKEN", "")), logs.UnaryServerInterceptor()))...,
 	)
 	handler.NewgRPCHandler(srv, s.driverService)
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(srv, healthServer)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+				return
+			case <-ticker.C:
+				status := healthpb.HealthCheckResponse_SERVING
+				checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				if s.healthCheck(checkCtx) != nil {
+					status = healthpb.HealthCheckResponse_NOT_SERVING
+				}
+				cancel()
+				healthServer.SetServingStatus("", status)
+			}
+		}
+	}()
 
 	// Graceful shutdown on context cancellation
 	go func() {

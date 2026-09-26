@@ -44,18 +44,31 @@ be configured before enabling their corresponding product features.
 
 ## Deployment boundary
 
-Cloud Run services and PostgreSQL are not created by the foundation yet. Pub/Sub
-is provisioned by the foundation with per-service pull subscriptions and
-dead-letter policies. The current subscribers and outbox publishers are
-long-running background loops, so their first Cloud Run deployment must use
-always-allocated CPU and at least one instance. Converting delivery to
-authenticated Pub/Sub push endpoints is the later scale-to-zero optimization.
-Driver and Trip use gRPC and must have HTTP/2 end-to-end enabled. Internal
-services should remain IAM-protected; API Gateway will need Cloud Run Invoker
-grants and Google-signed ID tokens for synchronous calls.
+Terraform now defines Cloud SQL, Secret Manager, and all four Cloud Run
+services, but `deploy_services` defaults to `false`. Follow the two-phase
+procedure in `infra/terraform/README.md`: apply the database and secret
+containers, populate external CasperID and Monnify secret versions, create and
+run the separate migration job, and only then enable Cloud Run with an immutable
+image SHA. The services use a read/write database role and do not run migrations
+in Cloud Run.
 
-After those dependency decisions are made, add the Cloud Run services to
-Terraform, attach pinned Secret Manager versions, run migrations as a separate
-release step, deploy the SHA-tagged images to staging with no production
-traffic, and run `/health`, `/ready`, and authenticated service-to-service smoke
-tests before promotion.
+The current subscribers and outbox publishers are long-running background
+loops, so the initial Cloud Run configuration uses always-allocated CPU and at
+least one instance. Converting delivery to authenticated Pub/Sub push endpoints
+is the later scale-to-zero optimization. API Gateway is capped at one instance
+until WebSocket delivery has durable fan-out.
+
+Driver and Trip use gRPC over Cloud Run HTTP/2 and remain IAM-protected. API
+Gateway uses its runtime identity to obtain Google-signed ID tokens for those
+calls. API Gateway and Payment Service accept unauthenticated Cloud Run ingress;
+Payment must be reachable by Monnify, while application authentication and the
+shared internal token continue to protect their routes.
+
+After the initial Terraform deployment, use the manually dispatched `Deploy
+Cloud Run` GitHub Actions workflow with a full published Git SHA and the exact
+confirmation value `deploy`. It creates tagged candidate revisions with no
+production traffic after the migration job succeeds, checks the public `/ready`
+endpoints, and only then moves traffic to those verified revisions. Configure GitHub's `production` environment
+with required reviewers before the first rollout. Terraform intentionally
+ignores later container-image changes so releases do not create configuration
+drift.

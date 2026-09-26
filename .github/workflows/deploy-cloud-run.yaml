@@ -1,0 +1,133 @@
+name: Deploy Cloud Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Full Git commit SHA already published for all four services and the migration job
+        required: true
+        type: string
+      confirmation:
+        description: Type deploy to confirm the production rollout
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-run-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: heygo-ng
+  REGION: europe-west1
+  REGISTRY: europe-west1-docker.pkg.dev/heygo-ng/heygo
+
+jobs:
+  deploy:
+    name: Deploy immutable images
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'deploy'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: heygo-ng
+          workload_identity_provider: projects/392496443029/locations/global/workloadIdentityPools/github-actions/providers/heygo-backend
+          service_account: github-cloud-run-deployer@heygo-ng.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Validate release inputs and prerequisites
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "image_tag must be a full lowercase Git SHA" >&2
+            exit 1
+          fi
+          for service in api-gateway driver-service payment-service trip-service; do
+            gcloud artifacts docker images describe "$REGISTRY/$service:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
+            gcloud run services describe "$service" --project="$PROJECT_ID" --region="$REGION" >/dev/null
+          done
+          gcloud artifacts docker images describe "$REGISTRY/migration:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
+          gcloud run jobs describe heygo-migration --project="$PROJECT_ID" --region="$REGION" >/dev/null
+
+      - name: Run database migrations
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          gcloud run jobs update heygo-migration \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --image="$REGISTRY/migration:$IMAGE_TAG" \
+            --quiet
+          gcloud run jobs execute heygo-migration \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --wait \
+            --quiet
+
+      - name: Create candidate revisions with no production traffic
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          CANDIDATE_TAG="candidate-${IMAGE_TAG:0:12}"
+          for service in driver-service trip-service payment-service api-gateway; do
+            gcloud run services update "$service" \
+              --project="$PROJECT_ID" \
+              --region="$REGION" \
+              --image="$REGISTRY/$service:$IMAGE_TAG" \
+              --tag="$CANDIDATE_TAG" \
+              --no-traffic \
+              --quiet
+          done
+          echo "CANDIDATE_TAG=$CANDIDATE_TAG" >> "$GITHUB_ENV"
+
+      - name: Check public candidate readiness
+        run: |
+          for service in payment-service api-gateway; do
+            candidate_url="$(
+              gcloud run services describe "$service" \
+                --project="$PROJECT_ID" \
+                --region="$REGION" \
+                --format=json |
+                jq -r --arg tag "$CANDIDATE_TAG" '.status.traffic[] | select(.tag == $tag) | .url'
+            )"
+            test -n "$candidate_url"
+            curl --fail --silent --show-error \
+              --retry 12 --retry-all-errors --retry-delay 5 \
+              "$candidate_url/ready"
+          done
+
+      - name: Promote verified candidate revisions
+        run: |
+          for service in driver-service trip-service payment-service api-gateway; do
+            candidate_revision="$(
+              gcloud run services describe "$service" \
+                --project="$PROJECT_ID" \
+                --region="$REGION" \
+                --format=json |
+                jq -r --arg tag "$CANDIDATE_TAG" '.status.traffic[] | select(.tag == $tag) | .revisionName'
+            )"
+            test -n "$candidate_revision"
+            gcloud run services update-traffic "$service" \
+              --project="$PROJECT_ID" \
+              --region="$REGION" \
+              --to-revisions="$candidate_revision=100" \
+              --quiet
+            gcloud run services update-traffic "$service" \
+              --project="$PROJECT_ID" \
+              --region="$REGION" \
+              --remove-tags="$CANDIDATE_TAG" \
+              --quiet
+          done

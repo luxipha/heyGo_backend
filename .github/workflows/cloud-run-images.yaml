@@ -9,6 +9,7 @@ on:
       - .github/workflows/cloud-run-images.yaml
       - go.mod
       - go.sum
+      - cmd/migrate/**
       - services/**
       - shared/**
   pull_request:
@@ -19,6 +20,7 @@ on:
       - .github/workflows/cloud-run-images.yaml
       - go.mod
       - go.sum
+      - cmd/migrate/**
       - services/**
       - shared/**
   workflow_dispatch:
@@ -46,6 +48,7 @@ jobs:
           - driver-service
           - payment-service
           - trip-service
+          - migration
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -80,6 +83,7 @@ jobs:
           - driver-service
           - payment-service
           - trip-service
+          - migration
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

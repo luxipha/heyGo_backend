@@ -44,3 +44,101 @@ variable "github_deploy_branch" {
   type        = string
   default     = "main"
 }
+
+variable "deploy_services" {
+  description = "Create the Cloud Run services after all externally managed secret versions have been populated."
+  type        = bool
+  default     = false
+}
+
+variable "image_tag" {
+  description = "Immutable 40-character Git commit SHA published to Artifact Registry. Required when deploy_services is true."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.image_tag == "" || can(regex("^[0-9a-f]{40}$", var.image_tag))
+    error_message = "image_tag must be empty or a full lowercase 40-character Git SHA."
+  }
+
+  validation {
+    condition     = !var.deploy_services || var.image_tag != ""
+    error_message = "image_tag is required when deploy_services is true."
+  }
+}
+
+variable "cloud_sql_tier" {
+  description = "Cloud SQL machine tier. db-f1-micro is the low-cost startup default and is not highly available."
+  type        = string
+  default     = "db-f1-micro"
+}
+
+variable "database_name" {
+  description = "Application PostgreSQL database name."
+  type        = string
+  default     = "heygo"
+}
+
+variable "database_user" {
+  description = "Application PostgreSQL user name."
+  type        = string
+  default     = "heygo_app"
+}
+
+variable "allowed_origins" {
+  description = "Comma-separated browser origins accepted by API Gateway. Set this before enabling Cloud Run."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.deploy_services || trimspace(var.allowed_origins) != ""
+    error_message = "allowed_origins must be set when deploy_services is true."
+  }
+}
+
+variable "app_url" {
+  description = "Public HeyGo application URL used for payment redirects. Set this before enabling Cloud Run."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !var.deploy_services || can(regex("^https://", var.app_url))
+    error_message = "app_url must be an HTTPS URL when deploy_services is true."
+  }
+}
+
+variable "casperid_base_url" {
+  description = "CasperID API base URL."
+  type        = string
+  default     = "https://casperid.com"
+}
+
+variable "casperid_jwks_url" {
+  description = "CasperID JSON Web Key Set URL."
+  type        = string
+  default     = "https://casperid.com/.well-known/jwks.json"
+}
+
+variable "casperid_issuer" {
+  description = "Expected CasperID token issuer."
+  type        = string
+  default     = "casperid.com"
+}
+
+variable "casperid_token_url" {
+  description = "CasperID OAuth token endpoint."
+  type        = string
+  default     = "https://apis.casperid.com/api/oauth/token"
+}
+
+variable "casperid_driver_redirect_uri" {
+  description = "Driver app OAuth callback URI."
+  type        = string
+  default     = "com.heygo.driver://oauth/callback"
+}
+
+variable "monnify_base_url" {
+  description = "Monnify API base URL. Keep the sandbox default until production credentials are approved."
+  type        = string
+  default     = "https://sandbox.monnify.com"
+}

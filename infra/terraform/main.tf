@@ -8,6 +8,7 @@ locals {
     "pubsub.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
+    "sqladmin.googleapis.com",
     "sts.googleapis.com",
   ])
 

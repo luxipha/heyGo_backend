@@ -82,3 +82,9 @@ resource "google_service_account_iam_member" "github_runtime_user" {
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.github_deployer.email}"
 }
+
+resource "google_service_account_iam_member" "github_migration_user" {
+  service_account_id = google_service_account.migration.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.github_deployer.email}"
+}

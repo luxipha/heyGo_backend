@@ -76,8 +76,10 @@ func main() {
 		logs.L().Fatalw("Failed to connect to PostgreSQL", "error", err)
 	}
 	defer pool.Close()
-	if err := db.Migrate(ctx, pool); err != nil {
-		logs.L().Fatalw("Failed to run PostgreSQL migrations", "error", err)
+	if env.GetBool("MIGRATE_ON_STARTUP", true) {
+		if err := db.Migrate(ctx, pool); err != nil {
+			logs.L().Fatalw("Failed to run PostgreSQL migrations", "error", err)
+		}
 	}
 	driverRepo := repo.NewPostgresDriverRepository(pool)
 	driverService := service.NewDriverService(driverRepo)

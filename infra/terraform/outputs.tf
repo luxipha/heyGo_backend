@@ -27,3 +27,23 @@ output "pubsub_subscriptions" {
   description = "Per-service pull subscriptions replacing Kafka consumer groups."
   value       = sort(keys(google_pubsub_subscription.events))
 }
+
+output "cloud_sql_instance_connection_name" {
+  description = "Cloud SQL connection name mounted into Cloud Run services."
+  value       = google_sql_database_instance.primary.connection_name
+}
+
+output "runtime_secret_ids" {
+  description = "Secret Manager containers. CasperID and Monnify secrets require manually supplied versions before deployment."
+  value       = { for name, secret in google_secret_manager_secret.runtime : name => secret.secret_id }
+}
+
+output "cloud_run_service_urls" {
+  description = "Cloud Run service URLs after deploy_services is enabled."
+  value = var.deploy_services ? {
+    api_gateway     = google_cloud_run_v2_service.api_gateway[0].uri
+    driver_service  = google_cloud_run_v2_service.driver[0].uri
+    payment_service = google_cloud_run_v2_service.payment[0].uri
+    trip_service    = google_cloud_run_v2_service.trip[0].uri
+  } : null
+}

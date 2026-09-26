@@ -10,13 +10,14 @@ import (
 	"strings"
 	"time"
 
-	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/env"
 )
 
 var noShowPaymentHTTPClient = &http.Client{Timeout: 20 * time.Second}
@@ -48,6 +49,10 @@ func registerRiderNoShowPaymentRoutes(rider *gin.RouterGroup, pool *pgxpool.Pool
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Internal-Service-Token", env.GetString("INTERNAL_SERVICE_TOKEN", ""))
+		if err := sharedauth.AddCloudRunIdentity(req, env.GetString("PAYMENT_SERVICE_AUDIENCE", "")); err != nil {
+			driverError(ctx, http.StatusServiceUnavailable, "debt_payment_unavailable", "Debt payment checkout is unavailable")
+			return
+		}
 		res, err := noShowPaymentHTTPClient.Do(req)
 		if err != nil {
 			driverError(ctx, http.StatusServiceUnavailable, "debt_payment_unavailable", "Debt payment checkout is unavailable")

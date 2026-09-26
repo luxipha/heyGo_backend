@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var ErrNoAvailableDriver = errors.New("no available driver")
@@ -80,7 +80,7 @@ func (r *postgresDriverRepo) UpdateLocation(ctx context.Context, id string, lat,
 		return "", fmt.Errorf("invalid coordinates")
 	}
 	// The gateway persists the reading before publishing the command. Read
-	// that row so a delayed Kafka message cannot move a driver backwards.
+	// that row so a delayed Pub/Sub message cannot move a driver backwards.
 	_, err := r.pool.Exec(ctx, `SELECT refresh_driver_operating_market($1::UUID)`, id)
 	if err != nil {
 		return "", fmt.Errorf("update online driver market: %w", err)

@@ -6,18 +6,18 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	"github.com/luxipha/heyGo_backend/services/api-gateway/handler"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/storage"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type httpServer struct {
 	addr        string
-	kfClient    *kafka.KafkaClient
+	bus         *pubsub.Client
 	connManager *messaging.ConnectionManager
 	auth        *gatewayauth.Middleware
 	users       gatewayauth.UserStore
@@ -29,14 +29,14 @@ type httpServer struct {
 }
 
 // NewhttpServer creates a new http server instance
-func NewhttpServer(addr string, kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, origins []string, oauth handler.CasperIDOAuthConfig, readiness func(context.Context) error) *httpServer {
-	return &httpServer{addr: addr, kfClient: kfc, connManager: connMgr, auth: authMiddleware, users: users, pool: pool, files: files, origins: origins, oauth: oauth, readiness: readiness}
+func NewhttpServer(addr string, bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, origins []string, oauth handler.CasperIDOAuthConfig, readiness func(context.Context) error) *httpServer {
+	return &httpServer{addr: addr, bus: bus, connManager: connMgr, auth: authMiddleware, users: users, pool: pool, files: files, origins: origins, oauth: oauth, readiness: readiness}
 }
 
 // run starts the http server
 func (s *httpServer) run(ctx context.Context) error {
 	// http server setup
-	h := handler.NewHTTPHandler(s.kfClient, s.connManager, s.auth, s.users, s.pool, s.files, s.origins, s.oauth, s.readiness)
+	h := handler.NewHTTPHandler(s.bus, s.connManager, s.auth, s.users, s.pool, s.files, s.origins, s.oauth, s.readiness)
 	srv := &http.Server{
 		Addr:              s.addr,
 		Handler:           h,

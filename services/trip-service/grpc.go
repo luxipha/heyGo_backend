@@ -10,7 +10,7 @@ import (
 	"github.com/luxipha/heyGo_backend/services/trip-service/service"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	"github.com/luxipha/heyGo_backend/shared/env"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 	"google.golang.org/grpc"
@@ -21,13 +21,13 @@ import (
 type gRPCServer struct {
 	addr        string
 	tripService service.TripService
-	kfClient    *kafka.KafkaClient
+	bus         *pubsub.Client
 	healthCheck func(context.Context) error
 }
 
 // NewgRPCServer creates a new gRPC server instance
-func NewgRPCServer(addr string, tripService service.TripService, kfc *kafka.KafkaClient, healthCheck func(context.Context) error) *gRPCServer {
-	return &gRPCServer{addr: addr, tripService: tripService, kfClient: kfc, healthCheck: healthCheck}
+func NewgRPCServer(addr string, tripService service.TripService, bus *pubsub.Client, healthCheck func(context.Context) error) *gRPCServer {
+	return &gRPCServer{addr: addr, tripService: tripService, bus: bus, healthCheck: healthCheck}
 }
 
 // run starts the gRPC server and listens for incoming requests

@@ -14,23 +14,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
 	"github.com/luxipha/heyGo_backend/services/payment-service/service"
 	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/httpmiddleware"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/metrics"
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
 type WebhookHandler struct {
 	secret string
 	svc    repo.Service
-	kafka  *kafka.KafkaClient
+	bus    *pubsub.Client
 	topups *OperatingTopupHandler
 }
 
@@ -56,16 +56,16 @@ type monnifyWebhook struct {
 	} `json:"eventData"`
 }
 
-func NewHTTPHandler(secret string, svc repo.Service, kf *kafka.KafkaClient, readiness ...func(context.Context) error) *gin.Engine {
-	return NewHTTPHandlerWithTopups(secret, svc, kf, nil, readiness...)
+func NewHTTPHandler(secret string, svc repo.Service, bus *pubsub.Client, readiness ...func(context.Context) error) *gin.Engine {
+	return NewHTTPHandlerWithTopups(secret, svc, bus, nil, readiness...)
 }
 
-func NewHTTPHandlerWithTopups(secret string, svc repo.Service, kf *kafka.KafkaClient, topups *OperatingTopupHandler, readiness ...func(context.Context) error) *gin.Engine {
+func NewHTTPHandlerWithTopups(secret string, svc repo.Service, bus *pubsub.Client, topups *OperatingTopupHandler, readiness ...func(context.Context) error) *gin.Engine {
 	r := gin.Default()
 	r.Use(otelgin.Middleware("payment-service"))
 	r.Use(httpmiddleware.NewRateLimiter(240, time.Minute).Middleware)
 	r.Use(metrics.HTTPMiddleware("payment-service"))
-	h := &WebhookHandler{secret: secret, svc: svc, kafka: kf, topups: topups}
+	h := &WebhookHandler{secret: secret, svc: svc, bus: bus, topups: topups}
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "payment-service"}) })
 	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 	r.GET("/ready", func(c *gin.Context) {
@@ -168,7 +168,7 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not encode payment event"})
 		return
 	}
-	if err := h.kafka.Producer.SendMessageAndWait(c, topic, &contracts.KafkaMessage{EntityID: payment.RiderID, Data: payload}, 10*time.Second); err != nil {
+	if err := h.bus.Producer.SendMessageAndWait(c, topic, &contracts.EventMessage{EntityID: payment.RiderID, Data: payload}, 10*time.Second); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not publish payment event"})
 		return
 	}

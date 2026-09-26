@@ -16,7 +16,7 @@ CREATE INDEX IF NOT EXISTS trip_event_outbox_pending_idx ON trip_event_outbox(id
 
 -- The assignment and its expiry/decline outcomes are committed together.
 -- A retry event is consumed by driver-service even if its worker crashes just
--- after closing an offer. Repeated Kafka delivery is guarded by trip status.
+-- after closing an offer. Repeated Pub/Sub delivery is guarded by trip status.
 CREATE OR REPLACE FUNCTION queue_driver_assignment_events() RETURNS TRIGGER AS $$
 DECLARE
     rider UUID;

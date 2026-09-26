@@ -7,20 +7,19 @@ import (
 	"log"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 type outboxPublisher interface {
-	SendMessageAndWait(context.Context, string, *contracts.KafkaMessage, time.Duration) error
+	SendMessageAndWait(context.Context, string, *contracts.EventMessage, time.Duration) error
 }
 
 // PublishOutbox serializes publishers across backend replicas. The lock
-// remains held until Kafka acknowledges and the row is marked published. A
+// remains held until Pub/Sub acknowledges and the row is marked published. A
 // crash between those actions replays the same event ID (at least once).
-func PublishOutbox(ctx context.Context, pool *pgxpool.Pool, producer *kafka.Producer) {
+func PublishOutbox(ctx context.Context, pool *pgxpool.Pool, producer outboxPublisher) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -63,7 +62,7 @@ func publishNext(ctx context.Context, pool *pgxpool.Pool, producer outboxPublish
 	if err != nil {
 		return false, err
 	}
-	message := &contracts.KafkaMessage{EventID: fmt.Sprintf("trip-outbox-%d", id), CorrelationID: correlationID, EntityID: recipient, Data: payload}
+	message := &contracts.EventMessage{EventID: fmt.Sprintf("trip-outbox-%d", id), CorrelationID: correlationID, EntityID: recipient, Data: payload}
 	deliveryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := producer.SendMessageAndWait(deliveryCtx, topic, message, 10*time.Second); err != nil {

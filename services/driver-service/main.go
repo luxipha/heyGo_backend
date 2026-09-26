@@ -15,16 +15,16 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 )
 
 var (
-	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
-	grpcAddr = env.ListenAddr("GRPC_ADDR", ":9100")
-	groupID  = "driver-service-group"
-	topics   = []string{contracts.TripEventCreated, contracts.TripEventDriverNotInterested, contracts.DriverCmdTripDecline, contracts.DriverCmdLocation}
+	projectID = env.GetString("GCP_PROJECT_ID", env.GetString("GOOGLE_CLOUD_PROJECT", "heygo-ng"))
+	grpcAddr  = env.ListenAddr("GRPC_ADDR", ":9100")
+	groupID   = "driver-service-group"
+	topics    = []string{contracts.TripEventCreated, contracts.TripEventDriverNotInterested, contracts.DriverCmdTripDecline, contracts.DriverCmdLocation}
 )
 
 func main() {
@@ -58,16 +58,13 @@ func main() {
 		logs.L().Info("OpenTelemetry tracing initialized")
 	}
 
-	// Initialize Kafka client
-	kfClient, err := kafka.NewKafkaClient(brokers, groupID)
+	// Initialize the Pub/Sub client. Topics and subscriptions are provisioned by Terraform.
+	bus, err := pubsub.NewClient(ctx, projectID, groupID)
 	if err != nil {
-		logs.L().Fatalw("Failed to create Kafka client", "error", err)
+		logs.L().Fatalw("Failed to create Pub/Sub client", "error", err)
 	}
-	defer kfClient.Close()
-	logs.L().Info("Kafka client connected")
-	if err := kfClient.EnsureTopics(ctx, brokers, kafka.DefaultTopics(), env.GetInt("KAFKA_TOPIC_PARTITIONS", 3), env.GetInt("KAFKA_REPLICATION_FACTOR", 1)); err != nil {
-		logs.L().Fatalw("Failed to provision Kafka topics", "error", err)
-	}
+	defer bus.Close()
+	logs.L().Info("Pub/Sub client connected")
 
 	// Initialize repositories and services
 	databaseURL := env.GetString("DATABASE_URL", "")
@@ -84,10 +81,10 @@ func main() {
 	}
 	driverRepo := repo.NewPostgresDriverRepository(pool)
 	driverService := service.NewDriverService(driverRepo)
-	go messaging.PublishOutbox(ctx, pool, kfClient.Producer)
+	go messaging.PublishOutbox(ctx, pool, bus.Producer)
 
 	// Start consuming trip events
-	tripConsumer := events.NewTripConsumer(kfClient, driverService)
+	tripConsumer := events.NewTripConsumer(bus, driverService)
 	go func() {
 		if err := tripConsumer.RunExpiryWorker(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Warnw("Driver offer expiry worker stopped", "error", err)
@@ -104,9 +101,9 @@ func main() {
 		if err := pool.Ping(checkCtx); err != nil {
 			return err
 		}
-		return kfClient.Ping(checkCtx)
+		return bus.Ping(checkCtx)
 	}
-	grpcServer := NewgRPCServer(grpcAddr, kfClient, driverService, healthCheck)
+	grpcServer := NewgRPCServer(grpcAddr, bus, driverService, healthCheck)
 	go func() {
 		if err := grpcServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("gRPC server error", "error", err)

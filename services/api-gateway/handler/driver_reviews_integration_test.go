@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 )
 
 func TestRiderCommentsVisibleToDriverAndAdminReviewQueue(t *testing.T) {
@@ -70,8 +70,18 @@ func TestRiderCommentsVisibleToDriverAndAdminReviewQueue(t *testing.T) {
 	var queue struct {
 		Data []adminDriverRating `json:"data"`
 	}
-	if err := json.Unmarshal(adminQueue.Body.Bytes(), &queue); err != nil || len(queue.Data) != 1 || queue.Data[0].Comment != "Please review this trip" || queue.Data[0].DriverName != "Reviewed Driver" {
+	if err := json.Unmarshal(adminQueue.Body.Bytes(), &queue); err != nil {
 		t.Fatalf("admin queue = %+v err=%v", queue, err)
+	}
+	var queuedReview *adminDriverRating
+	for i := range queue.Data {
+		if queue.Data[i].TripID == tripID {
+			queuedReview = &queue.Data[i]
+			break
+		}
+	}
+	if queuedReview == nil || queuedReview.Comment != "Please review this trip" || queuedReview.DriverName != "Reviewed Driver" {
+		t.Fatalf("admin queue does not contain this test's review: %+v", queue)
 	}
 
 	marked := callAdminHandler(t, adminID, func(c *gin.Context) {

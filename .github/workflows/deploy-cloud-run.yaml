@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Full Git commit SHA already published for all four services
+        description: Full Git commit SHA already published for all four services and the migration job
         required: true
         type: string
       confirmation:
@@ -59,6 +59,23 @@ jobs:
             gcloud artifacts docker images describe "$REGISTRY/$service:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
             gcloud run services describe "$service" --project="$PROJECT_ID" --region="$REGION" >/dev/null
           done
+          gcloud artifacts docker images describe "$REGISTRY/migration:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
+          gcloud run jobs describe heygo-migration --project="$PROJECT_ID" --region="$REGION" >/dev/null
+
+      - name: Run database migrations
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          gcloud run jobs update heygo-migration \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --image="$REGISTRY/migration:$IMAGE_TAG" \
+            --quiet
+          gcloud run jobs execute heygo-migration \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --wait \
+            --quiet
 
       - name: Create candidate revisions with no production traffic
         env:

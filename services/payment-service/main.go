@@ -95,8 +95,10 @@ func main() {
 		logs.L().Fatalw("Failed to connect to PostgreSQL", "error", err)
 	}
 	defer databasePool.Close()
-	if err := db.Migrate(ctx, databasePool); err != nil {
-		logs.L().Fatalw("Failed to run PostgreSQL/PostGIS migrations", "error", err)
+	if env.GetBool("MIGRATE_ON_STARTUP", true) {
+		if err := db.Migrate(ctx, databasePool); err != nil {
+			logs.L().Fatalw("Failed to run PostgreSQL/PostGIS migrations", "error", err)
+		}
 	}
 	paymentRepo := repo.NewPostgresPaymentRepository(databasePool)
 

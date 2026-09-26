@@ -47,8 +47,10 @@ be configured before enabling their corresponding product features.
 Terraform now defines Cloud SQL, Secret Manager, and all four Cloud Run
 services, but `deploy_services` defaults to `false`. Follow the two-phase
 procedure in `infra/terraform/README.md`: apply the database and secret
-containers, populate external CasperID and Monnify secret versions, and only
-then enable Cloud Run with an immutable image SHA.
+containers, populate external CasperID and Monnify secret versions, create and
+run the separate migration job, and only then enable Cloud Run with an immutable
+image SHA. The services use a read/write database role and do not run migrations
+in Cloud Run.
 
 The current subscribers and outbox publishers are long-running background
 loops, so the initial Cloud Run configuration uses always-allocated CPU and at
@@ -65,8 +67,8 @@ shared internal token continue to protect their routes.
 After the initial Terraform deployment, use the manually dispatched `Deploy
 Cloud Run` GitHub Actions workflow with a full published Git SHA and the exact
 confirmation value `deploy`. It creates tagged candidate revisions with no
-production traffic, checks the public `/ready` endpoints, and only then moves
-traffic to the latest revisions. Configure GitHub's `production` environment
+production traffic after the migration job succeeds, checks the public `/ready`
+endpoints, and only then moves traffic to those verified revisions. Configure GitHub's `production` environment
 with required reviewers before the first rollout. Terraform intentionally
 ignores later container-image changes so releases do not create configuration
 drift.

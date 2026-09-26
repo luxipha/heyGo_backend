@@ -57,8 +57,13 @@ variable "image_tag" {
   default     = ""
 
   validation {
-    condition     = !var.deploy_services || can(regex("^[0-9a-f]{40}$", var.image_tag))
-    error_message = "image_tag must be a full lowercase 40-character Git SHA when deploy_services is true."
+    condition     = var.image_tag == "" || can(regex("^[0-9a-f]{40}$", var.image_tag))
+    error_message = "image_tag must be empty or a full lowercase 40-character Git SHA."
+  }
+
+  validation {
+    condition     = !var.deploy_services || var.image_tag != ""
+    error_message = "image_tag is required when deploy_services is true."
   }
 }
 

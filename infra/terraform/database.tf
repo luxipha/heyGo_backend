@@ -3,6 +3,11 @@ resource "random_password" "database" {
   special = false
 }
 
+resource "random_password" "migration_database" {
+  length  = 32
+  special = false
+}
+
 resource "google_sql_database_instance" "primary" {
   project          = var.project_id
   name             = "heygo-postgres"
@@ -52,10 +57,18 @@ resource "google_sql_database" "application" {
 }
 
 resource "google_sql_user" "application" {
+  project        = var.project_id
+  name           = var.database_user
+  instance       = google_sql_database_instance.primary.name
+  password       = random_password.database.result
+  database_roles = ["pg_read_all_data", "pg_write_all_data"]
+}
+
+resource "google_sql_user" "migration" {
   project  = var.project_id
-  name     = var.database_user
+  name     = "heygo_migrator"
   instance = google_sql_database_instance.primary.name
-  password = random_password.database.result
+  password = random_password.migration_database.result
 }
 
 resource "google_project_iam_member" "runtime_cloud_sql_client" {
@@ -64,4 +77,18 @@ resource "google_project_iam_member" "runtime_cloud_sql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${google_service_account.runtime[each.value].email}"
+}
+
+resource "google_service_account" "migration" {
+  project      = var.project_id
+  account_id   = "heygo-migration"
+  display_name = "HeyGo database migration"
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_project_iam_member" "migration_cloud_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.migration.email}"
 }

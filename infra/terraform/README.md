@@ -7,17 +7,18 @@ This Terraform root provisions the shared deployment foundation and runtime in t
 - the `europe-west1` Docker Artifact Registry;
 - Pub/Sub event topics, per-service subscriptions, dead-letter topics, and IAM;
 - dedicated runtime service accounts for each backend service;
-- a least-privilege GitHub deployment service account; and
-- keyless GitHub Actions authentication through Workload Identity Federation.
+- a least-privilege GitHub deployment service account;
+- keyless GitHub Actions authentication through Workload Identity Federation;
 - a deletion-protected PostgreSQL 16 Cloud SQL instance with backups and
   point-in-time recovery;
-- Secret Manager containers and least-privilege runtime access; and
+- Secret Manager containers and least-privilege runtime access;
+- a dedicated migration job with separate database credentials; and
 - guarded Cloud Run services that use immutable image tags.
 
-Runtime provisioning is deliberately split into two applies. The first creates
-Cloud SQL, generated database/internal credentials, and empty containers for
-external provider secrets. The second creates Cloud Run only after those
-external secret versions and deployment inputs exist.
+Runtime provisioning is deliberately staged. First create Cloud SQL, generated
+database/internal credentials, and empty containers for external provider
+secrets. Next create and execute the migration job. Only then create Cloud Run
+services after external secret versions and deployment inputs exist.
 
 ## Phase 1: database and secret containers
 
@@ -29,8 +30,11 @@ terraform -chdir=infra/terraform plan -out=runtime-foundation.tfplan
 terraform -chdir=infra/terraform apply runtime-foundation.tfplan
 ```
 
-Terraform generates and stores versions for `heygo-database-url` and
-`heygo-internal-service-token`. Add values for the externally owned credentials
+Terraform generates and stores versions for `heygo-database-url`,
+`heygo-migration-database-url`, and `heygo-internal-service-token`. The
+long-running services use the database role with read/write privileges;
+the migration job alone receives the elevated database credential. Add values
+for the externally owned credentials
 without placing their plaintext in Terraform variables, GitHub, or the repo:
 
 ```sh
@@ -57,9 +61,19 @@ unset SECRET_VALUE
 
 ## Phase 2: Cloud Run
 
-Use a full Git commit SHA whose four images already exist in Artifact Registry.
-Set `deploy_services = true`, `image_tag`, `allowed_origins`, and `app_url` in an
-ignored `terraform.tfvars`, then plan and apply again.
+Use a full Git commit SHA whose five images already exist in Artifact Registry.
+First set `image_tag` while keeping `deploy_services = false`, plan, and apply
+to create the migration job. Run the schema migrations before any services
+start:
+
+```sh
+gcloud run jobs execute heygo-migration --project=heygo-ng --region=europe-west1 --wait
+```
+
+Then set `deploy_services = true`, `allowed_origins`, and `app_url` in an
+ignored `terraform.tfvars`, review the plan, and apply again. The runtime
+services set `MIGRATE_ON_STARTUP=false`; local development keeps its existing
+automatic migration behavior.
 
 Driver and Trip remain IAM-protected. API Gateway obtains Google-signed ID
 tokens from its runtime identity for gRPC calls, in addition to the existing
@@ -77,8 +91,9 @@ WebSocket fan-out are required before scale-to-zero or multi-instance Gateway.
 Once the services exist, application releases use the manually dispatched
 `Deploy Cloud Run` workflow. Configure required reviewers on the GitHub
 `production` environment. The workflow deploys candidate revisions without
-production traffic, checks public readiness, and promotes them only after the
-checks pass. Terraform owns runtime configuration while ignoring subsequent
+production traffic after running database migrations, checks public readiness,
+and promotes the verified revisions only after the checks pass. Terraform owns
+runtime configuration while ignoring subsequent
 image-only revisions made by that workflow.
 
 ## Trust boundary

@@ -10,9 +10,12 @@ artifact_repository_id = "heygo"
 deploy_services = false
 cloud_sql_tier  = "db-f1-micro"
 
+# Set this after the PR merges and all five images are published. It creates
+# the migration job while deploy_services remains false.
+# image_tag = "0123456789abcdef0123456789abcdef01234567"
+
 # Populate the external secret versions documented in README.md, then set these
 # values for the controlled Phase 2 Cloud Run deployment.
 # deploy_services = true
-# image_tag        = "0123456789abcdef0123456789abcdef01234567"
 # allowed_origins  = "https://app.example.com,https://admin.example.com"
 # app_url          = "https://app.example.com"

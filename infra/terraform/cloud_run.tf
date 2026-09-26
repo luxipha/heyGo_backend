@@ -86,6 +86,10 @@ resource "google_cloud_run_v2_service" "driver" {
         name  = "GCP_PROJECT_ID"
         value = var.project_id
       }
+      env {
+        name  = "MIGRATE_ON_STARTUP"
+        value = "false"
+      }
 
       dynamic "env" {
         for_each = local.driver_service_secrets
@@ -177,6 +181,10 @@ resource "google_cloud_run_v2_service" "trip" {
       env {
         name  = "GCP_PROJECT_ID"
         value = var.project_id
+      }
+      env {
+        name  = "MIGRATE_ON_STARTUP"
+        value = "false"
       }
       env {
         name  = "CASPERID_BASE_URL"
@@ -273,6 +281,10 @@ resource "google_cloud_run_v2_service" "payment" {
       env {
         name  = "GCP_PROJECT_ID"
         value = var.project_id
+      }
+      env {
+        name  = "MIGRATE_ON_STARTUP"
+        value = "false"
       }
       env {
         name  = "APP_URL"
@@ -380,6 +392,10 @@ resource "google_cloud_run_v2_service" "api_gateway" {
       env {
         name  = "GCP_PROJECT_ID"
         value = var.project_id
+      }
+      env {
+        name  = "MIGRATE_ON_STARTUP"
+        value = "false"
       }
       env {
         name  = "ALLOWED_ORIGINS"

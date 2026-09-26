@@ -9,11 +9,12 @@ import (
 	"strings"
 	"time"
 
-	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
-	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	"github.com/luxipha/heyGo_backend/shared/env"
 )
 
 var topupHTTPClient = &http.Client{Timeout: 20 * time.Second}
@@ -46,6 +47,10 @@ func (a *driverAPI) createOperatingTopup(ctx *gin.Context) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Service-Token", env.GetString("INTERNAL_SERVICE_TOKEN", ""))
+	if err := sharedauth.AddCloudRunIdentity(req, env.GetString("PAYMENT_SERVICE_AUDIENCE", "")); err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "topup_unavailable", "Top-up checkout is unavailable")
+		return
+	}
 	res, err := topupHTTPClient.Do(req)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "topup_unavailable", "Top-up checkout is unavailable")

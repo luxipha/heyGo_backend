@@ -1,12 +1,13 @@
 package grpcclient
 
 import (
+	"context"
+
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type driverServiceClient struct {
@@ -17,9 +18,12 @@ type driverServiceClient struct {
 // NewDriverServiceClient creates a new gRPC client for the Driver Service.
 func NewDriverServiceClient() (*driverServiceClient, error) {
 	driverServiceURL := env.GetString("DRIVER_SERVICE_URL", "driver-service:9100")
+	transportOptions, err := sharedauth.GRPCTransportOptions(context.Background(), env.GetString("DRIVER_SERVICE_AUDIENCE", ""))
+	if err != nil {
+		return nil, err
+	}
 	conn, err := grpc.NewClient(driverServiceURL,
-		append(traces.DialOptionsWithTracing(),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		append(append(traces.DialOptionsWithTracing(), transportOptions...),
 			grpc.WithUnaryInterceptor(sharedauth.UnaryClientInterceptor(env.GetString("INTERNAL_SERVICE_TOKEN", ""))))...,
 	)
 	if err != nil {

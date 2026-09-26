@@ -1,6 +1,6 @@
 # HeyGo Google Cloud foundation
 
-This Terraform root provisions the shared deployment foundation in the
+This Terraform root provisions the shared deployment foundation and runtime in the
 `heygo-ng` project:
 
 - required Google Cloud APIs;
@@ -9,10 +9,77 @@ This Terraform root provisions the shared deployment foundation in the
 - dedicated runtime service accounts for each backend service;
 - a least-privilege GitHub deployment service account; and
 - keyless GitHub Actions authentication through Workload Identity Federation.
+- a deletion-protected PostgreSQL 16 Cloud SQL instance with backups and
+  point-in-time recovery;
+- Secret Manager containers and least-privilege runtime access; and
+- guarded Cloud Run services that use immutable image tags.
 
-It intentionally does not create Cloud Run services, databases, or application
-secrets. Those resources depend on the managed-dependency and runtime work that
-follows this foundation.
+Runtime provisioning is deliberately split into two applies. The first creates
+Cloud SQL, generated database/internal credentials, and empty containers for
+external provider secrets. The second creates Cloud Run only after those
+external secret versions and deployment inputs exist.
+
+## Phase 1: database and secret containers
+
+Keep `deploy_services = false`, review the plan, and apply it. This creates a
+billable `db-f1-micro` Cloud SQL instance. It does not create Cloud Run services.
+
+```sh
+terraform -chdir=infra/terraform plan -out=runtime-foundation.tfplan
+terraform -chdir=infra/terraform apply runtime-foundation.tfplan
+```
+
+Terraform generates and stores versions for `heygo-database-url` and
+`heygo-internal-service-token`. Add values for the externally owned credentials
+without placing their plaintext in Terraform variables, GitHub, or the repo:
+
+```sh
+read -rs 'SECRET_VALUE?CasperID app ID: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-casperid-app-id --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+
+read -rs 'SECRET_VALUE?CasperID API secret: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-casperid-api-secret --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+
+read -rs 'SECRET_VALUE?Monnify API key: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-api-key --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+
+read -rs 'SECRET_VALUE?Monnify secret key: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-secret-key --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+
+read -rs 'SECRET_VALUE?Monnify contract code: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-contract-code --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+```
+
+## Phase 2: Cloud Run
+
+Use a full Git commit SHA whose four images already exist in Artifact Registry.
+Set `deploy_services = true`, `image_tag`, `allowed_origins`, and `app_url` in an
+ignored `terraform.tfvars`, then plan and apply again.
+
+Driver and Trip remain IAM-protected. API Gateway obtains Google-signed ID
+tokens from its runtime identity for gRPC calls, in addition to the existing
+application-level internal token. API Gateway is public. Payment Service is
+also public because Monnify must reach its webhook; its `/internal/*` routes
+continue to require the internal token.
+
+All four services currently run pull subscribers or background outbox workers,
+so they use always-allocated CPU and a minimum instance count of one. API
+Gateway is temporarily capped at one instance because its Pub/Sub subscription
+feeds in-memory WebSocket connections. This is operationally correct but not
+the final low-cost topology; authenticated Pub/Sub push delivery and durable
+WebSocket fan-out are required before scale-to-zero or multi-instance Gateway.
+
+Once the services exist, application releases use the manually dispatched
+`Deploy Cloud Run` workflow. Configure required reviewers on the GitHub
+`production` environment. The workflow deploys candidate revisions without
+production traffic, checks public readiness, and promotes them only after the
+checks pass. Terraform owns runtime configuration while ignoring subsequent
+image-only revisions made by that workflow.
 
 ## Trust boundary
 

@@ -1,12 +1,13 @@
 package grpcclient
 
 import (
+	"context"
+
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type tripServiceClient struct {
@@ -17,11 +18,14 @@ type tripServiceClient struct {
 // NewTripServiceClient creates a new gRPC client for the Trip Service.
 func NewTripServiceClient() (*tripServiceClient, error) {
 	tripServiceURL := env.GetString("TRIP_SERVICE_URL", "trip-service:9000")
+	transportOptions, err := sharedauth.GRPCTransportOptions(context.Background(), env.GetString("TRIP_SERVICE_AUDIENCE", ""))
+	if err != nil {
+		return nil, err
+	}
 	conn, err := grpc.NewClient(
 		tripServiceURL,
-		append(
-			traces.DialOptionsWithTracing(),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		append(append(
+			traces.DialOptionsWithTracing(), transportOptions...),
 			grpc.WithUnaryInterceptor(sharedauth.UnaryClientInterceptor(env.GetString("INTERNAL_SERVICE_TOKEN", ""))),
 		)...,
 	)

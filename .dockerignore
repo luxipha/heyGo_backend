@@ -1,7 +1,14 @@
 .git
+.github
 .dev
+docs
+infra
 tmp
 .env
 .env.*
+**/.terraform
+*.tfplan
+*.tfstate
+*.tfstate.*
 coverage.out
 trip-service

@@ -22,9 +22,10 @@ import (
 )
 
 var (
-	brokers = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
-	groupID = "trip-service-group"
-	topics  = []string{contracts.DriverCmdTripAccept, contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete, contracts.TripCmdCancel, contracts.TripCmdRate}
+	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
+	grpcAddr = env.ListenAddr("GRPC_ADDR", ":9000")
+	groupID  = "trip-service-group"
+	topics   = []string{contracts.DriverCmdTripAccept, contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete, contracts.TripCmdCancel, contracts.TripCmdRate}
 )
 
 func main() {
@@ -108,7 +109,7 @@ func main() {
 		}
 		return kfClient.Ping(checkCtx)
 	}
-	gRPCServer := NewgRPCServer(":9000", tripService, kfClient, healthCheck)
+	gRPCServer := NewgRPCServer(grpcAddr, tripService, kfClient, healthCheck)
 	go func() {
 		if err := gRPCServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("gRPC server error", "error", err)

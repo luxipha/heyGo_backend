@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	httpAddr = env.GetString("HTTP_ADDR", ":8080")
+	httpAddr = env.ListenAddr("HTTP_ADDR", ":8080")
 	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
 	groupID  = "api-gateway-group"
 	topics   = []string{

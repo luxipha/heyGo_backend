@@ -1,0 +1,7 @@
+project_id             = "heygo-ng"
+region                 = "europe-west1"
+github_repository      = "luxipha/heyGo_backend"
+github_repository_id   = "1369862034"
+github_owner_id        = "202601895"
+github_deploy_branch   = "main"
+artifact_repository_id = "heygo"

@@ -1,0 +1,84 @@
+name: GCP foundation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - infra/terraform/**
+      - .github/workflows/gcp-foundation.yaml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - infra/terraform/**
+      - .github/workflows/gcp-foundation.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcp-foundation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform-validate:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.4
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialize without remote state
+        run: terraform init -backend=false -input=false
+
+      - name: Validate configuration
+        run: terraform validate -no-color
+
+  workload-identity:
+    name: Verify keyless Google Cloud access
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: heygo-ng
+          workload_identity_provider: projects/392496443029/locations/global/workloadIdentityPools/github-actions/providers/heygo-backend
+          service_account: github-cloud-run-deployer@heygo-ng.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Verify Artifact Registry access
+        run: >-
+          gcloud artifacts repositories describe heygo
+          --project=heygo-ng
+          --location=europe-west1
+          --format='value(name)'
+
+      - name: Verify Cloud Run access
+        run: >-
+          gcloud run services list
+          --project=heygo-ng
+          --region=europe-west1
+          --platform=managed
+          --format='value(metadata.name)'

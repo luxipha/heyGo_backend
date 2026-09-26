@@ -17,6 +17,17 @@ func GetString(key, defaultValue string) string {
 	return val
 }
 
+// ListenAddr returns an address suitable for a service's inbound listener.
+// Cloud Run injects PORT and requires the ingress container to listen on it.
+// Outside Cloud Run, the service-specific address and legacy default remain in
+// effect so local and Kubernetes deployments keep their existing ports.
+func ListenAddr(key, defaultValue string) string {
+	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
+		return ":" + port
+	}
+	return GetString(key, defaultValue)
+}
+
 func GetCSV(key string, defaultValues []string) []string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {

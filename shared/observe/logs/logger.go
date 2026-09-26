@@ -42,7 +42,7 @@ func loadConfig(serviceName string) Config {
 	return Config{
 		Format:     env.GetString("LOG_FORMAT", "json"),
 		Rotate:     env.GetBool("LOG_ROTATE", true),
-		LogFile:    fmt.Sprintf("/var/log/%s.log", serviceName),
+		LogFile:    env.GetString("LOG_FILE", ""),
 		MaxSize:    env.GetInt("LOG_MAX_SIZE_MB", 50),
 		MaxBackups: env.GetInt("LOG_MAX_BACKUPS", 5),
 		MaxAge:     env.GetInt("LOG_MAX_AGE_DAYS", 30),

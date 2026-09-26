@@ -1,7 +1,8 @@
 # Build stage
 FROM golang:1.26.8-bookworm AS builder
 # Install dependencies
-RUN apt-get update && apt-get install -y pkg-config build-essential librdkafka-dev
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config build-essential librdkafka-dev \
+    && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app
 # Copy go mod and sum files
@@ -17,12 +18,14 @@ RUN CGO_ENABLED=1 GOOS=linux CC=gcc go build -a -installsuffix cgo -o main ./ser
 # Final stage
 FROM debian:bookworm-slim
 # Install dependencies
-RUN apt-get update && apt-get install -y librdkafka1 ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends librdkafka1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 # Set working directory
-WORKDIR /root/
+WORKDIR /app
 # Copy the binary from builder stage
-COPY --from=builder /app/main .
+COPY --from=builder --chown=65532:65532 /app/main /app/main
 # Expose port 8080
 EXPOSE 8080
-# Run the binary
-CMD ["./main"]
+# Run without root privileges. Cloud Run injects PORT at runtime.
+USER 65532:65532
+ENTRYPOINT ["/app/main"]

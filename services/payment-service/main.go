@@ -25,7 +25,7 @@ var (
 	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
 	groupID  = "payment-service-group"
 	appURL   = env.GetString("APP_URL", "http://localhost:3000")
-	httpAddr = env.GetString("PAYMENT_HTTP_ADDR", ":9200")
+	httpAddr = env.ListenAddr("PAYMENT_HTTP_ADDR", ":9200")
 	topics   = []string{contracts.PaymentCmdCreateSession}
 )
 

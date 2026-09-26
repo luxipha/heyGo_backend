@@ -1,0 +1,118 @@
+name: Cloud Run images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .dockerignore
+      - .github/workflows/cloud-run-images.yaml
+      - go.mod
+      - go.sum
+      - services/**
+      - shared/**
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .dockerignore
+      - .github/workflows/cloud-run-images.yaml
+      - go.mod
+      - go.sum
+      - services/**
+      - shared/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-run-images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: europe-west1-docker.pkg.dev/heygo-ng/heygo
+
+jobs:
+  validate:
+    name: Build ${{ matrix.service }} image
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - driver-service
+          - payment-service
+          - trip-service
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build image
+        run: >-
+          docker build
+          --file services/${{ matrix.service }}/Dockerfile
+          --label org.opencontainers.image.revision=${{ github.event.pull_request.head.sha }}
+          --tag local/${{ matrix.service }}:${{ github.event.pull_request.head.sha }}
+          .
+
+      - name: Verify non-root runtime
+        run: >-
+          test "$(docker image inspect
+          --format '{{.Config.User}}'
+          local/${{ matrix.service }}:${{ github.event.pull_request.head.sha }})"
+          = "65532:65532"
+
+  publish:
+    name: Publish ${{ matrix.service }} image
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - driver-service
+          - payment-service
+          - trip-service
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: heygo-ng
+          workload_identity_provider: projects/392496443029/locations/global/workloadIdentityPools/github-actions/providers/heygo-backend
+          service_account: github-cloud-run-deployer@heygo-ng.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Artifact Registry authentication
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Build immutable image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+        run: >-
+          docker build
+          --file services/${{ matrix.service }}/Dockerfile
+          --label org.opencontainers.image.revision=${{ github.sha }}
+          --tag "${IMAGE}"
+          .
+
+      - name: Verify non-root runtime
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+        run: test "$(docker image inspect --format '{{.Config.User}}' "${IMAGE}")" = "65532:65532"
+
+      - name: Push immutable image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+        run: docker push "${IMAGE}"

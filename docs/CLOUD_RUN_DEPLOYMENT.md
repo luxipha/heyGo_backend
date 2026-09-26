@@ -33,7 +33,7 @@ The services intentionally fail startup when required dependencies or secrets
 are missing. Do not deploy a revision until these are ready:
 
 - PostgreSQL/PostGIS and a `DATABASE_URL` secret;
-- Kafka brokers and compatible client authentication;
+- Pub/Sub topics/subscriptions from `infra/terraform` and `GCP_PROJECT_ID=heygo-ng`;
 - shared `INTERNAL_SERVICE_TOKEN` secret;
 - CasperID application ID and API secret;
 - Monnify API key, secret key, and contract code for `payment-service`;
@@ -44,11 +44,15 @@ be configured before enabling their corresponding product features.
 
 ## Deployment boundary
 
-Cloud Run services are not created by the foundation yet. PostgreSQL and Kafka
-are paid, stateful dependencies whose sizing and networking must be selected
-before deployment. Driver and Trip use gRPC and must have HTTP/2 end-to-end
-enabled. Internal services should remain IAM-protected; API Gateway will need
-Cloud Run Invoker grants and Google-signed ID tokens for synchronous calls.
+Cloud Run services and PostgreSQL are not created by the foundation yet. Pub/Sub
+is provisioned by the foundation with per-service pull subscriptions and
+dead-letter policies. The current subscribers and outbox publishers are
+long-running background loops, so their first Cloud Run deployment must use
+always-allocated CPU and at least one instance. Converting delivery to
+authenticated Pub/Sub push endpoints is the later scale-to-zero optimization.
+Driver and Trip use gRPC and must have HTTP/2 end-to-end enabled. Internal
+services should remain IAM-protected; API Gateway will need Cloud Run Invoker
+grants and Google-signed ID tokens for synchronous calls.
 
 After those dependency decisions are made, add the Cloud Run services to
 Terraform, attach pinned Secret Manager versions, run migrations as a separate

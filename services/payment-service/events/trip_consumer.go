@@ -6,39 +6,38 @@ import (
 	"fmt"
 	"time"
 
-	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 )
 
 type TripConsumer struct {
-	kfClient *kafka.KafkaClient
-	svc      repo.Service
+	bus *pubsub.Client
+	svc repo.Service
 }
 
-func NewTripConsumer(kfClient *kafka.KafkaClient, svc repo.Service) *TripConsumer {
-	return &TripConsumer{kfClient: kfClient, svc: svc}
+func NewTripConsumer(bus *pubsub.Client, svc repo.Service) *TripConsumer {
+	return &TripConsumer{bus: bus, svc: svc}
 }
 
 func (tc *TripConsumer) Consume(ctx context.Context, topics []string) error {
-	return tc.kfClient.Consumer.SubscribeAndConsume(ctx, topics,
-		func(ctx context.Context, m *ckafka.Message) error {
-			var kafkaMsg contracts.KafkaMessage
-			if err := json.Unmarshal(m.Value, &kafkaMsg); err != nil {
+	return tc.bus.Consumer.SubscribeAndConsume(ctx, topics,
+		func(ctx context.Context, m *pubsub.Message) error {
+			var eventMsg contracts.EventMessage
+			if err := json.Unmarshal(m.Data, &eventMsg); err != nil {
 				return fmt.Errorf("failed to unmarshal message: %w", err)
 			}
 
 			var payload messaging.PaymentTripResponseData
-			if kafkaMsg.Data != nil {
-				if err := json.Unmarshal(kafkaMsg.Data, &payload); err != nil {
+			if eventMsg.Data != nil {
+				if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
 					return fmt.Errorf("failed to unmarshal payload: %w", err)
 				}
 			}
 
-			switch *m.TopicPartition.Topic {
+			switch m.Topic {
 			case contracts.PaymentCmdCreateSession:
 				if err := tc.handleTripAccepted(ctx, payload); err != nil {
 					return err
@@ -79,8 +78,8 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 		return fmt.Errorf("failed to marshal data: %w", err)
 	}
 
-	if err := tc.kfClient.Producer.SendMessageAndWait(ctx, contracts.PaymentEventSessionCreated,
-		&contracts.KafkaMessage{
+	if err := tc.bus.Producer.SendMessageAndWait(ctx, contracts.PaymentEventSessionCreated,
+		&contracts.EventMessage{
 			EntityID: payload.RiderID,
 			Data:     data,
 		},

@@ -4,8 +4,7 @@
 #   ./scripts/dev-stop.sh                    stop all four services
 #   ./scripts/dev-stop.sh trip-service       stop one service
 #
-# Kafka is a separate Homebrew service:
-#   brew services stop kafka
+# Stop a separately started Pub/Sub emulator from its own terminal/session.
 
 set -eu
 

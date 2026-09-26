@@ -5,13 +5,14 @@ This Terraform root provisions the shared deployment foundation in the
 
 - required Google Cloud APIs;
 - the `europe-west1` Docker Artifact Registry;
+- Pub/Sub event topics, per-service subscriptions, dead-letter topics, and IAM;
 - dedicated runtime service accounts for each backend service;
 - a least-privilege GitHub deployment service account; and
 - keyless GitHub Actions authentication through Workload Identity Federation.
 
-It intentionally does not create Cloud Run services, databases, Kafka, or
-application secrets. Those resources depend on the Cloud Run compatibility and
-managed-dependency work that follows this foundation.
+It intentionally does not create Cloud Run services, databases, or application
+secrets. Those resources depend on the managed-dependency and runtime work that
+follows this foundation.
 
 ## Trust boundary
 

@@ -8,23 +8,23 @@ import (
 	"net"
 	"time"
 
-	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
-	"github.com/luxipha/heyGo_backend/shared/observe/logs"
-	"github.com/luxipha/heyGo_backend/shared/proto/driver"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	"github.com/luxipha/heyGo_backend/shared/proto/driver"
 )
 
 const maxWebSocketMessageBytes = 64 << 10
 
 // RidersWSHandler handles WebSocket connections for riders
-func RidersWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *messaging.ConnectionManager, pool *pgxpool.Pool) {
+func RidersWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messaging.ConnectionManager, pool *pgxpool.Pool) {
 	conn, err := connManager.Upgrade(ctx.Writer, ctx.Request)
 	if err != nil {
 		logs.L().Errorw("websocket upgrade failed", "error", err)
@@ -55,7 +55,7 @@ func RidersWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mess
 }
 
 // DriversWSHandler handles WebSocket connections for drivers
-func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *messaging.ConnectionManager, pool *pgxpool.Pool) {
+func DriversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messaging.ConnectionManager, pool *pgxpool.Pool) {
 	conn, err := connManager.Upgrade(ctx.Writer, ctx.Request)
 	if err != nil {
 		logs.L().Errorw("websocket upgrade failed", "error", err)
@@ -171,7 +171,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 				continue
 			}
 			// Persist the trusted socket reading before acknowledging it through
-			// Kafka. Go Online can then use a location sent while still offline.
+			// Pub/Sub. Go Online can then use a location sent while still offline.
 			locationTx, err := pool.Begin(ctx.Request.Context())
 			if err != nil {
 				logs.L().Errorw("failed to begin driver location update", "driverID", driverID, "error", err)
@@ -194,7 +194,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 				continue
 			}
 			trustedData, _ := json.Marshal(location)
-			if err := kfc.Producer.SendMessage(ctx, dm.Type, &contracts.KafkaMessage{EntityID: driverID, Data: trustedData}); err != nil {
+			if err := bus.Producer.SendMessage(ctx, dm.Type, &contracts.EventMessage{EntityID: driverID, Data: trustedData}); err != nil {
 				logs.L().Errorw("failed to publish driver location", "driverID", driverID, "error", err)
 			}
 		case contracts.DriverCmdTripAccept, contracts.DriverCmdTripDecline:
@@ -214,7 +214,7 @@ func DriversWSHandler(ctx *gin.Context, kfc *kafka.KafkaClient, connManager *mes
 				continue
 			}
 			// Notify trip service about trip acceptance/decline
-			if err := kfc.Producer.SendMessageAndWait(ctx, dm.Type, &contracts.KafkaMessage{
+			if err := bus.Producer.SendMessageAndWait(ctx, dm.Type, &contracts.EventMessage{
 				EntityID: driverID,
 				Data:     trustedData,
 			}, 5*time.Second); err != nil {

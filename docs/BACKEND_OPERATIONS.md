@@ -2,14 +2,17 @@
 
 ## Deployment decisions
 
-- Development uses one Kafka KRaft broker with replication factor 1.
-- Production requires three or more brokers, replication factor 3, and minimum in-sync replicas 2. The single-node development manifest is not a production Kafka topology.
-- Multi-region operation is not part of the initial definition of done. The initial production target is one highly available region. A later multi-region design must address PostgreSQL ownership, Kafka replication, payment-webhook routing, and WebSocket affinity together.
+- Commands and events use Google Cloud Pub/Sub in `heygo-ng`; no Kafka cluster is required.
+- Production initially targets one region. A later multi-region design must address PostgreSQL ownership, Pub/Sub routing, payment-webhook routing, and WebSocket affinity together.
 - Images use the repository release tag `0.1.0`; release automation must update the tag instead of deploying `latest`.
 
 ## Required configuration
 
-Backend services require `KAFKA_BROKERS`, `KAFKA_TOPIC_PARTITIONS`, and `KAFKA_REPLICATION_FACTOR`. Kafka topic auto-creation is disabled. Services provision the versioned application topics and matching `.dlq` topics during startup.
+Backend services require `GCP_PROJECT_ID` (or `GOOGLE_CLOUD_PROJECT`) and
+Application Default Credentials with their service-specific Pub/Sub IAM grants.
+Terraform provisions topics, subscriptions, ordering, retry policies, and
+matching `.dlq` topics; applications never create messaging infrastructure at
+startup. Local development may use `PUBSUB_EMULATOR_HOST`.
 
 Driver OAuth code exchange additionally requires `CASPERID_API_SECRET`,
 `CASPERID_TOKEN_URL`, and `CASPERID_DRIVER_REDIRECT_URI` on API Gateway. The
@@ -46,13 +49,17 @@ minimum, statutory charge, or market boundary is seeded.
 
 ## Event operations
 
-All Kafka envelopes use schema version `1`, a unique event ID, and a correlation ID. A consumer tries a failed handler four times with bounded backoff and then publishes the original envelope to `<topic>.dlq` before committing its source offset. Alert on non-empty dead-letter topics and replay only after fixing the underlying handler or data contract.
+All event envelopes use schema version `1`, a unique event ID, and a correlation
+ID. `EntityID` is the Pub/Sub ordering key. A failed delivery is negatively
+acknowledged; each subscription retries with bounded backoff and forwards the
+message to `<topic>.dlq` after five delivery attempts. Alert on non-empty
+dead-letter topics and replay only after fixing the handler or data contract.
 
 Migration `016_trip_event_outbox.sql` stores core trip transitions, offers,
 expiry, decline, reassignment and retry events in `trip_event_outbox` with the
 state change. Trip and driver service
 replicas share one advisory lock while publishing pending rows in ID order.
-The publisher waits for Kafka acknowledgement before setting `published_at`;
+The publisher waits for Pub/Sub acknowledgement before setting `published_at`;
 a crash can send the same stable `trip-outbox-<id>` event twice, so consumers
 must remain idempotent. Monitor `SELECT COUNT(*), MIN(created_at) FROM
 trip_event_outbox WHERE published_at IS NULL` and investigate an aging backlog.
@@ -81,8 +88,11 @@ rollout.
 - `/metrics` exports Prometheus HTTP request and latency metrics.
 - Trip and driver services expose the standard gRPC health service.
 - Import `infra/observability/grafana-dashboard.json` and load `infra/observability/prometheus-rules.yaml` into the monitoring stack.
-- `X-Correlation-ID` is returned to callers and propagated through gRPC and Kafka.
+- `X-Correlation-ID` is returned to callers and propagated through gRPC and Pub/Sub.
 
 ## Release verification
 
-Run `go test ./...`, `go vet ./...`, `staticcheck ./...`, and `govulncheck ./...`. With `TEST_DATABASE_URL` pointing at a disposable PostGIS database, tests execute migrations and verify required tables and the extension. A live completion claim additionally requires the Minikube/Kafka/PostGIS/Moniepoint/CasperID flow described by task 73.
+Run `go test ./...`, `go vet ./...`, `staticcheck ./...`, and `govulncheck ./...`.
+With `TEST_DATABASE_URL` pointing at a disposable PostGIS database, tests execute
+migrations and verify required tables and the extension. Pub/Sub integration
+tests additionally require `TEST_GCP_PROJECT_ID` and `PUBSUB_EMULATOR_HOST`.

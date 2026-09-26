@@ -16,17 +16,17 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 	"github.com/luxipha/heyGo_backend/shared/storage"
 )
 
 var (
-	httpAddr = env.ListenAddr("HTTP_ADDR", ":8080")
-	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
-	groupID  = "api-gateway-group"
-	topics   = []string{
+	httpAddr  = env.ListenAddr("HTTP_ADDR", ":8080")
+	projectID = env.GetString("GCP_PROJECT_ID", env.GetString("GOOGLE_CLOUD_PROJECT", "heygo-ng"))
+	groupID   = "api-gateway-group"
+	topics    = []string{
 		contracts.TripEventNoDriversFound,
 		contracts.TripEventDriverAssigned,
 		contracts.DriverCmdTripRequest,
@@ -112,18 +112,15 @@ func main() {
 	handler.StartPrivacyJobs(ctx, pool, files)
 	handler.StartNotificationPushJobs(ctx, pool)
 
-	// Initialize Kafka client
-	kfClient, err := kafka.NewKafkaClient(brokers, groupID)
+	// Initialize the Pub/Sub client. Topics and subscriptions are provisioned by Terraform.
+	bus, err := pubsub.NewClient(ctx, projectID, groupID)
 	if err != nil {
-		logs.L().Fatalw("Failed to create Kafka client", "error", err)
+		logs.L().Fatalw("Failed to create Pub/Sub client", "error", err)
 	}
-	defer kfClient.Close()
-	logs.L().Info("Kafka client connected")
-	if err := kfClient.EnsureTopics(ctx, brokers, kafka.DefaultTopics(), env.GetInt("KAFKA_TOPIC_PARTITIONS", 3), env.GetInt("KAFKA_REPLICATION_FACTOR", 1)); err != nil {
-		logs.L().Fatalw("Failed to provision Kafka topics", "error", err)
-	}
+	defer bus.Close()
+	logs.L().Info("Pub/Sub client connected")
 
-	topicConsumer := messaging.NewTopicConsumer(kfClient, connManager, topics, messaging.NewEventStore(pool))
+	topicConsumer := messaging.NewTopicConsumer(bus, connManager, topics, messaging.NewEventStore(pool))
 	go func() {
 		if err := topicConsumer.Consume(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Warnw("Error consuming topics", "error", err)
@@ -135,7 +132,7 @@ func main() {
 		if err := pool.Ping(checkCtx); err != nil {
 			return err
 		}
-		if err := kfClient.Ping(checkCtx); err != nil {
+		if err := bus.Ping(checkCtx); err != nil {
 			return err
 		}
 		return verifier.Ping(checkCtx)
@@ -146,7 +143,7 @@ func main() {
 		TokenURL:          env.GetString("CASPERID_TOKEN_URL", "https://apis.casperid.com/api/oauth/token"),
 		DriverRedirectURI: env.GetString("CASPERID_DRIVER_REDIRECT_URI", "com.heygo.driver://oauth/callback"),
 	}
-	httpServer := NewhttpServer(httpAddr, kfClient, connManager, authMiddleware, users, pool, files, origins, oauthConfig, readiness)
+	httpServer := NewhttpServer(httpAddr, bus, connManager, authMiddleware, users, pool, files, origins, oauthConfig, readiness)
 	go func() {
 		if err := httpServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("http server error", "error", err)

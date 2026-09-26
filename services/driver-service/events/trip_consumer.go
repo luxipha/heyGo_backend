@@ -7,31 +7,30 @@ import (
 	"fmt"
 	"time"
 
-	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/luxipha/heyGo_backend/services/driver-service/repo"
 	"github.com/luxipha/heyGo_backend/services/driver-service/service"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	kf "github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 )
 
 type TripConsumer struct {
-	kfClient *kf.KafkaClient
-	svc      service.DriverService
+	bus *pubsub.Client
+	svc service.DriverService
 }
 
-func NewTripConsumer(client *kf.KafkaClient, svc service.DriverService) *TripConsumer {
-	return &TripConsumer{kfClient: client, svc: svc}
+func NewTripConsumer(bus *pubsub.Client, svc service.DriverService) *TripConsumer {
+	return &TripConsumer{bus: bus, svc: svc}
 }
 
 func (c *TripConsumer) Consume(ctx context.Context, topics []string) error {
-	return c.kfClient.Consumer.SubscribeAndConsume(ctx, topics, func(ctx context.Context, msg *ckafka.Message) error {
-		var envelope contracts.KafkaMessage
-		if err := json.Unmarshal(msg.Value, &envelope); err != nil {
-			return fmt.Errorf("decode Kafka envelope: %w", err)
+	return c.bus.Consumer.SubscribeAndConsume(ctx, topics, func(ctx context.Context, msg *pubsub.Message) error {
+		var envelope contracts.EventMessage
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			return fmt.Errorf("decode event envelope: %w", err)
 		}
-		switch *msg.TopicPartition.Topic {
+		switch msg.Topic {
 		case contracts.TripEventCreated, contracts.TripEventDriverNotInterested:
 			return c.match(ctx, envelope.Data)
 		case contracts.DriverCmdTripDecline:
@@ -53,7 +52,7 @@ func (c *TripConsumer) Consume(ctx context.Context, topics []string) error {
 			if riderID == "" {
 				return nil
 			}
-			return c.kfClient.Producer.SendMessage(ctx, contracts.DriverEventLocationUpdated, &contracts.KafkaMessage{EntityID: riderID, Data: envelope.Data})
+			return c.bus.Producer.SendMessage(ctx, contracts.DriverEventLocationUpdated, &contracts.EventMessage{EntityID: riderID, Data: envelope.Data})
 		default:
 			return nil
 		}
@@ -88,7 +87,7 @@ func (c *TripConsumer) match(ctx context.Context, raw []byte) error {
 		return nil // The durable offer from the first reservation is still pending.
 	}
 	if errors.Is(err, repo.ErrNoAvailableDriver) {
-		return c.kfClient.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.KafkaMessage{EntityID: payload.Trip.RiderID, Data: raw})
+		return c.bus.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.EventMessage{EntityID: payload.Trip.RiderID, Data: raw})
 	}
 	if err != nil {
 		return err

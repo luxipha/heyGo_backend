@@ -16,16 +16,16 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 )
 
 var (
-	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
-	grpcAddr = env.ListenAddr("GRPC_ADDR", ":9000")
-	groupID  = "trip-service-group"
-	topics   = []string{contracts.DriverCmdTripAccept, contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete, contracts.TripCmdCancel, contracts.TripCmdRate}
+	projectID = env.GetString("GCP_PROJECT_ID", env.GetString("GOOGLE_CLOUD_PROJECT", "heygo-ng"))
+	grpcAddr  = env.ListenAddr("GRPC_ADDR", ":9000")
+	groupID   = "trip-service-group"
+	topics    = []string{contracts.DriverCmdTripAccept, contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete, contracts.TripCmdCancel, contracts.TripCmdRate}
 )
 
 func main() {
@@ -60,16 +60,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Initialize Kafka client
-	kfClient, err := kafka.NewKafkaClient(brokers, groupID)
+	// Initialize the Pub/Sub client. Topics and subscriptions are provisioned by Terraform.
+	bus, err := pubsub.NewClient(ctx, projectID, groupID)
 	if err != nil {
-		logs.L().Fatalw("Failed to create Kafka client", "error", err)
+		logs.L().Fatalw("Failed to create Pub/Sub client", "error", err)
 	}
-	defer kfClient.Close()
-	logs.L().Infof("Kafka client connected")
-	if err := kfClient.EnsureTopics(ctx, brokers, kafka.DefaultTopics(), env.GetInt("KAFKA_TOPIC_PARTITIONS", 3), env.GetInt("KAFKA_REPLICATION_FACTOR", 1)); err != nil {
-		logs.L().Fatalw("Failed to provision Kafka topics", "error", err)
-	}
+	defer bus.Close()
+	logs.L().Infof("Pub/Sub client connected")
 
 	// Initialize repositories and services
 	databaseURL := env.GetString("DATABASE_URL", "")
@@ -86,7 +83,7 @@ func main() {
 	}
 	tripRepo := repo.NewPostgresRepository(pool)
 	tripService := service.NewService(tripRepo)
-	go messaging.PublishOutbox(ctx, pool, kfClient.Producer)
+	go messaging.PublishOutbox(ctx, pool, bus.Producer)
 
 	// Start consuming driver responses
 	casperIDAppID := env.GetString("CASPERID_APP_ID", "")
@@ -95,7 +92,7 @@ func main() {
 		logs.L().Fatal("CASPERID_APP_ID and CASPERID_API_SECRET are required")
 	}
 	reporter := trustclient.NewCasperIDReporter(env.GetString("CASPERID_BASE_URL", "https://casperid.com"), casperIDAppID, casperIDSecret)
-	driverConsumer := events.NewDriverConsumer(kfClient, tripService, reporter)
+	driverConsumer := events.NewDriverConsumer(bus, tripService, reporter)
 	go func() {
 		if err := driverConsumer.Consume(ctx, topics); err != nil {
 			logs.L().Warnw("Error consuming driver topics", "error", err)
@@ -107,9 +104,9 @@ func main() {
 		if err := pool.Ping(checkCtx); err != nil {
 			return err
 		}
-		return kfClient.Ping(checkCtx)
+		return bus.Ping(checkCtx)
 	}
-	gRPCServer := NewgRPCServer(grpcAddr, tripService, kfClient, healthCheck)
+	gRPCServer := NewgRPCServer(grpcAddr, tripService, bus, healthCheck)
 	go func() {
 		if err := gRPCServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("gRPC server error", "error", err)

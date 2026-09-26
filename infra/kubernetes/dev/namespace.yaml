@@ -23,6 +23,4 @@ data:
   monnify-base-url: "https://sandbox.monnify.com"
   monnify-redirect-url: "http://localhost:3000?payment=pending"
   exporter-endpoint: "http://jaeger-collector:4318"
-  kafka-brokers: "apache-kafka-0.apache-kafka.heygo.svc.cluster.local:9092"
-  kafka-topic-partitions: "3"
-  kafka-replication-factor: "1"
+  gcp-project-id: "heygo-ng"

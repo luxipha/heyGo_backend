@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
-	"github.com/gorilla/websocket"
 )
 
 const eventPollInterval = 250 * time.Millisecond
@@ -26,7 +26,7 @@ type sessionEventReader interface {
 var errSocketSessionSuperseded = errors.New("driver socket session was superseded")
 
 // attachEventStream reads the common database log, so the WebSocket can be
-// hosted on any gateway replica regardless of which one consumed Kafka.
+// hosted on any gateway replica regardless of which one consumed Pub/Sub.
 func attachEventStream(ctx context.Context, manager *messaging.ConnectionManager, conn *websocket.Conn, store eventReader, recipientID, after string) (context.CancelFunc, error) {
 	return attachEventStreamForSession(ctx, manager, conn, store, recipientID, "", after)
 }

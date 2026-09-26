@@ -8,6 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	grpcclient "github.com/luxipha/heyGo_backend/services/api-gateway/grpc-client"
 	"github.com/luxipha/heyGo_backend/services/api-gateway/types"
@@ -15,13 +18,10 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/driverstate"
 	"github.com/luxipha/heyGo_backend/shared/httpmiddleware"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/metrics"
 	"github.com/luxipha/heyGo_backend/shared/storage"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc/codes"
@@ -29,7 +29,7 @@ import (
 )
 
 // NewHTTPHandler initializes the HTTP handler with routes and middleware
-func NewHTTPHandler(kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, oauth CasperIDOAuthConfig, readiness func(context.Context) error) *gin.Engine {
+func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, oauth CasperIDOAuthConfig, readiness func(context.Context) error) *gin.Engine {
 	r := gin.Default()
 
 	middleware := otelgin.Middleware("api-gateway", otelgin.WithTracerProvider(otel.GetTracerProvider()))
@@ -62,27 +62,27 @@ func NewHTTPHandler(kfc *kafka.KafkaClient, connMgr *messaging.ConnectionManager
 	riderRatings := authenticated.Group("/rider", gatewayauth.RequireRole("rider"))
 	riderRatings.POST("/trips/:tripID/rating", func(ctx *gin.Context) {
 		ctx.Set("riderRating", true)
-		publishLifecycleCommand(ctx, kfc, contracts.TripCmdRate)
+		publishLifecycleCommand(ctx, bus, contracts.TripCmdRate)
 	})
 	authenticated.POST("/trip/preview", gatewayauth.RequireRole("rider"), func(ctx *gin.Context) { previewTripHandler(ctx, pool) })
 	authenticated.POST("/trip/start", gatewayauth.RequireRole("rider"), tripStartHandler)
-	authenticated.POST("/trips/:tripID/complete", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) { publishLifecycleCommand(ctx, kfc, contracts.TripCmdComplete) })
-	authenticated.POST("/trips/:tripID/arrival", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) { publishLifecycleCommand(ctx, kfc, contracts.TripCmdArrive) })
-	authenticated.POST("/trips/:tripID/start", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) { publishLifecycleCommand(ctx, kfc, contracts.TripCmdStart) })
-	authenticated.POST("/trips/:tripID/cancel", func(ctx *gin.Context) { publishLifecycleCommand(ctx, kfc, contracts.TripCmdCancel) })
-	authenticated.POST("/trips/:tripID/rating", func(ctx *gin.Context) { publishLifecycleCommand(ctx, kfc, contracts.TripCmdRate) })
+	authenticated.POST("/trips/:tripID/complete", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdComplete) })
+	authenticated.POST("/trips/:tripID/arrival", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdArrive) })
+	authenticated.POST("/trips/:tripID/start", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdStart) })
+	authenticated.POST("/trips/:tripID/cancel", func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdCancel) })
+	authenticated.POST("/trips/:tripID/rating", func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdRate) })
 	registerTripChatRoutes(authenticated, pool)
 	authenticated.GET("/ws/riders", gatewayauth.RequireRole("rider"), func(ctx *gin.Context) {
-		RidersWSHandler(ctx, kfc, connMgr, pool)
+		RidersWSHandler(ctx, bus, connMgr, pool)
 	})
 	authenticated.GET("/ws/drivers", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) {
-		DriversWSHandler(ctx, kfc, connMgr, pool)
+		DriversWSHandler(ctx, bus, connMgr, pool)
 	})
 
 	return r
 }
 
-func publishLifecycleCommand(ctx *gin.Context, kfc *kafka.KafkaClient, command string) {
+func publishLifecycleCommand(ctx *gin.Context, bus *pubsub.Client, command string) {
 	user, _ := gatewayauth.CurrentUser(ctx)
 	payload := messaging.TripLifecycleCommand{TripID: ctx.Param("tripID"), ActorID: user.ID}
 	if _, err := uuid.Parse(payload.TripID); err != nil {
@@ -139,11 +139,11 @@ func publishLifecycleCommand(ctx *gin.Context, kfc *kafka.KafkaClient, command s
 		driverError(ctx, http.StatusInternalServerError, "command_encoding_failed", "Failed to encode command")
 		return
 	}
-	message := &contracts.KafkaMessage{EntityID: user.ID, Data: data}
+	message := &contracts.EventMessage{EntityID: user.ID, Data: data}
 	if key := strings.TrimSpace(ctx.GetHeader("Idempotency-Key")); key != "" {
 		message.EventID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(user.ID+":"+key)).String()
 	}
-	if err := kfc.Producer.SendMessage(ctx, command, message); err != nil {
+	if err := bus.Producer.SendMessage(ctx, command, message); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "command_unavailable", "Failed to queue trip command")
 		return
 	}

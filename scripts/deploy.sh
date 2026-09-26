@@ -6,14 +6,12 @@ echo "Deploying to Kubernetes cluster..."
 
 kubectl apply -f infra/kubernetes/dev/namespace.yaml
 kubectl apply -f infra/kubernetes/dev/secrets.yaml
-kubectl apply -f infra/kubernetes/dev/apache-kafka.yaml
 kubectl apply -f infra/kubernetes/dev/api-gateway.yaml
 kubectl apply -f infra/kubernetes/dev/trip-service.yaml
 kubectl apply -f infra/kubernetes/dev/driver-service.yaml
 kubectl apply -f infra/kubernetes/dev/payment-service.yaml
 
 echo "Waiting for deployments to be ready..."
-kubectl rollout status statefulset/apache-kafka -n heygo --timeout=300s
 kubectl rollout status deployment/api-gateway -n heygo --timeout=300s
 kubectl rollout status deployment/trip-service -n heygo --timeout=300s
 kubectl rollout status deployment/driver-service -n heygo --timeout=300s

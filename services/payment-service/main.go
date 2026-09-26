@@ -16,17 +16,17 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/env"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
 )
 
 var (
-	brokers  = env.GetCSV("KAFKA_BROKERS", []string{"apache-kafka:9092"})
-	groupID  = "payment-service-group"
-	appURL   = env.GetString("APP_URL", "http://localhost:3000")
-	httpAddr = env.ListenAddr("PAYMENT_HTTP_ADDR", ":9200")
-	topics   = []string{contracts.PaymentCmdCreateSession}
+	projectID = env.GetString("GCP_PROJECT_ID", env.GetString("GOOGLE_CLOUD_PROJECT", "heygo-ng"))
+	groupID   = "payment-service-group"
+	appURL    = env.GetString("APP_URL", "http://localhost:3000")
+	httpAddr  = env.ListenAddr("PAYMENT_HTTP_ADDR", ":9200")
+	topics    = []string{contracts.PaymentCmdCreateSession}
 )
 
 func main() {
@@ -60,15 +60,12 @@ func main() {
 		logs.L().Info("OpenTelemetry tracing initialized")
 	}
 
-	kfClient, err := kafka.NewKafkaClient(brokers, groupID)
+	bus, err := pubsub.NewClient(ctx, projectID, groupID)
 	if err != nil {
-		logs.L().Fatalw("Failed to create Kafka client", "error", err)
+		logs.L().Fatalw("Failed to create Pub/Sub client", "error", err)
 	}
-	defer kfClient.Close()
-	logs.L().Info("Kafka client connected")
-	if err := kfClient.EnsureTopics(ctx, brokers, kafka.DefaultTopics(), env.GetInt("KAFKA_TOPIC_PARTITIONS", 3), env.GetInt("KAFKA_REPLICATION_FACTOR", 1)); err != nil {
-		logs.L().Fatalw("Failed to provision Kafka topics", "error", err)
-	}
+	defer bus.Close()
+	logs.L().Info("Pub/Sub client connected")
 
 	paymentCfg := &types.PaymentConfig{
 		BaseURL:      env.GetString("MONNIFY_BASE_URL", "https://sandbox.monnify.com"),
@@ -106,7 +103,7 @@ func main() {
 	paymentProcessor := service.NewMonnifyClient(paymentCfg)
 	paymentService := service.NewPaymentService(paymentProcessor, paymentRepo)
 
-	tripConsumer := events.NewTripConsumer(kfClient, paymentService)
+	tripConsumer := events.NewTripConsumer(bus, paymentService)
 	go func() {
 		if err := tripConsumer.Consume(ctx, topics); err != nil && ctx.Err() == nil {
 			logs.L().Warnw("Error consuming payment topics", "error", err)
@@ -118,12 +115,12 @@ func main() {
 		if err := databasePool.Ping(checkCtx); err != nil {
 			return err
 		}
-		if err := kfClient.Ping(checkCtx); err != nil {
+		if err := bus.Ping(checkCtx); err != nil {
 			return err
 		}
 		return paymentProcessor.Ping(checkCtx)
 	}
-	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, kfClient,
+	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, bus,
 		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
 			Initializer: paymentProcessor, Verifier: paymentProcessor}, readiness)
 	go func() {

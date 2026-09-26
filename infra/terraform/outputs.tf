@@ -17,3 +17,13 @@ output "workload_identity_provider" {
   description = "Full provider name required by google-github-actions/auth."
   value       = google_iam_workload_identity_pool_provider.github.name
 }
+
+output "pubsub_topics" {
+  description = "Application Pub/Sub topics provisioned for HeyGo events and commands."
+  value       = sort(keys(google_pubsub_topic.events))
+}
+
+output "pubsub_subscriptions" {
+  description = "Per-service pull subscriptions replacing Kafka consumer groups."
+  value       = sort(keys(google_pubsub_subscription.events))
+}

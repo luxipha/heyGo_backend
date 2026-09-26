@@ -5,6 +5,7 @@ locals {
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
     "orgpolicy.googleapis.com",
+    "pubsub.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
     "sts.googleapis.com",

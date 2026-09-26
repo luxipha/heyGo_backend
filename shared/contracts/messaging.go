@@ -2,8 +2,9 @@ package contracts
 
 import "fmt"
 
-// KafkaMessage represents a message structure for Kafka communication.
-type KafkaMessage struct {
+// EventMessage is the versioned transport-neutral envelope used for commands
+// and events.
+type EventMessage struct {
 	Version       string `json:"version"`
 	EventID       string `json:"eventID"`
 	CorrelationID string `json:"correlationID,omitempty"`
@@ -13,7 +14,7 @@ type KafkaMessage struct {
 
 const EventSchemaVersion = "1"
 
-func (m KafkaMessage) Validate() error {
+func (m EventMessage) Validate() error {
 	if m.Version != EventSchemaVersion {
 		return fmt.Errorf("unsupported event schema version %q", m.Version)
 	}

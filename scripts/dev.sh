@@ -8,8 +8,8 @@
 #
 # Stop everything with: ./scripts/dev-stop.sh
 #
-# Environment comes from .env.local (gitignored). Kafka must be running:
-#   brew services start kafka
+# Environment comes from .env.local (gitignored). For local messaging, start
+# the Google Cloud Pub/Sub emulator and export PUBSUB_EMULATOR_HOST.
 #
 # Background logs: .dev/<service>.log   (tail -f .dev/trip-service.log)
 
@@ -35,7 +35,7 @@ esac
 
 if [ ! -f "$ENV_FILE" ]; then
 	echo "error: $ENV_FILE not found" >&2
-	echo "       copy .env.local.example or create it with DATABASE_URL and KAFKA_BROKERS" >&2
+	echo "       copy .env.local.example or create it with DATABASE_URL and GCP_PROJECT_ID" >&2
 	exit 1
 fi
 

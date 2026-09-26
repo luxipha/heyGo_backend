@@ -74,12 +74,8 @@ spec:
                 configMapKeyRef:
                   key: exporter-endpoint
                   name: heygo-config
-            - name: KAFKA_BROKERS
-              valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-brokers}}
-            - name: KAFKA_TOPIC_PARTITIONS
-              valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-topic-partitions}}
-            - name: KAFKA_REPLICATION_FACTOR
-              valueFrom: {configMapKeyRef: {name: heygo-config, key: kafka-replication-factor}}
+            - name: GCP_PROJECT_ID
+              valueFrom: {configMapKeyRef: {name: heygo-config, key: gcp-project-id}}
           readinessProbe:
             httpGet: {path: /ready, port: 9200}
             initialDelaySeconds: 10

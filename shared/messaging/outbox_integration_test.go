@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	shareddb "github.com/luxipha/heyGo_backend/shared/db"
-	"github.com/luxipha/heyGo_backend/shared/messaging/kafka"
+	gpubsub "cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type outboxTestPublisher struct {
@@ -20,10 +23,10 @@ type outboxTestPublisher struct {
 	after func()
 }
 
-func TestOutboxKafkaGatewayReplayDeduplicates(t *testing.T) {
-	url, brokers := os.Getenv("TEST_DATABASE_URL"), os.Getenv("TEST_KAFKA_BROKERS")
-	if url == "" || brokers == "" {
-		t.Skip("TEST_DATABASE_URL and TEST_KAFKA_BROKERS are required")
+func TestOutboxPubSubGatewayReplayDeduplicates(t *testing.T) {
+	url, projectID := os.Getenv("TEST_DATABASE_URL"), os.Getenv("TEST_GCP_PROJECT_ID")
+	if url == "" || projectID == "" || os.Getenv("PUBSUB_EMULATOR_HOST") == "" {
+		t.Skip("TEST_DATABASE_URL, TEST_GCP_PROJECT_ID, and PUBSUB_EMULATOR_HOST are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -43,7 +46,7 @@ func TestOutboxKafkaGatewayReplayDeduplicates(t *testing.T) {
 		_, _ = pool.Exec(cleanup, `DELETE FROM ride_fares WHERE id=$1::UUID`, fareID)
 		_, _ = pool.Exec(cleanup, `DELETE FROM users WHERE id=$1::UUID`, riderID)
 	})
-	if _, err := pool.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles) VALUES($1::UUID,$2,$3,ARRAY['rider'])`, riderID, "kafka-"+riderID, "kafka-"+riderID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles) VALUES($1::UUID,$2,$3,ARRAY['rider'])`, riderID, "pubsub-"+riderID, "pubsub-"+riderID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO ride_fares(id,rider_id,package_slug,total_fare_minor,route) VALUES($1::UUID,$2::UUID,'sedan',1000,'{}'::JSONB)`, fareID, riderID); err != nil {
@@ -57,28 +60,42 @@ func TestOutboxKafkaGatewayReplayDeduplicates(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO trip_event_outbox(trip_id,topic,recipient_id,payload) VALUES($1::UUID,$2,$3::UUID,$4::JSONB) RETURNING id`, tripID, contracts.TripEventStarted, riderID, payload).Scan(&outboxID); err != nil {
 		t.Fatal(err)
 	}
-	kfc, err := kafka.NewKafkaClient(strings.Split(brokers, ","), "heygo-outbox-test-"+uuid.NewString())
+	groupID := "heygo-outbox-test-" + uuid.NewString()
+	topicName := "projects/" + projectID + "/topics/" + contracts.TripEventStarted
+	subscriptionName := "projects/" + projectID + "/subscriptions/" + pubsub.SubscriptionID(groupID, contracts.TripEventStarted)
+	admin, err := gpubsub.NewClient(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(kfc.Close)
-	if err := kfc.EnsureTopics(ctx, strings.Split(brokers, ","), []string{contracts.TripEventStarted}, 1, 1); err != nil {
+	t.Cleanup(func() { _ = admin.Close() })
+	if _, err := admin.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{Name: topicName}); err != nil && status.Code(err) != codes.AlreadyExists {
 		t.Fatal(err)
 	}
+	if _, err := admin.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{Name: subscriptionName, Topic: topicName, EnableMessageOrdering: true}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = admin.SubscriptionAdminClient.DeleteSubscription(context.Background(), &pubsubpb.DeleteSubscriptionRequest{Subscription: subscriptionName})
+	})
+	bus, err := pubsub.NewClient(ctx, projectID, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(bus.Close)
 	consumerCtx, stopConsumer := context.WithCancel(ctx)
 	t.Cleanup(stopConsumer)
 	go func() {
-		_ = NewTopicConsumer(kfc, nil, []string{contracts.TripEventStarted}, NewEventStore(pool)).Consume(consumerCtx)
+		_ = NewTopicConsumer(bus, nil, []string{contracts.TripEventStarted}, NewEventStore(pool)).Consume(consumerCtx)
 	}()
-	if published, err := publishNext(ctx, pool, kfc.Producer); err != nil || !published {
-		t.Fatalf("initial Kafka publish: published=%v err=%v", published, err)
+	if published, err := publishNext(ctx, pool, bus.Producer); err != nil || !published {
+		t.Fatalf("initial Pub/Sub publish: published=%v err=%v", published, err)
 	}
 	waitForEventCount(t, ctx, pool, riderID, 1)
 	if _, err := pool.Exec(ctx, `UPDATE trip_event_outbox SET published_at=NULL WHERE id=$1`, outboxID); err != nil {
 		t.Fatal(err)
 	}
-	if published, err := publishNext(ctx, pool, kfc.Producer); err != nil || !published {
-		t.Fatalf("Kafka replay: published=%v err=%v", published, err)
+	if published, err := publishNext(ctx, pool, bus.Producer); err != nil || !published {
+		t.Fatalf("Pub/Sub replay: published=%v err=%v", published, err)
 	}
 	time.Sleep(750 * time.Millisecond)
 	var count int
@@ -86,7 +103,7 @@ func TestOutboxKafkaGatewayReplayDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if count != 1 {
-		t.Fatalf("replayed Kafka event created %d user events; want 1", count)
+		t.Fatalf("replayed Pub/Sub event created %d user events; want 1", count)
 	}
 }
 
@@ -192,7 +209,7 @@ func waitForEventCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, re
 	t.Fatalf("timed out waiting for %d user events: %v", want, ctx.Err())
 }
 
-func (p *outboxTestPublisher) SendMessageAndWait(_ context.Context, _ string, message *contracts.KafkaMessage, _ time.Duration) error {
+func (p *outboxTestPublisher) SendMessageAndWait(_ context.Context, _ string, message *contracts.EventMessage, _ time.Duration) error {
 	p.ids = append(p.ids, message.EventID)
 	if p.after != nil {
 		p.after()

@@ -1,8 +1,5 @@
 # Build stage
 FROM golang:1.26.8-bookworm AS builder
-# Install dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config build-essential librdkafka-dev \
-    && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app
 # Copy go mod and sum files
@@ -13,12 +10,12 @@ RUN go mod download
 COPY services/trip-service/ ./services/trip-service/
 COPY shared/ ./shared/
 # Build the trip-service binary
-RUN CGO_ENABLED=1 GOOS=linux CC=gcc go build -a -installsuffix cgo -o main ./services/trip-service
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o main ./services/trip-service
 
 # Final stage
 FROM debian:bookworm-slim
 # Install dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends librdkafka1 ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Set working directory
 WORKDIR /app

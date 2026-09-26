@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25.1-bookworm AS builder
+FROM golang:1.26.8-bookworm AS builder
 # Install dependencies
 RUN apt-get update && apt-get install -y pkg-config build-essential librdkafka-dev
 # Set working directory

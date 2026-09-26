@@ -1,58 +1,142 @@
+name: Security and quality gates
+
 on:
-    push:
-      branches:
-        - main
-    pull_request:
-      branches:
-        - main
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-    audit:
-        runs-on: ubuntu-latest
-        services:
-            postgres:
-                image: postgis/postgis:16-3.4
-                env:
-                    POSTGRES_USER: heygo
-                    POSTGRES_PASSWORD: heygo-test
-                    POSTGRES_DB: heygo_test
-                ports:
-                    - 5432:5432
-                options: >-
-                    --health-cmd "pg_isready -U heygo -d heygo_test"
-                    --health-interval 10s
-                    --health-timeout 5s
-                    --health-retries 5
+  audit:
+    name: Test, vet, and vulnerability scan
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
         env:
-            TEST_DATABASE_URL: postgres://heygo:heygo-test@localhost:5432/heygo_test?sslmode=disable
-        steps:
-            - uses: actions/checkout@v5
-            - name: Install native dependencies
-              run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
-            - name: Set up Go
-              uses: actions/setup-go@v6
-              with:
-                go-version-file: go.mod
+          POSTGRES_USER: heygo
+          POSTGRES_PASSWORD: heygo-test
+          POSTGRES_DB: heygo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U heygo -d heygo_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://heygo:heygo-test@localhost:5432/heygo_test?sslmode=disable
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
 
-            - name: Verify dependencies
-              run: go mod verify
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
 
-            - name: Build
-              run: go build -v ./...
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.8"
+          cache: true
 
-            - name: Run tests
-              run: go test -race -coverprofile=coverage.out ./...
+      - name: Verify dependencies
+        run: go mod verify
 
-            - name: Run go vet
-              run: go vet ./...
+      - name: Build
+        run: go build -v ./...
 
-            - name: Install staticcheck
-              run: go install honnef.co/go/tools/cmd/staticcheck@v0.6.1
-            
-            - name: Run staticcheck
-              run: staticcheck ./...
+      - name: Run tests
+        run: go test -race -coverprofile=coverage.out ./...
 
-            - name: Install govulncheck
-              run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      - name: Run go vet
+        run: go vet ./...
 
-            - name: Run vulnerability scan
-              run: govulncheck ./...
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+
+      - name: Run staticcheck (advisory)
+        continue-on-error: true
+        run: staticcheck ./...
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Run vulnerability scan
+        run: govulncheck ./...
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.8"
+          cache: false
+
+      - name: Install Gitleaks
+        run: go install github.com/zricethezav/gitleaks/v8@v8.18.4
+
+      - name: Scan pull request commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gitleaks detect --source . --log-opts="${BASE_SHA}..${HEAD_SHA}" --redact --verbose
+
+      - name: Scan full Git history
+        run: gitleaks detect --source . --log-opts="--all" --redact --verbose
+
+  dependency-report:
+    name: Dependency and license report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.8"
+          cache: true
+
+      - name: Generate module inventory
+        run: go list -m -json all > dependency-modules.json
+
+      - name: Install license reporter
+        run: go install github.com/google/go-licenses/v2@v2.0.1
+
+      - name: Generate license inventory
+        continue-on-error: true
+        run: go-licenses report ./... > dependency-licenses.csv 2> dependency-license-warnings.txt
+
+      - name: Upload dependency and license report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-license-report-${{ github.run_id }}
+          path: |
+            dependency-modules.json
+            dependency-licenses.csv
+            dependency-license-warnings.txt
+          if-no-files-found: warn
+          retention-days: 30

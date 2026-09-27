@@ -8,7 +8,7 @@ Driver Earnings are accrued at trip completion, even when the rider pays the dri
 
 A driver may open `/ws/drivers` while offline. The socket sends `driver.cmd.register` with the saved HeyGo profile and vehicle identity; opening it does not go online. The app sends `driver.cmd.location` through this socket before calling `POST /driver/availability` with `{ "available": true }`. The server verifies seven completed requirements, staff approval, the selected vehicle package, a GPS reading from the last 30 minutes, the GPS-derived approved market, and its approved minimum-balance policy. A missing policy blocks Go Online even when the balance is zero; an approved zero minimum permits it. Matching also rejects a GPS reading older than 30 minutes. Calling the endpoint with `false`, losing the socket, or losing approval clears online intent. The response reflects persisted `status`, `available`, and `onlineRequested`; `available` is temporarily false during an offer or trip even if online was requested.
 
-The current Driver Flutter controller still treats socket connection as online and has local inspection and package state. It needs to call the availability endpoint and use the dashboard and onboarding responses before the backend flow is usable through the app.
+The Driver Flutter app requests availability from HeyGo after sending a fresh location and uses server eligibility/dashboard state. A connected socket by itself does not make the driver available. Real CasperID, routing, and multi-service production verification remains outstanding.
 
 ## Operating Balance
 
@@ -36,6 +36,62 @@ The Monnify webhook path authenticates the notification, verifies the transactio
 
 The response `data` has `tripId`, `polyline` (precision 5), `distanceMeters`, `etaSeconds`, and `maneuvers` (`type`, `modifier`, `roadName`, `location`, `distanceMeters`, `durationSeconds`). It uses the configured `OSRM_API` base URL, shared with trip fare routing. Routing has not been exercised against a live OSRM service in this workspace.
 
+## Driver matching algorithm
+
+Matching is a backend dispatch decision. Google Maps renders the driver's map; PostGIS selects and reserves the driver. OSRM calculates road routes for fare/navigation, but the current dispatch ranking does not use road-network distance, ETA, or live traffic.
+
+### Trip market and map inputs
+
+At trip creation, the backend checks the requested pickup and destination coordinates against Admin-approved, effective geofences. Pickup determines the trip market. Pickup and destination regions determine `LOCAL` or `INTERSTATE`; optional airport zones add pickup/drop-off tags. A missing or ambiguous required boundary rejects trip creation. The market, region codes, tags, and geofence versions are saved on the trip, so the rider and driver cannot select these values.
+
+The trip route geometry comes from OSRM. Matching uses the pickup coordinate at the start of that route and the selected vehicle package from the trip fare. Driver GPS is received over the authenticated socket and stored server-side. The Google Maps layer in the app displays the current driver/trip route, but does not make the dispatch decision.
+
+### Candidate filters and ranking
+
+When the trip-created event reaches Driver Service, the backend runs one PostGIS query around the pickup. The current implementation uses a **15,000 metre (15 km) radius** and requires all of these conditions:
+
+- The driver's vehicle package equals the trip's selected package.
+- The driver is `available`, `online_requested`, and eligible under onboarding/staff approval.
+- The driver has an active socket session and a location recorded within the last 30 minutes.
+- The driver's latest location resolves to the trip's stored pickup market.
+- The Operating Balance policy says the driver may receive another offer.
+- The driver has not already been offered this same trip.
+
+```mermaid
+flowchart TD
+    A[Trip created and market frozen] --> B[Read pickup and selected vehicle package]
+    B --> C[Find online, eligible drivers within 15 km]
+    C --> D{Candidates available?}
+    D -- No --> E[Emit trip.event.no_drivers_found]
+    D -- Yes --> F[Rank by adjusted distance, then last_seen_at]
+    F --> G[Lock trip and reserve one driver]
+    G --> H[Send one 20-second trip offer]
+    H --> I{Driver accepts?}
+    I -- Yes --> J[Persist acceptance and acknowledge]
+    I -- Declines or offer expires --> K[Release driver and retry next candidate]
+    K --> C
+```
+
+Acceptance reserves the trip for that driver; the trip itself starts only when the driver later presses **Start Trip**. Rider prepayment is not required.
+
+Eligible candidates are sorted by this current SQL expression:
+
+```text
+adjusted_distance = PostGIS straight-line distance in metres - (trust_score * 2)
+```
+
+The smallest adjusted distance is offered first. If adjusted distances tie, the driver with the most recent `last_seen_at` is first. A missing trust score currently falls back to `100`. For example, a 100-point trust-score difference moves the ranking by 200 metres; it can cause a farther driver to rank ahead of a closer one. The actual `ST_Distance` is also returned as the candidate's distance; the trust adjustment affects ordering, not the displayed distance.
+
+This is currently a **distance-plus-trust heuristic**, not an ETA-first algorithm. The trust-score scale and the `2 metres per point` coefficient are not admin-configured. The CasperID trust-score claim/partner-read contract still needs verification (see JTBD item 20), so the weighting should be confirmed before relying on it for launch decisions.
+
+### Single-driver offer and retries
+
+The database transaction locks the pending trip and candidate driver. `FOR UPDATE SKIP LOCKED` prevents concurrent match workers from reserving the same driver. In the same transaction, the backend creates the assignment, marks the driver unavailable for other offers, assigns the trip, and writes the offer to the transactional outbox. The offer contains its attempt number and expiration time.
+
+Only one driver receives an offer at a time. The current offer lifetime is **20 seconds**. A decline or timeout releases that driver and returns the trip to pending; the next match excludes drivers already attempted for this trip and selects another eligible candidate. If no candidate is available, the backend emits `trip.event.no_drivers_found`. The expiry worker checks for expired offers every two seconds.
+
+The radius and offer lifetime are constants in Driver Service today, not Admin market settings. This section describes the implementation; changing those values or the ranking formula requires separate product decisions and code/configuration work.
+
 ## Offers and decisions
 
 `driver.cmd.trip_request` contains the existing `trip` object (route and selected fare included) plus `offer: { attempt, expiresAt }`. The rider name and photo remain absent until CasperID supplies the exact profile contract; no display values are fabricated.
@@ -52,8 +108,8 @@ Rider-authored rating uses `POST /rider/trips/:tripID/rating` with a 1–5 score
 
 The authenticated Driver can read an optional next-of-kin contact from `GET /driver/safety-contacts` and create or replace it with `PUT /driver/safety-contacts` (`fullName`, `relationship`, `phoneNumber`). Phone values are normalized to E.164; Nigerian local 11-digit mobile numbers are accepted and normalized with the `+234` country code. The contact is private to its owning Driver account.
 
-`GET /driver/performance` returns all-time completed-trip count, Rider-submitted rating average/count, and the Driver's all-time rating percentile. Percentile compares Drivers with at least 25 Rider ratings; the response reports the eligible cohort size and withholds the percentile below that threshold. `GET /driver/reviews?cursor=&limit=` returns the Driver's Rider-submitted ratings and optional comments. Performance, reviews, and next-of-kin APIs are backend implemented; Driver app integration remains separate work.
+`GET /driver/performance` returns all-time completed-trip count, Rider-submitted rating average/count, and the Driver's all-time rating percentile. Percentile compares Drivers with at least 25 Rider ratings; the response reports the eligible cohort size and withholds the percentile below that threshold. `GET /driver/reviews?cursor=&limit=` returns the Driver's Rider-submitted ratings and optional comments. Performance, reviews, and next-of-kin APIs are backend implemented and wired in the Driver app; provider/live-service verification remains separate.
 
-`POST /trips/:tripID/arrival` queues the arrival command and `trip.event.arrived` is committed through the trip outbox. Start Trip remains an explicit driver action. Completion remains asynchronous and returns `202 accepted`; it atomically creates a pending direct-payment settlement for the rounded fare and emits completed and settlement-updated events. The authenticated driver can read `GET /driver/trips/:tripID/settlement`, manually confirm with `POST /driver/trips/:tripID/settlement/confirm`, or dispute with `POST /driver/trips/:tripID/settlement/disputes`. No bank/provider verification is claimed; the first terminal action wins and repeated identical actions are idempotent. The existing `POST /routes/driver` is used on demand; no route-update event is persisted. Driver app wiring for rating tags, history, receipts, arrival/settlement, and live multi-service verification remain outstanding. Unused singular lifecycle aliases have been removed; `/trip/preview` and `/trip/start` remain because `apps/web` calls them.
+`POST /trips/:tripID/arrival` queues the arrival command and `trip.event.arrived` is committed through the trip outbox. Start Trip remains an explicit driver action. Completion remains asynchronous and returns `202 accepted`; it atomically creates a pending direct-payment settlement for the rounded fare and emits completed and settlement-updated events. The authenticated driver can read `GET /driver/trips/:tripID/settlement`, manually confirm with `POST /driver/trips/:tripID/settlement/confirm`, or dispute with `POST /driver/trips/:tripID/settlement/disputes`. No bank/provider verification is claimed; the first terminal action wins and repeated identical actions are idempotent. The Driver app calls arrival and settlement APIs, submits rating tags, and loads paginated history/receipts. Live multi-service verification remains outstanding. The existing `POST /routes/driver` is used on demand; no route-update event is persisted. Unused singular lifecycle aliases have been removed; `/trip/preview` and `/trip/start` remain because `apps/web` calls them.
 
-Fare previews persist the rider-requested pickup and destination coordinates separately from OSRM's snapped route geometry. At trip creation, the backend requires exactly one approved market geofence for pickup and exactly one approved jurisdiction geofence for each endpoint. It also checks airport geofences at both endpoints. A missing required match or any overlapping match rejects creation with `trip_market_unavailable`; no driver or rider can choose the classification. The trip stores market and origin/destination region codes, `LOCAL` or `INTERSTATE`, optional `AIRPORT_PICKUP` and `AIRPORT_DROPOFF` tags, and the IDs and versions of matching geofences. Admin geofence create/list/detail/approval/retirement routes are present and require two distinct staff accounts for publication or retirement. Statutory rule Admin routes and evaluation remain pending. Until approved geofences are configured, trip creation fails closed.
+Fare previews persist the rider-requested pickup and destination coordinates separately from OSRM's snapped route geometry. At trip creation, the backend requires exactly one approved market geofence for pickup and exactly one approved jurisdiction geofence for each endpoint. It also checks airport geofences at both endpoints. A missing required match or any overlapping match rejects creation with `trip_market_unavailable`; no driver or rider can choose the classification. The trip stores market and origin/destination region codes, `LOCAL` or `INTERSTATE`, optional `AIRPORT_PICKUP` and `AIRPORT_DROPOFF` tags, and the IDs and versions of matching geofences. Admin geofence create/list/detail/approval/retirement routes are present and require two distinct staff accounts for publication or retirement. Statutory rule Admin routes and evaluation are implemented; no production rules or market boundaries are seeded, so Admin must configure and approve launch values before trips can be classified or charges applied.

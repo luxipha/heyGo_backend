@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 )
 
 type postgresPaymentRepository struct{ pool *pgxpool.Pool }
@@ -42,6 +42,70 @@ func (r *postgresPaymentRepository) GetByTripID(ctx context.Context, tripID stri
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load payment: %w", err)
+	}
+	return payment, nil
+}
+
+func (r *postgresPaymentRepository) ClaimSessionInitialization(ctx context.Context, payment *types.Payment, token string, leaseUntil time.Time) (*types.Payment, bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("begin payment initialization claim: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	result, err := tx.Exec(ctx, `INSERT INTO payments (
+		id,trip_id,rider_id,driver_id,amount,currency,status,payment_reference,
+		transaction_reference,checkout_url,provider_metadata,created_at,updated_at,
+		initialization_token,initialization_lease_until
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::UUID,$15)
+	ON CONFLICT (trip_id) DO NOTHING`,
+		payment.ID, payment.TripID, payment.RiderID, payment.DriverID, payment.Amount,
+		payment.Currency, payment.Status, payment.PaymentReference, payment.TransactionReference,
+		payment.CheckoutURL, payment.ProviderMetadata, payment.CreatedAt, payment.UpdatedAt, token, leaseUntil)
+	if err != nil {
+		return nil, false, fmt.Errorf("reserve payment initialization: %w", err)
+	}
+	claimed := result.RowsAffected() == 1
+
+	var current *types.Payment
+	var currentToken *string
+	var currentLease *time.Time
+	current, currentToken, currentLease, err = scanPaymentInitialization(tx.QueryRow(ctx, `SELECT `+paymentColumns+`,initialization_token::TEXT,initialization_lease_until FROM payments WHERE trip_id=$1 FOR UPDATE`, payment.TripID))
+	if err != nil {
+		return nil, false, fmt.Errorf("load payment initialization: %w", err)
+	}
+	if current.RiderID != payment.RiderID || current.DriverID != payment.DriverID || current.Amount != payment.Amount || current.Currency != payment.Currency || current.PaymentReference != payment.PaymentReference {
+		return nil, false, fmt.Errorf("payment initialization conflicts with the existing trip payment")
+	}
+	if current.CheckoutURL == "" && !claimed && (currentLease == nil || currentLease.Before(time.Now().UTC())) {
+		if _, err := tx.Exec(ctx, `UPDATE payments SET initialization_token=$2::UUID,initialization_lease_until=$3,updated_at=NOW() WHERE trip_id=$1`, payment.TripID, token, leaseUntil); err != nil {
+			return nil, false, fmt.Errorf("reclaim payment initialization: %w", err)
+		}
+		currentToken = &token
+		claimed = true
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("commit payment initialization claim: %w", err)
+	}
+	return current, claimed && currentToken != nil && *currentToken == token, nil
+}
+
+func (r *postgresPaymentRepository) CompleteSessionInitialization(ctx context.Context, tripID, token string, session *types.ProviderSession) (*types.Payment, error) {
+	payment, err := scanPayment(r.pool.QueryRow(ctx, `UPDATE payments SET
+		payment_reference=$3,transaction_reference=$4,checkout_url=$5,
+		initialization_token=NULL,initialization_lease_until=NULL,updated_at=NOW()
+		WHERE trip_id=$1 AND initialization_token=$2::UUID AND checkout_url=''
+		RETURNING `+paymentColumns,
+		tripID, token, session.PaymentReference, session.TransactionReference, session.CheckoutURL))
+	if errors.Is(err, pgx.ErrNoRows) {
+		payment, err = r.GetByTripID(ctx, tripID)
+		if err == nil && payment.CheckoutURL == "" {
+			return nil, fmt.Errorf("payment initialization claim was lost")
+		}
+		return payment, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("complete payment initialization: %w", err)
 	}
 	return payment, nil
 }
@@ -134,9 +198,9 @@ func (r *postgresPaymentRepository) MarkEventPublished(ctx context.Context, even
 	return nil
 }
 
-const paymentSelect = `SELECT id, trip_id, rider_id, driver_id, amount, currency, status,
-	payment_reference, transaction_reference, checkout_url, provider_metadata, created_at, updated_at
-	FROM payments`
+const paymentColumns = `id,trip_id,rider_id,driver_id,amount,currency,status,
+	payment_reference,transaction_reference,checkout_url,provider_metadata,created_at,updated_at`
+const paymentSelect = `SELECT ` + paymentColumns + ` FROM payments`
 
 type rowScanner interface{ Scan(...any) error }
 
@@ -159,4 +223,27 @@ func scanPayment(row rowScanner) (*types.Payment, error) {
 		}
 	}
 	return &payment, nil
+}
+
+func scanPaymentInitialization(row rowScanner) (*types.Payment, *string, *time.Time, error) {
+	var payment types.Payment
+	var status string
+	var metadata []byte
+	var token *string
+	var lease *time.Time
+	err := row.Scan(
+		&payment.ID, &payment.TripID, &payment.RiderID, &payment.DriverID, &payment.Amount,
+		&payment.Currency, &status, &payment.PaymentReference, &payment.TransactionReference,
+		&payment.CheckoutURL, &metadata, &payment.CreatedAt, &payment.UpdatedAt, &token, &lease,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	payment.Status = types.PaymentStatus(status)
+	if len(metadata) > 0 {
+		if err := json.Unmarshal(metadata, &payment.ProviderMetadata); err != nil {
+			return nil, nil, nil, fmt.Errorf("decode provider metadata: %w", err)
+		}
+	}
+	return &payment, token, lease, nil
 }

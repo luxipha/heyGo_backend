@@ -45,18 +45,20 @@ be configured before enabling their corresponding product features.
 ## Deployment boundary
 
 Terraform now defines Cloud SQL, Secret Manager, and all four Cloud Run
-services, but `deploy_services` defaults to `false`. Follow the two-phase
+services, but `deploy_services` defaults to `false`. Follow the staged
 procedure in `infra/terraform/README.md`: apply the database and secret
 containers, populate external CasperID and Monnify secret versions, create and
 run the separate migration job, and only then enable Cloud Run with an immutable
-image SHA. The services use a read/write database role and do not run migrations
-in Cloud Run.
+image SHA. Keep `retain_pull_subscriber_permissions=true` through the first
+Cloud Run rollout. After authenticated push delivery is verified, set it to
+`false` in a separate cleanup plan. The services use a read/write database role
+and do not run migrations in Cloud Run.
 
-The current subscribers and outbox publishers are long-running background
-loops, so the initial Cloud Run configuration uses always-allocated CPU and at
-least one instance. Converting delivery to authenticated Pub/Sub push endpoints
-is the later scale-to-zero optimization. API Gateway is capped at one instance
-until WebSocket delivery has durable fan-out.
+Production event delivery uses authenticated Pub/Sub push endpoints and
+request-based Cloud Run billing with a minimum instance count of zero. Retained
+pull IAM grants are a temporary rollback safeguard; they do not start pull
+consumers or prevent push delivery. API Gateway remains capped at one instance
+while WebSocket connections are held in memory.
 
 Driver and Trip use gRPC over Cloud Run HTTP/2 and remain IAM-protected. API
 Gateway uses its runtime identity to obtain Google-signed ID tokens for those

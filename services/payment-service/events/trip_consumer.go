@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -23,29 +24,29 @@ func NewTripConsumer(bus *pubsub.Client, svc repo.Service) *TripConsumer {
 }
 
 func (tc *TripConsumer) Consume(ctx context.Context, topics []string) error {
-	return tc.bus.Consumer.SubscribeAndConsume(ctx, topics,
-		func(ctx context.Context, m *pubsub.Message) error {
-			var eventMsg contracts.EventMessage
-			if err := json.Unmarshal(m.Data, &eventMsg); err != nil {
-				return fmt.Errorf("failed to unmarshal message: %w", err)
-			}
+	return tc.bus.Consumer.SubscribeAndConsume(ctx, topics, tc.Handle)
+}
 
-			var payload messaging.PaymentTripResponseData
-			if eventMsg.Data != nil {
-				if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
-					return fmt.Errorf("failed to unmarshal payload: %w", err)
-				}
-			}
+func (tc *TripConsumer) Handle(ctx context.Context, m *pubsub.Message) error {
+	var eventMsg contracts.EventMessage
+	if err := json.Unmarshal(m.Data, &eventMsg); err != nil {
+		return fmt.Errorf("failed to unmarshal message: %w", err)
+	}
 
-			switch m.Topic {
-			case contracts.PaymentCmdCreateSession:
-				if err := tc.handleTripAccepted(ctx, payload); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-	)
+	var payload messaging.PaymentTripResponseData
+	if eventMsg.Data != nil {
+		if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
+			return fmt.Errorf("failed to unmarshal payload: %w", err)
+		}
+	}
+
+	switch m.Topic {
+	case contracts.PaymentCmdCreateSession:
+		if err := tc.handleTripAccepted(ctx, payload); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messaging.PaymentTripResponseData) error {
@@ -80,6 +81,7 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 
 	if err := tc.bus.Producer.SendMessageAndWait(ctx, contracts.PaymentEventSessionCreated,
 		&contracts.EventMessage{
+			EventID:  paymentSessionEventID(payload.TripID),
 			EntityID: payload.RiderID,
 			Data:     data,
 		},
@@ -90,4 +92,9 @@ func (tc *TripConsumer) handleTripAccepted(ctx context.Context, payload messagin
 
 	logs.L().Infow("Payment session created message sent for trip", "tripID", payload.TripID)
 	return nil
+}
+
+func paymentSessionEventID(tripID string) string {
+	digest := sha256.Sum256([]byte("heygo-payment-session-event-v1:" + tripID))
+	return fmt.Sprintf("payment-session-%x", digest[:16])
 }

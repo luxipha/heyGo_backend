@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,6 +14,7 @@ import (
 	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
 	"github.com/luxipha/heyGo_backend/services/payment-service/service"
 	"github.com/luxipha/heyGo_backend/services/payment-service/types"
+	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/env"
@@ -89,7 +91,7 @@ func main() {
 	}
 	databasePool, err := db.NewPostgresPool(ctx, db.Config{
 		URL: databaseURL, MaxConnIdleTime: 30 * time.Second,
-		MaxConns: 20, MinConns: 1,
+		MaxConns: int32(env.GetInt("DB_MAX_CONNS", 3)), MinConns: int32(env.GetInt("DB_MIN_CONNS", 0)),
 	})
 	if err != nil {
 		logs.L().Fatalw("Failed to connect to PostgreSQL", "error", err)
@@ -106,12 +108,23 @@ func main() {
 	paymentService := service.NewPaymentService(paymentProcessor, paymentRepo)
 
 	tripConsumer := events.NewTripConsumer(bus, paymentService)
-	go func() {
-		if err := tripConsumer.Consume(ctx, topics); err != nil && ctx.Err() == nil {
-			logs.L().Warnw("Error consuming payment topics", "error", err)
-		}
-		stop()
-	}()
+	var pushHandler http.Handler
+	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
+	case "pull":
+		go func() {
+			if err := tripConsumer.Consume(ctx, topics); err != nil && ctx.Err() == nil {
+				logs.L().Warnw("Error consuming payment topics", "error", err)
+			}
+			stop()
+		}()
+	case "push":
+		pushHandler = pubsub.NewPushMux(topics, tripConsumer.Handle, sharedauth.NewPubSubPushAuthorizer(
+			env.GetString("PUBSUB_PUSH_AUDIENCE", ""),
+			env.GetString("PUBSUB_PUSH_SERVICE_ACCOUNT", ""),
+		))
+	default:
+		logs.L().Fatalw("Unsupported Pub/Sub delivery mode", "mode", deliveryMode)
+	}
 
 	readiness := func(checkCtx context.Context) error {
 		if err := databasePool.Ping(checkCtx); err != nil {
@@ -125,8 +138,13 @@ func main() {
 	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, bus,
 		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
 			Initializer: paymentProcessor, Verifier: paymentProcessor}, readiness)
+	root := http.NewServeMux()
+	if pushHandler != nil {
+		root.Handle("/internal/pubsub/", pushHandler)
+	}
+	root.Handle("/", router)
 	go func() {
-		if err := handler.ListenAndServe(ctx.Done(), httpAddr, router); err != nil && ctx.Err() == nil {
+		if err := handler.ListenAndServe(ctx.Done(), httpAddr, root); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("Payment HTTP server failed", "error", err)
 			stop()
 		}

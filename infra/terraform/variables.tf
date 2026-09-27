@@ -51,6 +51,17 @@ variable "deploy_services" {
   default     = false
 }
 
+variable "retain_pull_subscriber_permissions" {
+  description = "Retain legacy runtime Pub/Sub pull permissions until authenticated push delivery has been deployed and verified."
+  type        = bool
+  default     = true
+
+  validation {
+    condition     = var.retain_pull_subscriber_permissions || var.deploy_services
+    error_message = "retain_pull_subscriber_permissions cannot be false while deploy_services is false. Deploy and verify authenticated push delivery before removing pull permissions."
+  }
+}
+
 variable "image_tag" {
   description = "Immutable 40-character Git commit SHA published to Artifact Registry. Required when deploy_services is true."
   type        = string
@@ -104,6 +115,17 @@ variable "app_url" {
   validation {
     condition     = !var.deploy_services || can(regex("^https://", var.app_url))
     error_message = "app_url must be an HTTPS URL when deploy_services is true."
+  }
+}
+
+variable "api_gateway_concurrency" {
+  description = "Cloud Run concurrency for API Gateway. Keep 80 until the WebSocket workload is load-tested, then raise toward 400-500."
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.api_gateway_concurrency >= 1 && var.api_gateway_concurrency <= 1000
+    error_message = "api_gateway_concurrency must be between 1 and 1000."
   }
 }
 

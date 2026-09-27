@@ -29,8 +29,12 @@ import (
 )
 
 // NewHTTPHandler initializes the HTTP handler with routes and middleware
-func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, oauth CasperIDOAuthConfig, readiness func(context.Context) error) *gin.Engine {
+func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, oauth CasperIDOAuthConfig, readiness func(context.Context) error, eventStores ...*messaging.EventStore) *gin.Engine {
 	r := gin.Default()
+	eventStore := messaging.NewEventStore(pool)
+	if len(eventStores) > 0 && eventStores[0] != nil {
+		eventStore = eventStores[0]
+	}
 
 	middleware := otelgin.Middleware("api-gateway", otelgin.WithTracerProvider(otel.GetTracerProvider()))
 
@@ -73,10 +77,10 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	authenticated.POST("/trips/:tripID/rating", func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdRate) })
 	registerTripChatRoutes(authenticated, pool)
 	authenticated.GET("/ws/riders", gatewayauth.RequireRole("rider"), func(ctx *gin.Context) {
-		RidersWSHandler(ctx, bus, connMgr, pool)
+		ridersWSHandler(ctx, bus, connMgr, eventStore)
 	})
 	authenticated.GET("/ws/drivers", gatewayauth.RequireRole("driver"), func(ctx *gin.Context) {
-		DriversWSHandler(ctx, bus, connMgr, pool)
+		driversWSHandler(ctx, bus, connMgr, pool, eventStore)
 	})
 
 	return r

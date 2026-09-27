@@ -11,7 +11,10 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 )
 
-const eventPollInterval = 250 * time.Millisecond
+const (
+	eventPollFallbackInterval     = 2 * time.Second
+	eventNotifierRecoveryInterval = 15 * time.Second
+)
 const eventBatchSize = 100
 
 type eventReader interface {
@@ -21,6 +24,10 @@ type eventReader interface {
 
 type sessionEventReader interface {
 	ReadAfterSession(context.Context, string, string, string, int) ([]contracts.WSMessage, bool, error)
+}
+
+type eventWakeSubscriber interface {
+	SubscribeEventWake(string) (<-chan struct{}, func())
 }
 
 var errSocketSessionSuperseded = errors.New("driver socket session was superseded")
@@ -70,10 +77,34 @@ func attachEventStreamForSession(ctx context.Context, manager *messaging.Connect
 		cancel()
 		return nil, err
 	}
+	var wake <-chan struct{}
+	unsubscribe := func() {}
+	if subscriber, ok := store.(eventWakeSubscriber); ok {
+		wake, unsubscribe = subscriber.SubscribeEventWake(recipientID)
+	}
 	go func() {
-		ticker := time.NewTicker(eventPollInterval)
+		defer unsubscribe()
+		fallbackInterval := eventPollFallbackInterval
+		if wake != nil {
+			fallbackInterval = eventNotifierRecoveryInterval
+		}
+		ticker := time.NewTicker(fallbackInterval)
 		defer ticker.Stop()
+		// Read once immediately after subscribing. This closes the window where
+		// an event can be committed after replay but before the wake subscription
+		// is installed. It also lets a replay larger than one batch drain without
+		// waiting for another notification or the recovery ticker.
+		readImmediately := true
 		for {
+			if !readImmediately {
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-wake:
+				case <-ticker.C:
+				}
+			}
+			readImmediately = false
 			events, err := readAfter(streamCtx, cursor)
 			if err != nil {
 				if streamCtx.Err() != nil {
@@ -96,13 +127,9 @@ func attachEventStreamForSession(ctx context.Context, manager *messaging.Connect
 					cursor = event.ID
 				}
 				if len(events) == eventBatchSize {
+					readImmediately = true
 					continue
 				}
-			}
-			select {
-			case <-streamCtx.Done():
-				return
-			case <-ticker.C:
 			}
 		}
 	}()

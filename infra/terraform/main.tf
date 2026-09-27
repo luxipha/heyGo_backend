@@ -1,6 +1,8 @@
 locals {
   required_services = toset([
     "artifactregistry.googleapis.com",
+    "cloudscheduler.googleapis.com",
+    "cloudtasks.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
@@ -53,6 +55,19 @@ resource "google_service_account" "runtime" {
   account_id   = each.key
   display_name = "HeyGo ${each.key} runtime"
   description  = "Runtime identity for the ${each.key} Cloud Run service."
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_service_account" "event_invoker" {
+  project      = var.project_id
+  account_id   = "event-invoker"
+  display_name = "HeyGo event delivery invoker"
+  description  = "OIDC identity used by Pub/Sub push, Cloud Tasks, and Cloud Scheduler."
 
   lifecycle {
     prevent_destroy = true

@@ -50,7 +50,7 @@ func TestMonnifyCheckoutFlow(t *testing.T) {
 		BaseURL: server.URL, APIKey: "api-key", SecretKey: "secret-key",
 		ContractCode: "contract", RedirectURL: "https://heygo.test/payment",
 	})
-	session, err := processor.CreatePaymentSession(context.Background(), 2500, "NGN", map[string]string{
+	session, err := processor.CreatePaymentSession(context.Background(), "heygo-trip-test", 2500, "NGN", map[string]string{
 		"tripID": "trip-1", "riderID": "rider-1", "driverID": "driver-1",
 	})
 	if err != nil {
@@ -58,6 +58,32 @@ func TestMonnifyCheckoutFlow(t *testing.T) {
 	}
 	if session.TransactionReference != "MNFY|1" || session.CheckoutURL != "https://checkout.monnify.test/1" {
 		t.Fatalf("unexpected provider session: %#v", session)
+	}
+}
+
+func TestMonnifyRecoversCheckoutByPaymentReference(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/login" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{"accessToken": "token"}})
+			return
+		}
+		if r.URL.Path != "/api/v2/merchant/transactions/query" || r.URL.Query().Get("paymentReference") != "heygo-trip-test" {
+			t.Errorf("unexpected recovery request: %s", r.URL.String())
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{
+			"transactionReference": "MNFY|recover|1", "paymentReference": "heygo-trip-test", "paymentStatus": "PENDING", "currencyCode": "NGN", "amountPaid": 0, "totalPayable": 25,
+		}})
+	}))
+	defer server.Close()
+	client := NewMonnifyClient(&types.PaymentConfig{BaseURL: server.URL, APIKey: "key", SecretKey: "secret"})
+	session, err := client.RecoverPaymentSession(context.Background(), "heygo-trip-test", 2500, "NGN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.TransactionReference != "MNFY|recover|1" || session.CheckoutURL != "https://sdk.monnify.com/checkout/MNFY%7Crecover%7C1" {
+		t.Fatalf("unexpected recovered provider session: %#v", session)
 	}
 }
 

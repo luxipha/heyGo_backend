@@ -25,6 +25,10 @@ const maxWebSocketMessageBytes = 64 << 10
 
 // RidersWSHandler handles WebSocket connections for riders
 func RidersWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messaging.ConnectionManager, pool *pgxpool.Pool) {
+	ridersWSHandler(ctx, bus, connManager, messaging.NewEventStore(pool))
+}
+
+func ridersWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messaging.ConnectionManager, store *messaging.EventStore) {
 	conn, err := connManager.Upgrade(ctx.Writer, ctx.Request)
 	if err != nil {
 		logs.L().Errorw("websocket upgrade failed", "error", err)
@@ -36,7 +40,7 @@ func RidersWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagin
 	user, _ := gatewayauth.CurrentUser(ctx)
 	riderID := user.ID
 
-	cancelStream, err := attachEventStream(ctx.Request.Context(), connManager, conn, messaging.NewEventStore(pool), riderID, ctx.Query("afterEventId"))
+	cancelStream, err := attachEventStream(ctx.Request.Context(), connManager, conn, store, riderID, ctx.Query("afterEventId"))
 	if err != nil {
 		logs.L().Errorw("failed to attach rider event stream", "riderID", riderID, "error", err)
 		return
@@ -56,6 +60,10 @@ func RidersWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagin
 
 // DriversWSHandler handles WebSocket connections for drivers
 func DriversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messaging.ConnectionManager, pool *pgxpool.Pool) {
+	driversWSHandler(ctx, bus, connManager, pool, messaging.NewEventStore(pool))
+}
+
+func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messaging.ConnectionManager, pool *pgxpool.Pool, store *messaging.EventStore) {
 	conn, err := connManager.Upgrade(ctx.Writer, ctx.Request)
 	if err != nil {
 		logs.L().Errorw("websocket upgrade failed", "error", err)
@@ -100,7 +108,6 @@ func DriversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			logs.L().Errorw("failed to mark disconnected driver offline", "driverID", driverID, "error", err)
 		}
 	}()
-	store := messaging.NewEventStore(pool)
 	cancelStream, err := attachEventStreamForSession(ctx.Request.Context(), connManager, conn, store, driverID, sessionID, ctx.Query("afterEventId"))
 	if err != nil {
 		logs.L().Errorw("failed to replay driver events", "driverID", driverID, "error", err)

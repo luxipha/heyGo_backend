@@ -28,6 +28,9 @@ func (r *matchingRepo) MatchAndReserve(_ context.Context, tripID, packageSlug st
 	r.tripID, r.packageSlug, r.lat, r.lng, r.radius, r.ttl, r.payload = tripID, packageSlug, lat, lng, radius, ttl, payload
 	return &repo.Candidate{Driver: &driverpb.Driver{Id: "driver-1"}}, nil
 }
+func (r *matchingRepo) ActiveOffer(context.Context, string) (*repo.Candidate, error) {
+	return nil, repo.ErrNoActiveOffer
+}
 func (r *matchingRepo) DeclineAssignment(context.Context, string, string) (*repo.RetryTrip, error) {
 	return nil, nil
 }

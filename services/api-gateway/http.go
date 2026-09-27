@@ -22,24 +22,31 @@ type httpServer struct {
 	auth        *gatewayauth.Middleware
 	users       gatewayauth.UserStore
 	pool        *pgxpool.Pool
+	eventStore  *messaging.EventStore
 	files       storage.ObjectStore
 	origins     []string
 	oauth       handler.CasperIDOAuthConfig
 	readiness   func(context.Context) error
+	pushHandler http.Handler
 }
 
 // NewhttpServer creates a new http server instance
-func NewhttpServer(addr string, bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, origins []string, oauth handler.CasperIDOAuthConfig, readiness func(context.Context) error) *httpServer {
-	return &httpServer{addr: addr, bus: bus, connManager: connMgr, auth: authMiddleware, users: users, pool: pool, files: files, origins: origins, oauth: oauth, readiness: readiness}
+func NewhttpServer(addr string, bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, eventStore *messaging.EventStore, files storage.ObjectStore, origins []string, oauth handler.CasperIDOAuthConfig, readiness func(context.Context) error, pushHandler http.Handler) *httpServer {
+	return &httpServer{addr: addr, bus: bus, connManager: connMgr, auth: authMiddleware, users: users, pool: pool, eventStore: eventStore, files: files, origins: origins, oauth: oauth, readiness: readiness, pushHandler: pushHandler}
 }
 
 // run starts the http server
 func (s *httpServer) run(ctx context.Context) error {
 	// http server setup
-	h := handler.NewHTTPHandler(s.bus, s.connManager, s.auth, s.users, s.pool, s.files, s.origins, s.oauth, s.readiness)
+	h := handler.NewHTTPHandler(s.bus, s.connManager, s.auth, s.users, s.pool, s.files, s.origins, s.oauth, s.readiness, s.eventStore)
+	root := http.NewServeMux()
+	if s.pushHandler != nil {
+		root.Handle("/internal/", s.pushHandler)
+	}
+	root.Handle("/", messaging.DrainOutboxAfter(h, s.pool, s.bus.Producer))
 	srv := &http.Server{
 		Addr:              s.addr,
-		Handler:           h,
+		Handler:           root,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       60 * time.Second,

@@ -36,7 +36,11 @@ resource "google_cloud_run_v2_service" "driver" {
   ingress             = "INGRESS_TRAFFIC_ALL"
 
   lifecycle {
-    ignore_changes = [template[0].containers[0].image]
+    ignore_changes = [
+      client,
+      client_version,
+      template[0].containers[0].image,
+    ]
   }
 
   template {
@@ -158,7 +162,11 @@ resource "google_cloud_run_v2_service" "trip" {
   ingress             = "INGRESS_TRAFFIC_ALL"
 
   lifecycle {
-    ignore_changes = [template[0].containers[0].image]
+    ignore_changes = [
+      client,
+      client_version,
+      template[0].containers[0].image,
+    ]
   }
 
   template {
@@ -270,7 +278,11 @@ resource "google_cloud_run_v2_service" "payment" {
   ingress             = "INGRESS_TRAFFIC_ALL"
 
   lifecycle {
-    ignore_changes = [template[0].containers[0].image]
+    ignore_changes = [
+      client,
+      client_version,
+      template[0].containers[0].image,
+    ]
   }
 
   template {
@@ -399,7 +411,11 @@ resource "google_cloud_run_v2_service" "api_gateway" {
   ingress             = "INGRESS_TRAFFIC_ALL"
 
   lifecycle {
-    ignore_changes = [template[0].containers[0].image]
+    ignore_changes = [
+      client,
+      client_version,
+      template[0].containers[0].image,
+    ]
   }
 
   template {

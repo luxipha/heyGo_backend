@@ -13,6 +13,11 @@ output "runtime_service_accounts" {
   value       = { for name, account in google_service_account.runtime : name => account.email }
 }
 
+output "event_invoker_service_account" {
+  description = "OIDC identity used for Pub/Sub push, Cloud Tasks, and scheduled maintenance."
+  value       = google_service_account.event_invoker.email
+}
+
 output "workload_identity_provider" {
   description = "Full provider name required by google-github-actions/auth."
   value       = google_iam_workload_identity_pool_provider.github.name
@@ -24,7 +29,7 @@ output "pubsub_topics" {
 }
 
 output "pubsub_subscriptions" {
-  description = "Per-service pull subscriptions replacing Kafka consumer groups."
+  description = "Per-service push subscriptions replacing Kafka consumer groups."
   value       = sort(keys(google_pubsub_subscription.events))
 }
 

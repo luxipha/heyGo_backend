@@ -19,8 +19,13 @@ type DriverService interface {
 	UnregisterDriver(ctx context.Context, driverID string) error
 	UpdateLocation(ctx context.Context, driverID string, latitude, longitude float64) (string, error)
 	MatchAndReserve(ctx context.Context, trip *tripproto.Trip, payload []byte) (*repo.Candidate, error)
+	ActiveOffer(ctx context.Context, tripID string) (*repo.Candidate, error)
 	Decline(ctx context.Context, tripID, driverID string) (*repo.RetryTrip, error)
 	ExpireOffers(ctx context.Context) ([]repo.RetryTrip, error)
+}
+
+func (s *driverService) ActiveOffer(ctx context.Context, tripID string) (*repo.Candidate, error) {
+	return s.repo.ActiveOffer(ctx, tripID)
 }
 
 func NewDriverService(repo repo.DriverRepo) *driverService {

@@ -45,8 +45,8 @@ resource "google_cloud_run_v2_service" "driver" {
     max_instance_request_concurrency = 80
 
     scaling {
-      min_instance_count = 1
-      max_instance_count = 3
+      min_instance_count = 0
+      max_instance_count = 1
     }
 
     volumes {
@@ -69,7 +69,7 @@ resource "google_cloud_run_v2_service" "driver" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle          = false
+        cpu_idle          = true
         startup_cpu_boost = true
       }
 
@@ -89,6 +89,30 @@ resource "google_cloud_run_v2_service" "driver" {
       env {
         name  = "MIGRATE_ON_STARTUP"
         value = "false"
+      }
+      env {
+        name  = "PUBSUB_DELIVERY_MODE"
+        value = "push"
+      }
+      env {
+        name  = "GCP_REGION"
+        value = var.region
+      }
+      env {
+        name  = "OFFER_EXPIRY_QUEUE"
+        value = google_cloud_tasks_queue.offer_expiry.name
+      }
+      env {
+        name  = "TASKS_INVOKER_SERVICE_ACCOUNT"
+        value = google_service_account.event_invoker.email
+      }
+      env {
+        name  = "DB_MAX_CONNS"
+        value = "4"
+      }
+      env {
+        name  = "DB_MIN_CONNS"
+        value = "0"
       }
 
       dynamic "env" {
@@ -118,7 +142,9 @@ resource "google_cloud_run_v2_service" "driver" {
 
   depends_on = [
     google_project_iam_member.runtime_cloud_sql_client,
+    google_project_iam_member.driver_tasks_enqueuer,
     google_secret_manager_secret_iam_member.runtime_accessor,
+    google_service_account_iam_member.driver_event_invoker_user,
   ]
 }
 
@@ -141,8 +167,8 @@ resource "google_cloud_run_v2_service" "trip" {
     max_instance_request_concurrency = 80
 
     scaling {
-      min_instance_count = 1
-      max_instance_count = 3
+      min_instance_count = 0
+      max_instance_count = 1
     }
 
     volumes {
@@ -165,7 +191,7 @@ resource "google_cloud_run_v2_service" "trip" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle          = false
+        cpu_idle          = true
         startup_cpu_boost = true
       }
 
@@ -185,6 +211,18 @@ resource "google_cloud_run_v2_service" "trip" {
       env {
         name  = "MIGRATE_ON_STARTUP"
         value = "false"
+      }
+      env {
+        name  = "PUBSUB_DELIVERY_MODE"
+        value = "push"
+      }
+      env {
+        name  = "DB_MAX_CONNS"
+        value = "4"
+      }
+      env {
+        name  = "DB_MIN_CONNS"
+        value = "0"
       }
       env {
         name  = "CASPERID_BASE_URL"
@@ -241,8 +279,8 @@ resource "google_cloud_run_v2_service" "payment" {
     max_instance_request_concurrency = 80
 
     scaling {
-      min_instance_count = 1
-      max_instance_count = 3
+      min_instance_count = 0
+      max_instance_count = 1
     }
 
     volumes {
@@ -265,7 +303,7 @@ resource "google_cloud_run_v2_service" "payment" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle          = false
+        cpu_idle          = true
         startup_cpu_boost = true
       }
 
@@ -285,6 +323,26 @@ resource "google_cloud_run_v2_service" "payment" {
       env {
         name  = "MIGRATE_ON_STARTUP"
         value = "false"
+      }
+      env {
+        name  = "PUBSUB_DELIVERY_MODE"
+        value = "push"
+      }
+      env {
+        name  = "PUBSUB_PUSH_AUDIENCE"
+        value = "https://pubsub.heygo.internal/payment-service"
+      }
+      env {
+        name  = "PUBSUB_PUSH_SERVICE_ACCOUNT"
+        value = google_service_account.event_invoker.email
+      }
+      env {
+        name  = "DB_MAX_CONNS"
+        value = "3"
+      }
+      env {
+        name  = "DB_MIN_CONNS"
+        value = "0"
       }
       env {
         name  = "APP_URL"
@@ -346,13 +404,13 @@ resource "google_cloud_run_v2_service" "api_gateway" {
 
   template {
     service_account                  = google_service_account.runtime["api-gateway"].email
-    timeout                          = "300s"
-    max_instance_request_concurrency = 80
+    timeout                          = "3600s"
+    max_instance_request_concurrency = var.api_gateway_concurrency
 
-    # The API Gateway consumes one shared pull subscription and owns in-memory
-    # WebSocket connections. Keep one instance until Pub/Sub push/fan-out is used.
+    # Keep one-instance ownership while the gateway stores WebSocket connections
+    # in memory. It may scale to zero when no clients are connected.
     scaling {
-      min_instance_count = 1
+      min_instance_count = 0
       max_instance_count = 1
     }
 
@@ -376,7 +434,7 @@ resource "google_cloud_run_v2_service" "api_gateway" {
           cpu    = "1"
           memory = "1Gi"
         }
-        cpu_idle          = false
+        cpu_idle          = true
         startup_cpu_boost = true
       }
 
@@ -396,6 +454,26 @@ resource "google_cloud_run_v2_service" "api_gateway" {
       env {
         name  = "MIGRATE_ON_STARTUP"
         value = "false"
+      }
+      env {
+        name  = "PUBSUB_DELIVERY_MODE"
+        value = "push"
+      }
+      env {
+        name  = "PUBSUB_PUSH_AUDIENCE"
+        value = "https://pubsub.heygo.internal/api-gateway"
+      }
+      env {
+        name  = "PUBSUB_PUSH_SERVICE_ACCOUNT"
+        value = google_service_account.event_invoker.email
+      }
+      env {
+        name  = "DB_MAX_CONNS"
+        value = "5"
+      }
+      env {
+        name  = "DB_MIN_CONNS"
+        value = "0"
       }
       env {
         name  = "ALLOWED_ORIGINS"

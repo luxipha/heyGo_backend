@@ -16,47 +16,58 @@ import (
 )
 
 type TripConsumer struct {
-	bus *pubsub.Client
-	svc service.DriverService
+	bus             *pubsub.Client
+	svc             service.DriverService
+	expiryScheduler OfferExpiryScheduler
 }
 
-func NewTripConsumer(bus *pubsub.Client, svc service.DriverService) *TripConsumer {
-	return &TripConsumer{bus: bus, svc: svc}
+type OfferExpiryScheduler interface {
+	ScheduleOfferExpiry(context.Context, string, int, time.Time) error
+}
+
+func NewTripConsumer(bus *pubsub.Client, svc service.DriverService, schedulers ...OfferExpiryScheduler) *TripConsumer {
+	consumer := &TripConsumer{bus: bus, svc: svc}
+	if len(schedulers) > 0 {
+		consumer.expiryScheduler = schedulers[0]
+	}
+	return consumer
 }
 
 func (c *TripConsumer) Consume(ctx context.Context, topics []string) error {
-	return c.bus.Consumer.SubscribeAndConsume(ctx, topics, func(ctx context.Context, msg *pubsub.Message) error {
-		var envelope contracts.EventMessage
-		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
-			return fmt.Errorf("decode event envelope: %w", err)
+	return c.bus.Consumer.SubscribeAndConsume(ctx, topics, c.Handle)
+}
+
+func (c *TripConsumer) Handle(ctx context.Context, msg *pubsub.Message) error {
+	var envelope contracts.EventMessage
+	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+		return fmt.Errorf("decode event envelope: %w", err)
+	}
+	switch msg.Topic {
+	case contracts.TripEventCreated, contracts.TripEventDriverNotInterested:
+		return c.match(ctx, envelope.Data)
+	case contracts.DriverCmdTripDecline:
+		var response messaging.DriverTripResponseData
+		if err := json.Unmarshal(envelope.Data, &response); err != nil {
+			return err
 		}
-		switch msg.Topic {
-		case contracts.TripEventCreated, contracts.TripEventDriverNotInterested:
-			return c.match(ctx, envelope.Data)
-		case contracts.DriverCmdTripDecline:
-			var response messaging.DriverTripResponseData
-			if err := json.Unmarshal(envelope.Data, &response); err != nil {
-				return err
-			}
-			_, err := c.svc.Decline(ctx, response.TripID, envelope.EntityID)
-			return err // Trigger queues the acknowledgement and durable retry.
-		case contracts.DriverCmdLocation:
-			var location messaging.DriverLocationData
-			if err := json.Unmarshal(envelope.Data, &location); err != nil {
-				return err
-			}
-			riderID, err := c.svc.UpdateLocation(ctx, envelope.EntityID, location.Location.Latitude, location.Location.Longitude)
-			if err != nil {
-				return err
-			}
-			if riderID == "" {
-				return nil
-			}
-			return c.bus.Producer.SendMessage(ctx, contracts.DriverEventLocationUpdated, &contracts.EventMessage{EntityID: riderID, Data: envelope.Data})
-		default:
+		_, err := c.svc.Decline(ctx, response.TripID, envelope.EntityID)
+		return err // Trigger queues the acknowledgement and durable retry.
+	case contracts.DriverCmdLocation:
+		var location messaging.DriverLocationData
+		if err := json.Unmarshal(envelope.Data, &location); err != nil {
+			return err
+		}
+		riderID, err := c.svc.UpdateLocation(ctx, envelope.EntityID, location.Location.Latitude, location.Location.Longitude)
+		if err != nil {
+			return err
+		}
+		if riderID == "" {
 			return nil
 		}
-	})
+		return c.bus.Producer.SendMessage(ctx, contracts.DriverEventLocationUpdated, &contracts.EventMessage{EntityID: riderID, Data: envelope.Data})
+	default:
+		return nil
+	}
 }
 
 func (c *TripConsumer) RunExpiryWorker(ctx context.Context) error {
@@ -84,13 +95,21 @@ func (c *TripConsumer) match(ctx context.Context, raw []byte) error {
 	}
 	candidate, err := c.svc.MatchAndReserve(ctx, payload.Trip, raw)
 	if errors.Is(err, repo.ErrTripAlreadyMatched) {
-		return nil // The durable offer from the first reservation is still pending.
+		candidate, err = c.svc.ActiveOffer(ctx, payload.Trip.Id)
+		if errors.Is(err, repo.ErrNoActiveOffer) {
+			return nil
+		}
 	}
 	if errors.Is(err, repo.ErrNoAvailableDriver) {
 		return c.bus.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.EventMessage{EntityID: payload.Trip.RiderID, Data: raw})
 	}
 	if err != nil {
 		return err
+	}
+	if c.expiryScheduler != nil {
+		if err := c.expiryScheduler.ScheduleOfferExpiry(ctx, payload.Trip.Id, candidate.Attempt, candidate.ExpiresAt.Add(time.Second)); err != nil {
+			return fmt.Errorf("schedule driver offer expiry: %w", err)
+		}
 	}
 	logs.L().Infow("Reserved nearby driver", "tripID", payload.Trip.Id, "driverID", candidate.Driver.Id, "distanceMeters", candidate.Distance)
 	return nil

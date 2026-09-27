@@ -9,16 +9,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
-type EventStore struct{ pool *pgxpool.Pool }
+type EventStore struct {
+	pool     *pgxpool.Pool
+	notifier *EventNotifier
+}
 
 var ErrInvalidEventCursor = errors.New("invalid event cursor")
 
-func NewEventStore(pool *pgxpool.Pool) *EventStore { return &EventStore{pool: pool} }
+func NewEventStore(pool *pgxpool.Pool, notifiers ...*EventNotifier) *EventStore {
+	var notifier *EventNotifier
+	if len(notifiers) > 0 {
+		notifier = notifiers[0]
+	}
+	return &EventStore{pool: pool, notifier: notifier}
+}
+
+func (s *EventStore) SubscribeEventWake(recipientID string) (<-chan struct{}, func()) {
+	if s.notifier == nil {
+		return nil, func() {}
+	}
+	return s.notifier.Subscribe(recipientID)
+}
 
 // AppendEventTx appends an event with notification fan-out using a caller-owned
 // transaction. It is useful to handlers that already own the transaction.

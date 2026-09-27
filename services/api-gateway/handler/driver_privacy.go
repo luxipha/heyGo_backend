@@ -14,14 +14,14 @@ import (
 	"path/filepath"
 	"time"
 
-	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/storage"
 )
 
 const driverExportLifetime = 7 * 24 * time.Hour
@@ -441,4 +441,25 @@ func StartPrivacyJobs(ctx context.Context, pool *pgxpool.Pool, files storage.Obj
 			}
 		}
 	}()
+}
+
+// RunPrivacyJobsOnce performs a bounded maintenance pass suitable for an
+// authenticated Cloud Scheduler request. Database leases keep overlapping
+// requests safe, and the bound prevents a large backlog from exceeding the
+// request deadline.
+func RunPrivacyJobsOnce(ctx context.Context, pool *pgxpool.Pool, files storage.ObjectStore, limit int) {
+	if files == nil || limit <= 0 {
+		return
+	}
+	key, _ := hex.DecodeString(os.Getenv("HEYGO_ADMIN_SETTINGS_KEY"))
+	for range limit {
+		if processNextDriverDataExport(ctx, pool, files, key) {
+			continue
+		}
+		if processDriverDeletionFile(ctx, pool, files) {
+			continue
+		}
+		break
+	}
+	expireDriverExports(ctx, pool, files)
 }

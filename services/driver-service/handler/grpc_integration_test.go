@@ -34,6 +34,9 @@ func (r *grpcDriverRepo) UpdateLocation(context.Context, string, float64, float6
 func (r *grpcDriverRepo) MatchAndReserve(context.Context, string, string, float64, float64, float64, time.Duration, []byte) (*repo.Candidate, error) {
 	return nil, repo.ErrNoAvailableDriver
 }
+func (r *grpcDriverRepo) ActiveOffer(context.Context, string) (*repo.Candidate, error) {
+	return nil, repo.ErrNoActiveOffer
+}
 func (r *grpcDriverRepo) DeclineAssignment(context.Context, string, string) (*repo.RetryTrip, error) {
 	return nil, nil
 }

@@ -17,6 +17,7 @@ import (
 
 var ErrNoAvailableDriver = errors.New("no available driver")
 var ErrTripAlreadyMatched = errors.New("trip is already matched")
+var ErrNoActiveOffer = errors.New("trip has no active driver offer")
 
 type Candidate struct {
 	Driver    *pb.Driver
@@ -35,8 +36,23 @@ type DriverRepo interface {
 	SetOffline(context.Context, string) error
 	UpdateLocation(context.Context, string, float64, float64) (string, error)
 	MatchAndReserve(context.Context, string, string, float64, float64, float64, time.Duration, []byte) (*Candidate, error)
+	ActiveOffer(context.Context, string) (*Candidate, error)
 	DeclineAssignment(context.Context, string, string) (*RetryTrip, error)
 	ExpireOffers(context.Context, int) ([]RetryTrip, error)
+}
+
+func (r *postgresDriverRepo) ActiveOffer(ctx context.Context, tripID string) (*Candidate, error) {
+	candidate := &Candidate{Driver: &pb.Driver{}}
+	err := r.pool.QueryRow(ctx, `SELECT driver_id::TEXT,attempt,expires_at FROM driver_assignments
+		WHERE trip_id=$1::UUID AND status='offered' ORDER BY attempt DESC LIMIT 1`, tripID).
+		Scan(&candidate.Driver.Id, &candidate.Attempt, &candidate.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNoActiveOffer
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read active driver offer: %w", err)
+	}
+	return candidate, nil
 }
 
 type postgresDriverRepo struct{ pool *pgxpool.Pool }

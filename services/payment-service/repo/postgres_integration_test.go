@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	paymenttypes "github.com/luxipha/heyGo_backend/services/payment-service/types"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
-	"github.com/google/uuid"
 )
 
 func TestPostgresPaymentRepositoryWebhookIsIdempotent(t *testing.T) {
@@ -60,5 +60,51 @@ func TestPostgresPaymentRepositoryWebhookIsIdempotent(t *testing.T) {
 	})
 	if err != nil || publish || duplicate != nil {
 		t.Fatalf("duplicate=%#v publish=%v err=%v", duplicate, publish, err)
+	}
+}
+
+func TestPostgresPaymentInitializationClaimIsExclusive(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := shareddb.NewPostgresPool(ctx, shareddb.Config{URL: databaseURL, MaxConns: 2, MaxConnIdleTime: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := shareddb.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	seed := &paymenttypes.Payment{
+		ID: id, TripID: "trip-init-" + id, RiderID: "rider-" + id, DriverID: "driver-" + id,
+		Amount: 2500, Currency: "NGN", Status: paymenttypes.PaymentStatusPending,
+		PaymentReference: "pay-init-" + id, TransactionReference: "initializing-pay-init-" + id,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	repository := NewPostgresPaymentRepository(pool)
+	firstToken := uuid.NewString()
+	reserved, claimed, err := repository.ClaimSessionInitialization(ctx, seed, firstToken, now.Add(time.Minute))
+	if err != nil || !claimed || reserved.TripID != seed.TripID {
+		t.Fatalf("first claim payment=%#v claimed=%v err=%v", reserved, claimed, err)
+	}
+	_, claimed, err = repository.ClaimSessionInitialization(ctx, seed, uuid.NewString(), now.Add(time.Minute))
+	if err != nil || claimed {
+		t.Fatalf("concurrent claim claimed=%v err=%v", claimed, err)
+	}
+	completed, err := repository.CompleteSessionInitialization(ctx, seed.TripID, firstToken, &paymenttypes.ProviderSession{
+		PaymentReference: seed.PaymentReference, TransactionReference: "txn-init-" + id, CheckoutURL: "https://checkout.test/" + id,
+	})
+	if err != nil || completed.CheckoutURL == "" {
+		t.Fatalf("complete payment=%#v err=%v", completed, err)
+	}
+	loaded, claimed, err := repository.ClaimSessionInitialization(ctx, seed, uuid.NewString(), now.Add(time.Minute))
+	if err != nil || claimed || loaded.TransactionReference != "txn-init-"+id {
+		t.Fatalf("completed retry payment=%#v claimed=%v err=%v", loaded, claimed, err)
 	}
 }

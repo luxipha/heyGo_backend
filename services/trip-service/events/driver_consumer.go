@@ -31,42 +31,42 @@ func NewDriverConsumer(bus *pubsub.Client, svc service.TripService, reporter tru
 
 // Consume starts consuming messages from the specified topics and processes them.
 func (dc *DriverConsumer) Consume(ctx context.Context, topics []string) error {
-	return dc.bus.Consumer.SubscribeAndConsume(ctx, topics,
-		func(ctx context.Context, msg *pubsub.Message) error {
-			var eventMsg contracts.EventMessage
-			if err := json.Unmarshal(msg.Data, &eventMsg); err != nil {
-				return fmt.Errorf("failed to unmarshal message: %w", err)
-			}
+	return dc.bus.Consumer.SubscribeAndConsume(ctx, topics, dc.Handle)
+}
 
-			switch msg.Topic {
-			case contracts.DriverCmdTripAccept:
-				var payload messaging.DriverTripResponseData
-				if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
-					return fmt.Errorf("failed to unmarshal driver acceptance: %w", err)
-				}
-				if err := dc.handleTripAccept(ctx, payload.TripID, payload.Driver); err != nil {
-					return err
-				}
-			case contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete, contracts.TripCmdCancel, contracts.TripCmdRate:
-				var payload messaging.TripLifecycleCommand
-				if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
-					return fmt.Errorf("decode lifecycle command: %w", err)
-				}
-				if payload.ActorID != eventMsg.EntityID {
-					return fmt.Errorf("lifecycle actor mismatch")
-				}
-				if err := dc.handleLifecycle(ctx, msg.Topic, payload); err != nil {
-					return err
-				}
-			default:
-				logs.L().Warnw("Unknown topic", "topic", msg.Topic)
-				return nil
-			}
+func (dc *DriverConsumer) Handle(ctx context.Context, msg *pubsub.Message) error {
+	var eventMsg contracts.EventMessage
+	if err := json.Unmarshal(msg.Data, &eventMsg); err != nil {
+		return fmt.Errorf("failed to unmarshal message: %w", err)
+	}
 
-			logs.L().Infow("Processed message", "topic", msg.Topic)
-			return nil
-		},
-	)
+	switch msg.Topic {
+	case contracts.DriverCmdTripAccept:
+		var payload messaging.DriverTripResponseData
+		if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
+			return fmt.Errorf("failed to unmarshal driver acceptance: %w", err)
+		}
+		if err := dc.handleTripAccept(ctx, payload.TripID, payload.Driver); err != nil {
+			return err
+		}
+	case contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete, contracts.TripCmdCancel, contracts.TripCmdRate:
+		var payload messaging.TripLifecycleCommand
+		if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
+			return fmt.Errorf("decode lifecycle command: %w", err)
+		}
+		if payload.ActorID != eventMsg.EntityID {
+			return fmt.Errorf("lifecycle actor mismatch")
+		}
+		if err := dc.handleLifecycle(ctx, msg.Topic, payload); err != nil {
+			return err
+		}
+	default:
+		logs.L().Warnw("Unknown topic", "topic", msg.Topic)
+		return nil
+	}
+
+	logs.L().Infow("Processed message", "topic", msg.Topic)
+	return nil
 }
 
 func (dc *DriverConsumer) handleLifecycle(ctx context.Context, command string, p messaging.TripLifecycleCommand) error {

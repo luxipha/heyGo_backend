@@ -7,8 +7,9 @@ github_deploy_branch   = "main"
 artifact_repository_id = "heygo"
 
 # Phase 1 creates Cloud SQL and Secret Manager containers only.
-deploy_services = false
-cloud_sql_tier  = "db-f1-micro"
+deploy_services                     = false
+retain_pull_subscriber_permissions = true
+cloud_sql_tier                      = "db-f1-micro"
 
 # Set this after the PR merges and all five images are published. It creates
 # the migration job while deploy_services remains false.
@@ -19,3 +20,7 @@ cloud_sql_tier  = "db-f1-micro"
 # deploy_services = true
 # allowed_origins  = "https://app.example.com,https://admin.example.com"
 # app_url          = "https://app.example.com"
+
+# After authenticated push delivery has been deployed and verified, set this
+# to false in a separate cleanup plan.
+# retain_pull_subscriber_permissions = false

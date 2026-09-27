@@ -11,20 +11,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
-	"github.com/gorilla/websocket"
 )
 
 type testEventLog struct {
-	mu     sync.Mutex
-	events []contracts.WSMessage
+	mu          sync.Mutex
+	events      []contracts.WSMessage
+	subscribers map[chan struct{}]struct{}
 }
 
 func (s *testEventLog) append(kind string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, contracts.WSMessage{ID: fmt.Sprintf("evt_%d", len(s.events)+1), Type: kind})
+	for wake := range s.subscribers {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (s *testEventLog) SubscribeEventWake(_ string) (<-chan struct{}, func()) {
+	wake := make(chan struct{}, 1)
+	s.mu.Lock()
+	if s.subscribers == nil {
+		s.subscribers = make(map[chan struct{}]struct{})
+	}
+	s.subscribers[wake] = struct{}{}
+	s.mu.Unlock()
+	return wake, func() {
+		s.mu.Lock()
+		delete(s.subscribers, wake)
+		s.mu.Unlock()
+	}
 }
 
 func (s *testEventLog) LatestCursor(_ context.Context, _ string) (string, error) {

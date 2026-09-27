@@ -30,44 +30,44 @@ func NewTopicConsumer(bus *pubsub.Client, connMgr *ConnectionManager, topics []s
 }
 
 func (tc *TopicConsumer) Consume(ctx context.Context) error {
-	return tc.bus.Consumer.SubscribeAndConsume(ctx, tc.topics,
-		func(ctx context.Context, msg *pubsub.Message) error {
-			var eventMsg contracts.EventMessage
-			if err := json.Unmarshal(msg.Data, &eventMsg); err != nil {
-				log.Printf("Failed to unmarshal message: %v", err)
-				return err
-			}
+	return tc.bus.Consumer.SubscribeAndConsume(ctx, tc.topics, tc.Handle)
+}
 
-			entityID := eventMsg.EntityID
+func (tc *TopicConsumer) Handle(ctx context.Context, msg *pubsub.Message) error {
+	var eventMsg contracts.EventMessage
+	if err := json.Unmarshal(msg.Data, &eventMsg); err != nil {
+		log.Printf("Failed to unmarshal message: %v", err)
+		return err
+	}
 
-			var payload any
-			if eventMsg.Data != nil {
-				if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
-					log.Printf("Failed to unmarshal payload: %v", err)
-					return err
-				}
-			}
+	entityID := eventMsg.EntityID
 
-			clientMsg := contracts.WSMessage{
-				Type: msg.Topic,
-				Data: payload,
-			}
-			if tc.events != nil {
-				sourceID := eventMsg.EventID
-				if sourceID == "" {
-					sourceID = "pubsub:" + msg.ID
-				}
-				stored, err := tc.events.Append(ctx, entityID, sourceID, clientMsg.Type, eventMsg.Data)
-				if err != nil {
-					return err
-				}
-				clientMsg = stored
-			}
+	var payload any
+	if eventMsg.Data != nil {
+		if err := json.Unmarshal(eventMsg.Data, &payload); err != nil {
+			log.Printf("Failed to unmarshal payload: %v", err)
+			return err
+		}
+	}
 
-			if tc.events != nil {
-				return nil // Each gateway delivers from the shared event log in cursor order.
-			}
-			return tc.connMgr.SendMessage(entityID, clientMsg)
-		},
-	)
+	clientMsg := contracts.WSMessage{
+		Type: msg.Topic,
+		Data: payload,
+	}
+	if tc.events != nil {
+		sourceID := eventMsg.EventID
+		if sourceID == "" {
+			sourceID = "pubsub:" + msg.ID
+		}
+		stored, err := tc.events.Append(ctx, entityID, sourceID, clientMsg.Type, eventMsg.Data)
+		if err != nil {
+			return err
+		}
+		clientMsg = stored
+	}
+
+	if tc.events != nil {
+		return nil // Each gateway delivers from the shared event log in cursor order.
+	}
+	return tc.connMgr.SendMessage(entityID, clientMsg)
 }

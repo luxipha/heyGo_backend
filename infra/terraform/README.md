@@ -24,6 +24,8 @@ services after external secret versions and deployment inputs exist.
 
 Keep `deploy_services = false`, review the plan, and apply it. This creates a
 billable `db-f1-micro` Cloud SQL instance. It does not create Cloud Run services.
+Keep `retain_pull_subscriber_permissions = true` so this foundation phase does
+not remove the existing pull-consumer IAM grants before push delivery exists.
 
 ```sh
 terraform -chdir=infra/terraform plan -out=runtime-foundation.tfplan
@@ -71,22 +73,40 @@ gcloud run jobs execute heygo-migration --project=heygo-ng --region=europe-west1
 ```
 
 Then set `deploy_services = true`, `allowed_origins`, and `app_url` in an
-ignored `terraform.tfvars`, review the plan, and apply again. The runtime
+ignored `terraform.tfvars`. Keep `retain_pull_subscriber_permissions = true`
+for this first Cloud Run rollout, review the plan, and apply again. The runtime
 services set `MIGRATE_ON_STARTUP=false`; local development keeps its existing
 automatic migration behavior.
+
+Verify that every subscription is configured for authenticated push and that
+each service is successfully processing messages. Only after that verification,
+set `retain_pull_subscriber_permissions = false`, review the cleanup plan, and
+apply it. That final plan should remove the legacy runtime subscriber IAM grants
+without changing the subscriptions or their push configuration.
 
 Driver and Trip remain IAM-protected. API Gateway obtains Google-signed ID
 tokens from its runtime identity for gRPC calls, in addition to the existing
 application-level internal token. API Gateway is public. Payment Service is
-also public because Monnify must reach its webhook; its `/internal/*` routes
-continue to require the internal token.
+also public because Monnify must reach its webhook. Public-service Pub/Sub and
+maintenance endpoints additionally validate the event-invoker OIDC identity.
 
-All four services currently run pull subscribers or background outbox workers,
-so they use always-allocated CPU and a minimum instance count of one. API
-Gateway is temporarily capped at one instance because its Pub/Sub subscription
-feeds in-memory WebSocket connections. This is operationally correct but not
-the final low-cost topology; authenticated Pub/Sub push delivery and durable
-WebSocket fan-out are required before scale-to-zero or multi-instance Gateway.
+All four services use authenticated Pub/Sub push and request-based Cloud Run
+billing with a minimum instance count of zero. Driver-offer expiry uses a
+dedicated Cloud Tasks queue. Cloud Scheduler invokes bounded gateway
+maintenance once per minute and performs a once-per-minute transactional
+outbox recovery pass. Each service is initially capped at one instance and the
+global database pool budget is 16 connections.
+
+API Gateway remains capped at one instance while it owns WebSocket connections
+in memory. Its timeout is 3,600 seconds, and clients must reconnect with backoff
+when deployments or timeout rotation close a socket. The
+`api_gateway_concurrency` variable deliberately defaults to 80; raise it toward
+400-500 only after a WebSocket load test. Until then, do not treat 300
+simultaneously online drivers as supported. Open WebSockets keep the instance
+active and billable, but the gateway can scale to zero when no connections or
+requests remain. Committed user events wake local WebSocket streams through one
+PostgreSQL `LISTEN/NOTIFY` connection per gateway instance; a 15-second indexed
+poll is retained only as recovery protection if a notification is missed.
 
 Once the services exist, application releases use the manually dispatched
 `Deploy Cloud Run` workflow. Configure required reviewers on the GitHub

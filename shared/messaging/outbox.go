@@ -16,6 +16,27 @@ type outboxPublisher interface {
 	SendMessageAndWait(context.Context, string, *contracts.EventMessage, time.Duration) error
 }
 
+// DrainOutbox publishes up to limit pending rows. It is suitable for
+// request-driven runtimes; callers should also arrange a periodic recovery
+// invocation for rows left behind after a process crash.
+func DrainOutbox(ctx context.Context, pool *pgxpool.Pool, producer outboxPublisher, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	published := 0
+	for published < limit {
+		worked, err := publishNext(ctx, pool, producer)
+		if err != nil {
+			return published, err
+		}
+		if !worked {
+			return published, nil
+		}
+		published++
+	}
+	return published, nil
+}
+
 // PublishOutbox serializes publishers across backend replicas. The lock
 // remains held until Pub/Sub acknowledges and the row is marked published. A
 // crash between those actions replays the same event ID (at least once).

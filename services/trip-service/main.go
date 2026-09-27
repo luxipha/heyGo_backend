@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -73,7 +74,12 @@ func main() {
 	if databaseURL == "" {
 		logs.L().Fatal("DATABASE_URL is required")
 	}
-	pool, err := db.NewPostgresPool(ctx, db.Config{URL: databaseURL, MaxConnIdleTime: 5 * time.Minute, MaxConns: 10, MinConns: 1})
+	pool, err := db.NewPostgresPool(ctx, db.Config{
+		URL:             databaseURL,
+		MaxConnIdleTime: 5 * time.Minute,
+		MaxConns:        int32(env.GetInt("DB_MAX_CONNS", 4)),
+		MinConns:        int32(env.GetInt("DB_MIN_CONNS", 0)),
+	})
 	if err != nil {
 		logs.L().Fatalw("Failed to connect to PostgreSQL", "error", err)
 	}
@@ -85,9 +91,7 @@ func main() {
 	}
 	tripRepo := repo.NewPostgresRepository(pool)
 	tripService := service.NewService(tripRepo)
-	go messaging.PublishOutbox(ctx, pool, bus.Producer)
 
-	// Start consuming driver responses
 	casperIDAppID := env.GetString("CASPERID_APP_ID", "")
 	casperIDSecret := env.GetString("CASPERID_API_SECRET", "")
 	if casperIDAppID == "" || casperIDSecret == "" {
@@ -95,11 +99,28 @@ func main() {
 	}
 	reporter := trustclient.NewCasperIDReporter(env.GetString("CASPERID_BASE_URL", "https://casperid.com"), casperIDAppID, casperIDSecret)
 	driverConsumer := events.NewDriverConsumer(bus, tripService, reporter)
-	go func() {
-		if err := driverConsumer.Consume(ctx, topics); err != nil {
-			logs.L().Warnw("Error consuming driver topics", "error", err)
-		}
-	}()
+	var pushHandler http.Handler
+	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
+	case "pull":
+		go messaging.PublishOutbox(ctx, pool, bus.Producer)
+		go func() {
+			if err := driverConsumer.Consume(ctx, topics); err != nil {
+				logs.L().Warnw("Error consuming driver topics", "error", err)
+			}
+		}()
+	case "push":
+		pushMux := pubsub.NewPushMux(topics, func(messageCtx context.Context, message *pubsub.Message) error {
+			if err := driverConsumer.Handle(messageCtx, message); err != nil {
+				return err
+			}
+			_, err := messaging.DrainOutbox(messageCtx, pool, bus.Producer, 100)
+			return err
+		}, nil)
+		pushMux.Handle("POST /internal/tasks/outbox/drain", messaging.OutboxDrainHandler(pool, bus.Producer))
+		pushHandler = pushMux
+	default:
+		logs.L().Fatalw("Unsupported Pub/Sub delivery mode", "mode", deliveryMode)
+	}
 
 	// Start gRPC server
 	healthCheck := func(checkCtx context.Context) error {
@@ -108,7 +129,7 @@ func main() {
 		}
 		return bus.Ping(checkCtx)
 	}
-	gRPCServer := NewgRPCServer(grpcAddr, tripService, bus, healthCheck)
+	gRPCServer := NewgRPCServer(grpcAddr, tripService, bus, healthCheck, pushHandler, pool)
 	go func() {
 		if err := gRPCServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("gRPC server error", "error", err)

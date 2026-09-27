@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -84,7 +85,12 @@ func main() {
 	if databaseURL == "" || casperIDAppID == "" || internalServiceToken == "" {
 		logs.L().Fatal("DATABASE_URL, CASPERID_APP_ID, and INTERNAL_SERVICE_TOKEN are required")
 	}
-	pool, err := db.NewPostgresPool(ctx, db.Config{URL: databaseURL, MaxConnIdleTime: 5 * time.Minute, MaxConns: 10, MinConns: 1})
+	pool, err := db.NewPostgresPool(ctx, db.Config{
+		URL:             databaseURL,
+		MaxConnIdleTime: 5 * time.Minute,
+		MaxConns:        int32(env.GetInt("DB_MAX_CONNS", 5)),
+		MinConns:        int32(env.GetInt("DB_MIN_CONNS", 0)),
+	})
 	if err != nil {
 		logs.L().Fatalw("Failed to connect to PostgreSQL", "error", err)
 	}
@@ -97,6 +103,9 @@ func main() {
 
 	origins := splitCSV(env.GetString("ALLOWED_ORIGINS", "http://localhost:3000"))
 	connManager := messaging.NewConnectionManager(origins...)
+	eventNotifier := messaging.NewEventNotifier(pool)
+	go eventNotifier.Run(ctx)
+	eventStore := messaging.NewEventStore(pool, eventNotifier)
 	users := gatewayauth.NewPostgresUserStore(pool)
 	verifier := sharedauth.NewCasperIDVerifier(
 		env.GetString("CASPERID_JWKS_URL", "https://casperid.com/.well-known/jwks.json"),
@@ -111,9 +120,6 @@ func main() {
 			logs.L().Fatalw("invalid R2 configuration", "error", err)
 		}
 	}
-	handler.StartPrivacyJobs(ctx, pool, files)
-	handler.StartNotificationPushJobs(ctx, pool)
-
 	// Initialize the Pub/Sub client. Topics and subscriptions are provisioned by Terraform.
 	bus, err := pubsub.NewClient(ctx, projectID, groupID)
 	if err != nil {
@@ -122,12 +128,36 @@ func main() {
 	defer bus.Close()
 	logs.L().Info("Pub/Sub client connected")
 
-	topicConsumer := messaging.NewTopicConsumer(bus, connManager, topics, messaging.NewEventStore(pool))
-	go func() {
-		if err := topicConsumer.Consume(ctx); err != nil && ctx.Err() == nil {
-			logs.L().Warnw("Error consuming topics", "error", err)
-		}
-	}()
+	topicConsumer := messaging.NewTopicConsumer(bus, connManager, topics, eventStore)
+	var pushHandler http.Handler
+	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
+	case "pull":
+		handler.StartPrivacyJobs(ctx, pool, files)
+		handler.StartNotificationPushJobs(ctx, pool)
+		go func() {
+			if err := topicConsumer.Consume(ctx); err != nil && ctx.Err() == nil {
+				logs.L().Warnw("Error consuming topics", "error", err)
+			}
+		}()
+	case "push":
+		authorizer := sharedauth.NewPubSubPushAuthorizer(
+			env.GetString("PUBSUB_PUSH_AUDIENCE", ""),
+			env.GetString("PUBSUB_PUSH_SERVICE_ACCOUNT", ""),
+		)
+		pushMux := pubsub.NewPushMux(topics, topicConsumer.Handle, authorizer)
+		pushMux.Handle("POST /internal/tasks/maintenance", pubsub.AuthorizeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler.RunPrivacyJobsOnce(r.Context(), pool, files, 25)
+			if err := handler.RunNotificationPushJobsOnce(r.Context(), pool, 100); err != nil {
+				logs.L().Warnw("Scheduled gateway maintenance failed", "error", err)
+				http.Error(w, "maintenance failed", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}), authorizer))
+		pushHandler = pushMux
+	default:
+		logs.L().Fatalw("Unsupported Pub/Sub delivery mode", "mode", deliveryMode)
+	}
 
 	// Start http server
 	readiness := func(checkCtx context.Context) error {
@@ -145,7 +175,7 @@ func main() {
 		TokenURL:          env.GetString("CASPERID_TOKEN_URL", "https://apis.casperid.com/api/oauth/token"),
 		DriverRedirectURI: env.GetString("CASPERID_DRIVER_REDIRECT_URI", "com.heygo.driver://oauth/callback"),
 	}
-	httpServer := NewhttpServer(httpAddr, bus, connManager, authMiddleware, users, pool, files, origins, oauthConfig, readiness)
+	httpServer := NewhttpServer(httpAddr, bus, connManager, authMiddleware, users, pool, eventStore, files, origins, oauthConfig, readiness, pushHandler)
 	go func() {
 		if err := httpServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("http server error", "error", err)

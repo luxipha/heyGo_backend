@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 )
 
 const fcmScope = "https://www.googleapis.com/auth/firebase.messaging"
@@ -196,6 +196,31 @@ func StartNotificationPushJobs(ctx context.Context, pool *pgxpool.Pool) {
 		return
 	}
 	go runNotificationPushWorker(ctx, pool, sender)
+}
+
+// RunNotificationPushJobsOnce performs a bounded delivery pass for a
+// request-driven Cloud Run instance. Missing FCM configuration intentionally
+// leaves push delivery disabled without failing the scheduler request.
+func RunNotificationPushJobsOnce(ctx context.Context, pool *pgxpool.Pool, limit int) error {
+	if strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")) == "" || limit <= 0 {
+		return nil
+	}
+	sender, err := newFCMSenderFromEnv()
+	if err != nil {
+		return fmt.Errorf("initialize FCM sender: %w", err)
+	}
+	for range limit {
+		job, err := claimPushDelivery(ctx, pool)
+		if err != nil {
+			return fmt.Errorf("claim FCM delivery: %w", err)
+		}
+		if job == nil {
+			return nil
+		}
+		sendErr := sender.send(ctx, job.Token, job.Title, job.Body, job.NotificationID, job.Type)
+		finishPushDelivery(ctx, pool, *job, sendErr)
+	}
+	return nil
 }
 
 func runNotificationPushWorker(ctx context.Context, pool *pgxpool.Pool, sender *fcmSender) {

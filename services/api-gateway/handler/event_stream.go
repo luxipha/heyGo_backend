@@ -90,13 +90,21 @@ func attachEventStreamForSession(ctx context.Context, manager *messaging.Connect
 		}
 		ticker := time.NewTicker(fallbackInterval)
 		defer ticker.Stop()
+		// Read once immediately after subscribing. This closes the window where
+		// an event can be committed after replay but before the wake subscription
+		// is installed. It also lets a replay larger than one batch drain without
+		// waiting for another notification or the recovery ticker.
+		readImmediately := true
 		for {
-			select {
-			case <-streamCtx.Done():
-				return
-			case <-wake:
-			case <-ticker.C:
+			if !readImmediately {
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-wake:
+				case <-ticker.C:
+				}
 			}
+			readImmediately = false
 			events, err := readAfter(streamCtx, cursor)
 			if err != nil {
 				if streamCtx.Err() != nil {
@@ -119,6 +127,7 @@ func attachEventStreamForSession(ctx context.Context, manager *messaging.Connect
 					cursor = event.ID
 				}
 				if len(events) == eventBatchSize {
+					readImmediately = true
 					continue
 				}
 			}

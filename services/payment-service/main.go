@@ -137,7 +137,7 @@ func main() {
 	}
 	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, bus,
 		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
-			Initializer: paymentProcessor, Verifier: paymentProcessor}, readiness)
+			Initializer: paymentProcessor, Verifier: paymentProcessor, BankVerifier: paymentProcessor, RefundExecutor: paymentProcessor}, readiness)
 	root := http.NewServeMux()
 	if pushHandler != nil {
 		root.Handle("/internal/pubsub/", pushHandler)

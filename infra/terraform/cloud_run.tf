@@ -2,10 +2,10 @@ locals {
   runtime_image_prefix = "${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_repository_id}"
 
   api_gateway_secrets = {
-    DATABASE_URL           = "database-url"
-    INTERNAL_SERVICE_TOKEN = "internal-service-token"
-    CASPERID_APP_ID        = "casperid-app-id"
-    CASPERID_API_SECRET    = "casperid-api-secret"
+    DATABASE_URL             = "database-url"
+    INTERNAL_SERVICE_TOKEN   = "internal-service-token"
+    OTP_PEPPER               = "otp-pepper"
+    HEYGO_ADMIN_SETTINGS_KEY = "admin-settings-key"
   }
   driver_service_secrets = {
     DATABASE_URL           = "database-url"
@@ -21,8 +21,6 @@ locals {
   trip_service_secrets = {
     DATABASE_URL           = "database-url"
     INTERNAL_SERVICE_TOKEN = "internal-service-token"
-    CASPERID_APP_ID        = "casperid-app-id"
-    CASPERID_API_SECRET    = "casperid-api-secret"
   }
 }
 
@@ -97,6 +95,10 @@ resource "google_cloud_run_v2_service" "driver" {
       env {
         name  = "PUBSUB_DELIVERY_MODE"
         value = "push"
+      }
+      env {
+        name  = "HEYGO_MONNIFY_REFUNDS_READY"
+        value = "false"
       }
       env {
         name  = "GCP_REGION"
@@ -232,11 +234,6 @@ resource "google_cloud_run_v2_service" "trip" {
         name  = "DB_MIN_CONNS"
         value = "0"
       }
-      env {
-        name  = "CASPERID_BASE_URL"
-        value = var.casperid_base_url
-      }
-
       dynamic "env" {
         for_each = local.trip_service_secrets
         content {
@@ -496,6 +493,18 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         value = var.allowed_origins
       }
       env {
+        name  = "ADMIN_FRONTEND_URL"
+        value = var.admin_frontend_url
+      }
+      env {
+        name  = "SMS_PROVIDER_URL"
+        value = var.sms_provider_url
+      }
+      env {
+        name  = "SMS_SENDER_ID"
+        value = var.sms_sender_id
+      }
+      env {
         name  = "DRIVER_SERVICE_URL"
         value = "${trimprefix(google_cloud_run_v2_service.driver[0].uri, "https://")}:443"
       }
@@ -519,23 +528,6 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         name  = "PAYMENT_SERVICE_AUDIENCE"
         value = google_cloud_run_v2_service.payment[0].uri
       }
-      env {
-        name  = "CASPERID_JWKS_URL"
-        value = var.casperid_jwks_url
-      }
-      env {
-        name  = "CASPERID_ISSUER"
-        value = var.casperid_issuer
-      }
-      env {
-        name  = "CASPERID_TOKEN_URL"
-        value = var.casperid_token_url
-      }
-      env {
-        name  = "CASPERID_DRIVER_REDIRECT_URI"
-        value = var.casperid_driver_redirect_uri
-      }
-
       dynamic "env" {
         for_each = local.api_gateway_secrets
         content {
@@ -543,6 +535,19 @@ resource "google_cloud_run_v2_service" "api_gateway" {
           value_source {
             secret_key_ref {
               secret  = google_secret_manager_secret.runtime[env.value].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
+      dynamic "env" {
+        for_each = var.sms_provider_url == "" ? [] : [1]
+        content {
+          name = "SMS_PROVIDER_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.runtime["sms-provider-token"].secret_id
               version = "latest"
             }
           }

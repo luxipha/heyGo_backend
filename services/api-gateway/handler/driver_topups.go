@@ -34,7 +34,7 @@ func (a *driverAPI) createOperatingTopup(ctx *gin.Context) {
 	user, _ := gatewayauth.CurrentUser(ctx)
 	address, err := mail.ParseAddress(user.Email)
 	if err != nil || address.Address != user.Email || strings.ContainsAny(user.Email, "\r\n") {
-		driverError(ctx, http.StatusConflict, "casperid_email_required", "A CasperID email is required to top up")
+		driverError(ctx, http.StatusConflict, "email_required", "A valid account email is required to top up")
 		return
 	}
 	payload, _ := json.Marshal(gin.H{"driverId": user.ID, "email": user.Email, "amountKobo": body.AmountKobo})

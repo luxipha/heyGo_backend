@@ -21,12 +21,28 @@ var ErrInvalidToken = errors.New("invalid CasperID token")
 type Identity struct {
 	Subject       string
 	HumanID       string
+	Name          string
 	Email         string
 	EmailVerified bool
 	Verified      bool
 	KYCTier       string
-	TrustScore    *int
+	TrustCapacity *TrustCapacity
 	Scopes        []string
+}
+
+type TrustCapacity struct {
+	ServiceCategory string
+	CalculatedAt    time.Time
+	Status          string
+	Provider        *TrustCapacityRole
+	Consumer        *TrustCapacityRole
+}
+
+type TrustCapacityRole struct {
+	Score             int
+	Status            string
+	IdentityReadiness int
+	PolicyVersion     string
 }
 
 type Verifier interface {
@@ -95,13 +111,44 @@ func (v *CasperIDVerifier) Verify(ctx context.Context, rawToken string) (Identit
 	return Identity{
 		Subject:       subject,
 		HumanID:       humanID,
+		Name:          claimString(claims, "name"),
 		Email:         claimString(claims, "email"),
 		EmailVerified: claimBool(claims, "email_verified"),
 		Verified:      claimBool(claims, "verified"),
 		KYCTier:       claimString(claims, "tier"),
-		TrustScore:    claimInt(claims, "trust_score"),
+		TrustCapacity: claimTrustCapacity(claims["trust_capacity"]),
 		Scopes:        claimStrings(claims, "scopes"),
 	}, nil
+}
+
+func claimTrustCapacity(value any) *TrustCapacity {
+	claims, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	capacity := &TrustCapacity{
+		ServiceCategory: claimString(claims, "service_category"),
+		Status:          claimString(claims, "status"),
+	}
+	if calculatedAt := claimString(claims, "calculated_at"); calculatedAt != "" {
+		capacity.CalculatedAt, _ = time.Parse(time.RFC3339Nano, calculatedAt)
+	}
+	capacity.Provider = claimTrustCapacityRole(claims["provider"])
+	capacity.Consumer = claimTrustCapacityRole(claims["consumer"])
+	return capacity
+}
+
+func claimTrustCapacityRole(value any) *TrustCapacityRole {
+	claims, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return &TrustCapacityRole{
+		Score:             claimIntValue(claims, "score"),
+		Status:            claimString(claims, "status"),
+		IdentityReadiness: claimIntValue(claims, "identity_readiness"),
+		PolicyVersion:     claimString(claims, "policy_version"),
+	}
 }
 
 func claimInt(claims jwt.MapClaims, name string) *int {
@@ -116,6 +163,19 @@ func claimInt(claims jwt.MapClaims, name string) *int {
 		}
 	}
 	return nil
+}
+
+func claimIntValue(claims map[string]any, name string) int {
+	switch value := claims[name].(type) {
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return int(parsed)
+	case int:
+		return value
+	}
+	return 0
 }
 
 func (v *CasperIDVerifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
@@ -197,7 +257,7 @@ func (v *CasperIDVerifier) refresh(ctx context.Context) error {
 	return nil
 }
 
-func claimString(claims jwt.MapClaims, name string) string {
+func claimString(claims map[string]any, name string) string {
 	switch value := claims[name].(type) {
 	case string:
 		return value

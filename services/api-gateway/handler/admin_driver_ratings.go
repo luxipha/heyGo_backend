@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 type adminDriverRating struct {
@@ -33,6 +33,11 @@ func (a *adminAPI) listDriverRatings(ctx *gin.Context) {
 	status := ctx.DefaultQuery("status", "pending")
 	if status != "pending" && status != "reviewed" && status != "all" {
 		driverError(ctx, http.StatusBadRequest, "invalid_status", "Status must be pending, reviewed, or all")
+		return
+	}
+	rating := ctx.DefaultQuery("rating", "all")
+	if rating != "all" && rating != "1" {
+		driverError(ctx, http.StatusBadRequest, "invalid_rating", "Rating must be 1 or all")
 		return
 	}
 	limit, err := parseDriverTripHistoryLimit(ctx.Query("limit"))
@@ -62,8 +67,9 @@ func (a *adminAPI) listDriverRatings(ctx *gin.Context) {
 		LEFT JOIN driver_profiles p ON p.driver_id=t.assigned_driver_id
 		WHERE r.actor_id=t.rider_id AND r.subject_id=t.assigned_driver_id
 		AND ($1='all' OR r.admin_review_status=$1)
+		AND ($5='all' OR r.rating=1)
 		AND ($2::TIMESTAMPTZ IS NULL OR (r.created_at,r.trip_id)<($2,$3::UUID))
-		ORDER BY r.created_at DESC,r.trip_id DESC LIMIT $4`, status, cursorTime, cursorID, limit+1)
+		ORDER BY r.created_at DESC,r.trip_id DESC LIMIT $4`, status, cursorTime, cursorID, limit+1, rating)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "driver_ratings_unavailable", "Driver ratings are unavailable")
 		return

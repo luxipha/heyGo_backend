@@ -36,7 +36,7 @@ func registerDriverPrivacyRoutes(group *gin.RouterGroup, api *driverAPI) {
 func (a *driverAPI) requestDriverDataExport(ctx *gin.Context) {
 	user, _ := gatewayauth.CurrentUser(ctx)
 	if !user.EmailVerified || !validResendEmail(user.Email) {
-		driverError(ctx, http.StatusConflict, "verified_casperid_email_required", "A verified CasperID email is required for a data export")
+		driverError(ctx, http.StatusConflict, "verified_email_required", "A verified account email is required for a data export")
 		return
 	}
 	if a.files == nil {
@@ -89,9 +89,9 @@ func (a *driverAPI) requestDriverAccountDeletion(ctx *gin.Context) {
 	id := uuid.NewString()
 	var requestedAt time.Time
 	user, _ := gatewayauth.CurrentUser(ctx)
-	err := a.pool.QueryRow(ctx.Request.Context(), `INSERT INTO driver_account_deletion_requests(id,driver_id,casper_subject_hash,human_id_hash)
-		VALUES($1::UUID,$2::UUID,$3,$4) ON CONFLICT(driver_id) WHERE status='pending' DO NOTHING RETURNING requested_at`,
-		id, user.ID, hashIdentityForPrivacy(user.CasperSubject), hashIdentityForPrivacy(user.HumanID)).Scan(&requestedAt)
+	err := a.pool.QueryRow(ctx.Request.Context(), `INSERT INTO driver_account_deletion_requests(id,driver_id,casper_subject_hash,human_id_hash,phone_hash,email_hash)
+		VALUES($1::UUID,$2::UUID,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,'')) ON CONFLICT(driver_id) WHERE status='pending' DO NOTHING RETURNING requested_at`,
+		id, user.ID, hashIdentityForPrivacy(user.CasperSubject), hashIdentityForPrivacy(user.HumanID), hashIdentityForPrivacy(user.Phone), hashIdentityForPrivacy(user.Email)).Scan(&requestedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,requested_at FROM driver_account_deletion_requests WHERE driver_id=$1::UUID AND status='pending'`, driverID(ctx)).Scan(&id, &requestedAt)
 	}
@@ -103,6 +103,9 @@ func (a *driverAPI) requestDriverAccountDeletion(ctx *gin.Context) {
 }
 
 func hashIdentityForPrivacy(value string) string {
+	if value == "" {
+		return ""
+	}
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }

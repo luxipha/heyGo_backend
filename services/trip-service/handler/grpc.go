@@ -45,10 +45,11 @@ func (h *gRPCHandler) PreviewTrip(ctx context.Context, req *pb.PreviewTripReques
 		return nil, status.Errorf(codes.Internal, "failed to get route: %v", err)
 	}
 
-	estimatedFares := h.svc.EstimatePackagesPriceWithRoute(route)
-
-	fares, err := h.svc.GenerateTripFares(ctx, estimatedFares, req.GetRiderID(), route, pickupCoords, destinationCoords)
+	fares, err := h.svc.GenerateTripFares(ctx, req.GetRiderID(), route, pickupCoords, destinationCoords)
 	if err != nil {
+		if errors.Is(err, repo.ErrPricingUnavailable) {
+			return nil, status.Error(codes.FailedPrecondition, "approved pricing is unavailable for the pickup market")
+		}
 		return nil, status.Errorf(codes.Internal, "failed to generate trip fares: %v", err)
 	}
 
@@ -69,6 +70,9 @@ func (h *gRPCHandler) CreateTrip(ctx context.Context, req *pb.CreateTripRequest)
 
 	trip, err := h.svc.CreateTrip(ctx, fare)
 	if err != nil {
+		if errors.Is(err, repo.ErrRiderRestricted) {
+			return nil, status.Error(codes.FailedPrecondition, "rider cannot request new trips while restricted")
+		}
 		if errors.Is(err, repo.ErrTripClassificationUnavailable) {
 			return nil, status.Error(codes.FailedPrecondition, "pickup or destination is outside an approved market or has overlapping geofences")
 		}

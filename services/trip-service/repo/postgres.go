@@ -5,21 +5,63 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type postgresTripRepo struct{ pool *pgxpool.Pool }
 
 var ErrOfferNotActive = errors.New("driver is not the active assignee for trip")
+var ErrRiderRestricted = errors.New("rider is restricted from requesting new trips")
+var ErrPricingUnavailable = errors.New("published pricing is unavailable or market classification is ambiguous")
 
 func NewPostgresRepository(pool *pgxpool.Pool) TripRepo { return &postgresTripRepo{pool: pool} }
+
+func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longitude float64) (*QuotePricing, error) {
+	var market string
+	err := r.pool.QueryRow(ctx, `SELECT CASE WHEN COUNT(*)=1 THEN MIN(code) ELSE NULL END
+		FROM trip_geofences WHERE kind='market' AND status='approved'
+		AND effective_from<=NOW() AND (effective_until IS NULL OR effective_until>NOW())
+		AND ST_Covers(boundary,ST_SetSRID(ST_MakePoint($1,$2),4326))`, longitude, latitude).Scan(&market)
+	if err != nil || market == "" {
+		return nil, ErrPricingUnavailable
+	}
+	var id string
+	err = r.pool.QueryRow(ctx, `SELECT CASE WHEN COUNT(*)=1 THEN MIN(id::TEXT) ELSE NULL END
+		FROM pricing_versions WHERE market_code=$1 AND status='approved'
+		AND effective_from<=NOW() AND (effective_until IS NULL OR effective_until>NOW())`, market).Scan(&id)
+	if err != nil || id == "" {
+		return nil, ErrPricingUnavailable
+	}
+	rows, err := r.pool.Query(ctx, `SELECT package_slug,base_kobo,per_km_kobo,per_minute_kobo FROM pricing_package_rates WHERE pricing_id=$1::UUID ORDER BY package_slug`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	pricing := &QuotePricing{ID: id, MarketCode: market, Rates: make([]PackageRate, 0, 4)}
+	for rows.Next() {
+		var rate PackageRate
+		if err = rows.Scan(&rate.PackageSlug, &rate.BaseKobo, &rate.PerKmKobo, &rate.PerMinuteKobo); err != nil {
+			return nil, err
+		}
+		pricing.Rates = append(pricing.Rates, rate)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	if len(pricing.Rates) != 4 {
+		return nil, ErrPricingUnavailable
+	}
+	return pricing, nil
+}
 
 func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*types.TripModel, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
@@ -32,6 +74,9 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 	if err != nil {
 		return nil, fmt.Errorf("classify trip: %w", err)
 	}
+	if trip.RideFare.PricingMarketCode != "" && trip.RideFare.PricingMarketCode != classification.MarketCode {
+		return nil, ErrPricingUnavailable
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO trips (id,rider_id,ride_fare_id,status,created_at,updated_at,
 		market_code,origin_region_code,destination_region_code,regulatory_tags,classification_geofences,classified_at,no_show_debt_kobo)
 		VALUES ($1::UUID,$2::UUID,$3::UUID,$4,$5,$5,$6,$7,$8,$9,$10::JSONB,$5,$11)`,
@@ -39,6 +84,10 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 		classification.MarketCode, classification.OriginRegionCode, classification.DestinationRegionCode,
 		classification.Tags, classification.Geofences, trip.RideFare.NoShowDebtKobo)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Message == "rider_trip_restricted" {
+			return nil, ErrRiderRestricted
+		}
 		return nil, fmt.Errorf("create trip: %w", err)
 	}
 	if trip.RideFare.NoShowDebtKobo > 0 {
@@ -109,11 +158,11 @@ func (r *postgresTripRepo) SaveRideFare(ctx context.Context, fare *types.RideFar
 		return fmt.Errorf("begin save ride fare: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `INSERT INTO ride_fares (id,rider_id,package_slug,total_fare_minor,route,pickup,destination,no_show_debt_kobo)
+	_, err = tx.Exec(ctx, `INSERT INTO ride_fares (id,rider_id,package_slug,total_fare_minor,route,pickup,destination,no_show_debt_kobo,pricing_version_id,pricing_market_code)
 		VALUES ($1::UUID,$2::UUID,$3,$4,$5,
 		CASE WHEN $6::DOUBLE PRECISION IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($7::DOUBLE PRECISION,$6::DOUBLE PRECISION),4326)::geography END,
-		CASE WHEN $8::DOUBLE PRECISION IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($9::DOUBLE PRECISION,$8::DOUBLE PRECISION),4326)::geography END,0)`,
-		fare.ID, fare.RiderID, fare.PackageSlug, fare.TotalFareInPaise, route, pickupLat, pickupLng, destinationLat, destinationLng)
+		CASE WHEN $8::DOUBLE PRECISION IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($9::DOUBLE PRECISION,$8::DOUBLE PRECISION),4326)::geography END,0,NULLIF($10,'')::UUID,$11)`,
+		fare.ID, fare.RiderID, fare.PackageSlug, fare.TotalFareInPaise, route, pickupLat, pickupLng, destinationLat, destinationLng, fare.PricingVersionID, fare.PricingMarketCode)
 	if err != nil {
 		return fmt.Errorf("save ride fare: %w", err)
 	}
@@ -137,9 +186,9 @@ func (r *postgresTripRepo) GetRideFareByID(ctx context.Context, fareID string) (
 	var fare types.RideFareModel
 	var route []byte
 	var pickupLat, pickupLng, destinationLat, destinationLng *float64
-	err := r.pool.QueryRow(ctx, `SELECT id::TEXT,rider_id::TEXT,package_slug,total_fare_minor,route,no_show_debt_kobo,
+	err := r.pool.QueryRow(ctx, `SELECT id::TEXT,rider_id::TEXT,package_slug,total_fare_minor,route,no_show_debt_kobo,COALESCE(pricing_version_id::TEXT,''),COALESCE(pricing_market_code,''),
 		ST_Y(pickup::geometry),ST_X(pickup::geometry),ST_Y(destination::geometry),ST_X(destination::geometry)
-		FROM ride_fares WHERE id=$1::UUID AND expires_at>NOW()`, fareID).Scan(&fare.ID, &fare.RiderID, &fare.PackageSlug, &fare.TotalFareInPaise, &route, &fare.NoShowDebtKobo, &pickupLat, &pickupLng, &destinationLat, &destinationLng)
+		FROM ride_fares WHERE id=$1::UUID AND expires_at>NOW()`, fareID).Scan(&fare.ID, &fare.RiderID, &fare.PackageSlug, &fare.TotalFareInPaise, &route, &fare.NoShowDebtKobo, &fare.PricingVersionID, &fare.PricingMarketCode, &pickupLat, &pickupLng, &destinationLat, &destinationLng)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -320,6 +369,9 @@ func (r *postgresTripRepo) Complete(ctx context.Context, tripID, actorID string)
 		if err := enqueueTripEvent(ctx, tx, completed, contracts.TripEventCompleted); err != nil {
 			return nil, false, err
 		}
+		if err := enqueueTripTrustEvents(ctx, tx, tripID, "completed", ""); err != nil {
+			return nil, false, err
+		}
 		var riderID string
 		var fareAmountKobo, noShowDebtKobo int64
 		if err := tx.QueryRow(ctx, `SELECT t.rider_id::TEXT,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id WHERE t.id=$1::UUID`, tripID).Scan(&riderID, &fareAmountKobo, &noShowDebtKobo); err != nil {
@@ -391,6 +443,9 @@ func (r *postgresTripRepo) Cancel(ctx context.Context, tripID, actorID, reason s
 		if err := enqueueTripEvent(ctx, tx, cancelled, contracts.TripEventCancelled); err != nil {
 			return nil, false, err
 		}
+		if err := enqueueTripTrustEvents(ctx, tx, tripID, "cancelled", actorID); err != nil {
+			return nil, false, err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE drivers SET status=CASE WHEN online_requested AND driver_balance_eligible(id,online_market_code) AND COALESCE((SELECT eligible_to_drive FROM driver_eligibility WHERE driver_id=drivers.id),FALSE) THEN 'available' ELSE 'offline' END,
 			available=online_requested AND driver_balance_eligible(id,online_market_code) AND COALESCE((SELECT eligible_to_drive FROM driver_eligibility WHERE driver_id=drivers.id),FALSE),updated_at=NOW()
 			WHERE id=(SELECT assigned_driver_id FROM trips WHERE id=$1::UUID)`, tripID); err != nil {
@@ -414,7 +469,7 @@ func (r *postgresTripRepo) Cancel(ctx context.Context, tripID, actorID, reason s
 }
 
 func (r *postgresTripRepo) TrustParticipants(ctx context.Context, tripID string) ([]TrustSubject, error) {
-	rows, err := r.pool.Query(ctx, `SELECT u.casper_id_user_id,'consumer' FROM trips t JOIN users u ON u.id=t.rider_id WHERE t.id=$1::UUID UNION ALL SELECT u.casper_id_user_id,'provider' FROM trips t JOIN users u ON u.id=t.assigned_driver_id WHERE t.id=$1::UUID`, tripID)
+	rows, err := r.pool.Query(ctx, `SELECT COALESCE(u.casper_id_user_id,''),'consumer' FROM trips t JOIN users u ON u.id=t.rider_id WHERE t.id=$1::UUID UNION ALL SELECT COALESCE(u.casper_id_user_id,''),'provider' FROM trips t JOIN users u ON u.id=t.assigned_driver_id WHERE t.id=$1::UUID`, tripID)
 	if err != nil {
 		return nil, fmt.Errorf("load trust participants: %w", err)
 	}
@@ -451,7 +506,7 @@ func (r *postgresTripRepo) Rate(ctx context.Context, tripID, actorID string, rat
 	var actorIsRider bool
 	err := r.pool.QueryRow(ctx, `SELECT CASE WHEN t.rider_id=$2::UUID THEN t.assigned_driver_id::TEXT ELSE t.rider_id::TEXT END,
 	CASE WHEN t.rider_id=$2::UUID THEN 'provider' ELSE 'consumer' END,
-	CASE WHEN t.rider_id=$2::UUID THEN du.casper_id_user_id ELSE ru.casper_id_user_id END,
+		COALESCE(CASE WHEN t.rider_id=$2::UUID THEN du.casper_id_user_id ELSE ru.casper_id_user_id END,''),
 	t.rider_id=$2::UUID
 	FROM trips t JOIN users ru ON ru.id=t.rider_id JOIN users du ON du.id=t.assigned_driver_id
 	WHERE t.id=$1::UUID AND t.status='completed' AND $2::UUID IN(t.rider_id,t.assigned_driver_id)`, tripID, actorID).Scan(&subjectID, &subject.Role, &subject.CasperID, &actorIsRider)
@@ -471,10 +526,67 @@ func (r *postgresTripRepo) Rate(ctx context.Context, tripID, actorID string, rat
 	if actorIsRider && rating == 1 {
 		reviewStatus = "pending"
 	}
-	result, err := r.pool.Exec(ctx, `INSERT INTO trip_ratings(trip_id,actor_id,subject_id,rating,feedback_tags,comment,admin_review_status)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return TrustSubject{}, false, fmt.Errorf("begin rating: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `INSERT INTO trip_ratings(trip_id,actor_id,subject_id,rating,feedback_tags,comment,admin_review_status)
 		VALUES($1::UUID,$2::UUID,$3::UUID,$4,$5,$6,$7) ON CONFLICT(trip_id,actor_id) DO NOTHING`, tripID, actorID, subjectID, rating, feedbackTags, comment, reviewStatus)
 	if err != nil {
 		return TrustSubject{}, false, fmt.Errorf("save rating: %w", err)
 	}
+	if result.RowsAffected() == 1 {
+		if err := enqueueTrustEventTx(ctx, tx, subject.CasperID, subject.Role, "rating.submitted", "trip_"+tripID+"_"+map[bool]string{true: "rider_rating_driver", false: "driver_rating_rider"}[actorIsRider], tripID, &rating, time.Now().UTC()); err != nil {
+			return TrustSubject{}, false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TrustSubject{}, false, fmt.Errorf("commit rating: %w", err)
+	}
 	return subject, result.RowsAffected() == 1, nil
+}
+
+func enqueueTripTrustEvents(ctx context.Context, tx pgx.Tx, tripID, outcome, actorID string) error {
+	if outcome == "completed" {
+		for _, role := range []string{"consumer", "provider"} {
+			if err := enqueueTrustParticipantEvent(ctx, tx, tripID, role, "interaction.completed", "trip_"+tripID+"_"+role+"_completed", nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	role := "consumer"
+	if actorID != "" {
+		var riderID string
+		if err := tx.QueryRow(ctx, `SELECT rider_id::TEXT FROM trips WHERE id=$1::UUID`, tripID).Scan(&riderID); err != nil {
+			return err
+		}
+		if actorID != riderID {
+			role = "provider"
+		}
+	}
+	return enqueueTrustParticipantEvent(ctx, tx, tripID, role, "interaction.cancelled_by_"+role, "trip_"+tripID+"_"+role+"_cancelled", nil)
+}
+
+func enqueueTrustParticipantEvent(ctx context.Context, tx pgx.Tx, tripID, role, eventType, externalID string, rating *int) error {
+	_, err := tx.Exec(ctx, `INSERT INTO casperid_trust_deliveries(external_event_id,casper_id_user_id,actor_role,event_type,interaction_reference,rating,occurred_at)
+		SELECT $2,u.casper_id_user_id,$3,$4,$1::UUID::TEXT,$5,NOW() FROM trips t JOIN users u ON u.id=CASE WHEN $3='consumer' THEN t.rider_id ELSE t.assigned_driver_id END
+		WHERE t.id=$1::UUID AND u.casper_id_user_id<>'' ON CONFLICT(external_event_id) DO NOTHING`, tripID, externalID, role, eventType, rating)
+	if err != nil {
+		return fmt.Errorf("enqueue CasperID trust event: %w", err)
+	}
+	return nil
+}
+
+func enqueueTrustEventTx(ctx context.Context, tx pgx.Tx, casperID, role, eventType, externalID, interactionReference string, rating *int, occurredAt time.Time) error {
+	if strings.TrimSpace(casperID) == "" {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO casperid_trust_deliveries(external_event_id,casper_id_user_id,actor_role,event_type,interaction_reference,rating,occurred_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(external_event_id) DO NOTHING`, externalID, casperID, role, eventType, interactionReference, rating, occurredAt)
+	if err != nil {
+		return fmt.Errorf("enqueue CasperID trust event: %w", err)
+	}
+	return nil
 }

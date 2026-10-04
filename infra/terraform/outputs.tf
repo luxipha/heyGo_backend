@@ -39,7 +39,7 @@ output "cloud_sql_instance_connection_name" {
 }
 
 output "runtime_secret_ids" {
-  description = "Secret Manager containers. CasperID and Monnify secrets require manually supplied versions before deployment."
+  description = "Secret Manager containers. Monnify secrets require versions before deployment; SMS and CasperID containers are reserved for optional integrations."
   value       = { for name, secret in google_secret_manager_secret.runtime : name => secret.secret_id }
 }
 

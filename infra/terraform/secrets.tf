@@ -3,6 +3,9 @@ locals {
     "database-url",
     "migration-database-url",
     "internal-service-token",
+    "otp-pepper",
+    "admin-settings-key",
+    "sms-provider-token",
     "casperid-app-id",
     "casperid-api-secret",
     "monnify-api-key",
@@ -11,12 +14,12 @@ locals {
   ])
 
   service_secret_access = {
-    api-gateway = toset([
+    api-gateway = setunion(toset([
       "database-url",
       "internal-service-token",
-      "casperid-app-id",
-      "casperid-api-secret",
-    ])
+      "otp-pepper",
+      "admin-settings-key",
+    ]), var.sms_provider_url == "" ? toset([]) : toset(["sms-provider-token"]))
     driver-service = toset([
       "database-url",
       "internal-service-token",
@@ -31,8 +34,6 @@ locals {
     trip-service = toset([
       "database-url",
       "internal-service-token",
-      "casperid-app-id",
-      "casperid-api-secret",
     ])
   }
 
@@ -50,6 +51,15 @@ locals {
 resource "random_password" "internal_service_token" {
   length  = 48
   special = false
+}
+
+resource "random_password" "otp_pepper" {
+  length  = 64
+  special = false
+}
+
+resource "random_id" "admin_settings_key" {
+  byte_length = 32
 }
 
 resource "google_secret_manager_secret" "runtime" {
@@ -90,6 +100,16 @@ resource "google_secret_manager_secret_version" "migration_database_url" {
 resource "google_secret_manager_secret_version" "internal_service_token" {
   secret      = google_secret_manager_secret.runtime["internal-service-token"].id
   secret_data = random_password.internal_service_token.result
+}
+
+resource "google_secret_manager_secret_version" "otp_pepper" {
+  secret      = google_secret_manager_secret.runtime["otp-pepper"].id
+  secret_data = random_password.otp_pepper.result
+}
+
+resource "google_secret_manager_secret_version" "admin_settings_key" {
+  secret      = google_secret_manager_secret.runtime["admin-settings-key"].id
+  secret_data = random_id.admin_settings_key.hex
 }
 
 resource "google_secret_manager_secret_iam_member" "runtime_accessor" {

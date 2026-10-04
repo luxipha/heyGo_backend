@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
@@ -80,10 +81,9 @@ func main() {
 	defer stop()
 
 	databaseURL := env.GetString("DATABASE_URL", "")
-	casperIDAppID := env.GetString("CASPERID_APP_ID", "")
 	internalServiceToken := env.GetString("INTERNAL_SERVICE_TOKEN", "")
-	if databaseURL == "" || casperIDAppID == "" || internalServiceToken == "" {
-		logs.L().Fatal("DATABASE_URL, CASPERID_APP_ID, and INTERNAL_SERVICE_TOKEN are required")
+	if databaseURL == "" || internalServiceToken == "" {
+		logs.L().Fatal("DATABASE_URL and INTERNAL_SERVICE_TOKEN are required")
 	}
 	pool, err := db.NewPostgresPool(ctx, db.Config{
 		URL:             databaseURL,
@@ -107,12 +107,7 @@ func main() {
 	go eventNotifier.Run(ctx)
 	eventStore := messaging.NewEventStore(pool, eventNotifier)
 	users := gatewayauth.NewPostgresUserStore(pool)
-	verifier := sharedauth.NewCasperIDVerifier(
-		env.GetString("CASPERID_JWKS_URL", "https://casperid.com/.well-known/jwks.json"),
-		env.GetString("CASPERID_ISSUER", "casperid.com"),
-		casperIDAppID,
-	)
-	authMiddleware := gatewayauth.NewMiddleware(verifier, users)
+	authMiddleware := gatewayauth.NewSessionMiddleware(pool, users)
 	var files storage.ObjectStore
 	if endpoint, bucket, accessKey, secretKey := env.GetString("R2_ENDPOINT", ""), env.GetString("R2_BUCKET", ""), env.GetString("R2_ACCESS_KEY_ID", ""), env.GetString("R2_SECRET_ACCESS_KEY", ""); endpoint != "" || bucket != "" || accessKey != "" || secretKey != "" {
 		files, err = storage.NewR2Store(storage.R2Config{Endpoint: endpoint, Bucket: bucket, AccessKey: accessKey, SecretKey: secretKey})
@@ -133,6 +128,8 @@ func main() {
 	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
 	case "pull":
 		handler.StartPrivacyJobs(ctx, pool, files)
+		handler.StartSOSLocationPurge(ctx, pool)
+		handler.StartRefundJobs(ctx, pool)
 		handler.StartNotificationPushJobs(ctx, pool)
 		go func() {
 			if err := topicConsumer.Consume(ctx); err != nil && ctx.Err() == nil {
@@ -147,6 +144,16 @@ func main() {
 		pushMux := pubsub.NewPushMux(topics, topicConsumer.Handle, authorizer)
 		pushMux.Handle("POST /internal/tasks/maintenance", pubsub.AuthorizeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handler.RunPrivacyJobsOnce(r.Context(), pool, files, 25)
+			if err := handler.RunSOSLocationPurgeOnce(r.Context(), pool); err != nil {
+				logs.L().Warnw("SOS location purge failed", "error", err)
+				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err := handler.RunRefundJobsOnce(r.Context(), pool); err != nil {
+				logs.L().Warnw("Refund maintenance failed", "error", err)
+				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			if err := handler.RunNotificationPushJobsOnce(r.Context(), pool, 100); err != nil {
 				logs.L().Warnw("Scheduled gateway maintenance failed", "error", err)
 				http.Error(w, "maintenance failed", http.StatusServiceUnavailable)
@@ -167,15 +174,18 @@ func main() {
 		if err := bus.Ping(checkCtx); err != nil {
 			return err
 		}
-		return verifier.Ping(checkCtx)
+		return nil
 	}
-	oauthConfig := handler.CasperIDOAuthConfig{
-		AppID:             casperIDAppID,
-		APISecret:         env.GetString("CASPERID_API_SECRET", ""),
-		TokenURL:          env.GetString("CASPERID_TOKEN_URL", "https://apis.casperid.com/api/oauth/token"),
-		DriverRedirectURI: env.GetString("CASPERID_DRIVER_REDIRECT_URI", "com.heygo.driver://oauth/callback"),
+	phoneAuth := handler.PhoneAuthConfig{
+		OTPPepper:       []byte(env.GetString("OTP_PEPPER", "")),
+		ResendSecretKey: decodeHexKey(env.GetString("HEYGO_ADMIN_SETTINGS_KEY", "")),
+		Sender: handler.NewHTTPSMSSender(
+			env.GetString("SMS_PROVIDER_URL", ""),
+			env.GetString("SMS_PROVIDER_TOKEN", ""),
+			env.GetString("SMS_SENDER_ID", "HeyGo"),
+		),
 	}
-	httpServer := NewhttpServer(httpAddr, bus, connManager, authMiddleware, users, pool, eventStore, files, origins, oauthConfig, readiness, pushHandler)
+	httpServer := NewhttpServer(httpAddr, bus, connManager, authMiddleware, users, pool, eventStore, files, origins, phoneAuth, readiness, pushHandler)
 	go func() {
 		if err := httpServer.run(ctx); err != nil && ctx.Err() == nil {
 			logs.L().Errorw("http server error", "error", err)
@@ -197,4 +207,12 @@ func splitCSV(value string) []string {
 		}
 	}
 	return result
+}
+
+func decodeHexKey(value string) []byte {
+	key, _ := hex.DecodeString(value)
+	if len(key) != 32 {
+		return nil
+	}
+	return key
 }

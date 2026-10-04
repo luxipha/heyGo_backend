@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-required="POSTGRES_URL INTERNAL_SERVICE_TOKEN CASPERID_APP_ID CASPERID_API_SECRET MONNIFY_API_KEY MONNIFY_SECRET_KEY MONNIFY_CONTRACT_CODE"
+required="POSTGRES_URL INTERNAL_SERVICE_TOKEN OTP_PEPPER HEYGO_ADMIN_SETTINGS_KEY MONNIFY_API_KEY MONNIFY_SECRET_KEY MONNIFY_CONTRACT_CODE"
 for name in $required; do
   eval "value=\${$name:-}"
   if [ -z "$value" ]; then
@@ -9,6 +9,17 @@ for name in $required; do
     exit 1
   fi
 done
+
+case "$HEYGO_ADMIN_SETTINGS_KEY" in
+  *[!0-9a-fA-F]*|'')
+    echo "HEYGO_ADMIN_SETTINGS_KEY must contain exactly 64 hexadecimal characters" >&2
+    exit 1
+    ;;
+esac
+if [ "${#HEYGO_ADMIN_SETTINGS_KEY}" -ne 64 ]; then
+  echo "HEYGO_ADMIN_SETTINGS_KEY must contain exactly 64 hexadecimal characters" >&2
+  exit 1
+fi
 
 namespace="${K8S_NAMESPACE:-heygo}"
 output="${SECRETS_FILE:-infra/kubernetes/dev/secrets.yaml}"
@@ -20,9 +31,10 @@ umask 077
     --from-literal=internal-service-token="$INTERNAL_SERVICE_TOKEN" \
     --dry-run=client -o yaml
   echo '---'
-  kubectl create secret generic casperid -n "$namespace" \
-    --from-literal=app-id="$CASPERID_APP_ID" \
-    --from-literal=api-secret="$CASPERID_API_SECRET" \
+  kubectl create secret generic phone-auth -n "$namespace" \
+    --from-literal=otp-pepper="$OTP_PEPPER" \
+    --from-literal=admin-settings-key="$HEYGO_ADMIN_SETTINGS_KEY" \
+    --from-literal=sms-provider-token="${SMS_PROVIDER_TOKEN:-}" \
     --dry-run=client -o yaml
   echo '---'
   kubectl create secret generic external-apis -n "$namespace" \

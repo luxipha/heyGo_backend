@@ -10,18 +10,33 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/luxipha/heyGo_backend/shared/adminauth"
 	"github.com/luxipha/heyGo_backend/shared/db"
-	"github.com/google/uuid"
 	"golang.org/x/term"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: go run ./cmd/admin-user <username>")
+	if len(os.Args) != 3 {
+		fmt.Fprintln(os.Stderr, "usage: go run ./cmd/admin-user <username> <comma-separated roles>")
 		os.Exit(2)
 	}
 	username := strings.ToLower(strings.TrimSpace(os.Args[1]))
+	roles := strings.Split(os.Args[2], ",")
+	seen := make(map[string]bool)
+	for _, role := range roles {
+		switch role {
+		case "operations", "compliance", "support", "finance", "safety", "super_admin":
+		default:
+			fmt.Fprintln(os.Stderr, "invalid staff role:", role)
+			os.Exit(2)
+		}
+		if seen[role] {
+			fmt.Fprintln(os.Stderr, "duplicate staff role:", role)
+			os.Exit(2)
+		}
+		seen[role] = true
+	}
 	if len(username) < 3 || len(username) > 100 || strings.ContainsAny(username, " \t\r\n") {
 		fmt.Fprintln(os.Stderr, "username must be 3-100 characters without spaces")
 		os.Exit(2)
@@ -54,7 +69,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	pool, err := db.NewPostgresPool(ctx, db.Config{URL: databaseURL, MaxConnIdleTime: time.Minute, MaxConns: 2, MinConns: 0})
 	if err != nil {
@@ -66,10 +81,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, "migration failed:", err)
 		os.Exit(1)
 	}
-	_, err = pool.Exec(ctx, `INSERT INTO admin_users(id,username,password_hash) VALUES($1,$2,$3)`, uuid.New(), username, hash)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "staff account was not created:", err)
 		os.Exit(1)
 	}
-	fmt.Println("Created staff account:", username)
+	defer tx.Rollback(ctx)
+	id := uuid.New()
+	_, err = tx.Exec(ctx, `INSERT INTO admin_users(id,username,password_hash,role) VALUES($1,$2,$3,$4)`, id, username, hash, roles[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "staff account was not created:", err)
+		os.Exit(1)
+	}
+	for _, role := range roles {
+		if _, err = tx.Exec(ctx, `INSERT INTO admin_user_roles(admin_id,role) VALUES($1,$2)`, id, role); err != nil {
+			fmt.Fprintln(os.Stderr, "staff account was not created:", err)
+			os.Exit(1)
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "staff account was not created:", err)
+		os.Exit(1)
+	}
+	fmt.Println("Created staff account:", username, "roles:", strings.Join(roles, ","))
 }

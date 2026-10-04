@@ -35,20 +35,31 @@ are missing. Do not deploy a revision until these are ready:
 - PostgreSQL/PostGIS and a `DATABASE_URL` secret;
 - Pub/Sub topics/subscriptions from `infra/terraform` and `GCP_PROJECT_ID=heygo-ng`;
 - shared `INTERNAL_SERVICE_TOKEN` secret;
-- CasperID application ID and API secret;
+- API Gateway `OTP_PEPPER`, `HEYGO_ADMIN_SETTINGS_KEY`, and configured Resend
+  settings for email OTP; SMS provider URL, token, and sender ID are optional;
 - Monnify API key, secret key, and contract code for `payment-service`;
 - service URLs for API Gateway to call Driver, Trip, and Payment services.
 
-Optional R2, FCM, Resend, OpenTelemetry, CORS, and administrator settings should
-be configured before enabling their corresponding product features.
+Optional CasperID trust delivery, R2, FCM, Resend, OpenTelemetry, CORS, and
+administrator settings should be configured before enabling their corresponding
+product features. Email/phone sign-in and manual Driver approval do not require
+CasperID credentials.
+
+Staff email invitations and recovery additionally require `ADMIN_FRONTEND_URL`
+to be the Admin HTTPS origin and configured Admin Resend settings. The backend
+sends single-use links with tokens in the URL fragment; the Admin client must
+submit the token and password to the matching `/admin/auth/` endpoint. Verify
+the frontend uses `Referrer-Policy: no-referrer` on these pages and clears the
+fragment after reading it. Existing CLI-created staff need a Super Admin to
+send an email-verification link before email recovery is available.
 
 ## Deployment boundary
 
 Terraform now defines Cloud SQL, Secret Manager, and all four Cloud Run
 services, but `deploy_services` defaults to `false`. Follow the staged
 procedure in `infra/terraform/README.md`: apply the database and secret
-containers, populate external CasperID and Monnify secret versions, create and
-run the separate migration job, and only then enable Cloud Run with an immutable
+containers, populate external SMS and Monnify secret versions, create and run
+the separate migration job, and only then enable Cloud Run with an immutable
 image SHA. Keep `retain_pull_subscriber_permissions=true` through the first
 Cloud Run rollout. After authenticated push delivery is verified, set it to
 `false` in a separate cleanup plan. The services use a read/write database role

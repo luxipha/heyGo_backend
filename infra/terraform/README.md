@@ -33,21 +33,15 @@ terraform -chdir=infra/terraform apply runtime-foundation.tfplan
 ```
 
 Terraform generates and stores versions for `heygo-database-url`,
-`heygo-migration-database-url`, and `heygo-internal-service-token`. The
+`heygo-migration-database-url`, `heygo-internal-service-token`, and
+`heygo-otp-pepper`, plus a stable 64-character hexadecimal
+`heygo-admin-settings-key` used to encrypt Admin-managed Resend credentials. The
 long-running services use the database role with read/write privileges;
 the migration job alone receives the elevated database credential. Add values
 for the externally owned credentials
 without placing their plaintext in Terraform variables, GitHub, or the repo:
 
 ```sh
-read -rs 'SECRET_VALUE?CasperID app ID: '
-printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-casperid-app-id --data-file=- --project=heygo-ng
-unset SECRET_VALUE
-
-read -rs 'SECRET_VALUE?CasperID API secret: '
-printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-casperid-api-secret --data-file=- --project=heygo-ng
-unset SECRET_VALUE
-
 read -rs 'SECRET_VALUE?Monnify API key: '
 printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-api-key --data-file=- --project=heygo-ng
 unset SECRET_VALUE
@@ -58,6 +52,16 @@ unset SECRET_VALUE
 
 read -rs 'SECRET_VALUE?Monnify contract code: '
 printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-contract-code --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+```
+
+Email OTP uses the Resend credentials configured through HeyGo Admin. An SMS
+provider token is not required until phone OTP is enabled. At that point, add a
+version to `heygo-sms-provider-token` and set `sms_provider_url`:
+
+```sh
+read -rs 'SECRET_VALUE?SMS provider token: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-sms-provider-token --data-file=- --project=heygo-ng
 unset SECRET_VALUE
 ```
 

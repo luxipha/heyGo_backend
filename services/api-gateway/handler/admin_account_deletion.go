@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 type adminAccountDeletionRequest struct {
@@ -127,8 +127,19 @@ func (a *adminAPI) reviewAccountDeletionRequest(ctx *gin.Context) {
 		return
 	}
 	if body.Decision == "approve" {
+		// Matching locks this row before creating an offer. Hold it through the
+		// deletion check so a new offer cannot race the approval transaction.
+		var lockedDriver string
+		if err := tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT FROM drivers WHERE id=$1::UUID FOR UPDATE`, driver).Scan(&lockedDriver); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			driverError(ctx, http.StatusServiceUnavailable, "account_deletion_unavailable", "The request could not be reviewed")
+			return
+		}
 		var activeTrip bool
-		if err := tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM trips WHERE assigned_driver_id=$1::UUID AND status IN ('assigned','accepted','arrived','started'))`, driver).Scan(&activeTrip); err != nil {
+		if err := tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(
+			SELECT 1 FROM trips WHERE assigned_driver_id=$1::UUID AND status IN ('assigned','accepted','arrived','started')
+			UNION ALL
+			SELECT 1 FROM driver_assignments WHERE driver_id=$1::UUID AND status IN ('offered','accepted')
+		)`, driver).Scan(&activeTrip); err != nil {
 			driverError(ctx, http.StatusServiceUnavailable, "account_deletion_unavailable", "The request could not be reviewed")
 			return
 		}
@@ -174,21 +185,30 @@ func queueDriverDeletionFiles(ctx *gin.Context, tx pgx.Tx, requestID, driverID s
 
 func anonymizeDriverAccount(ctx *gin.Context, tx pgx.Tx, requestID, driverID string) error {
 	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO deactivated_casperid_identities(subject_hash,human_id_hash,deletion_request_id)
-		SELECT casper_subject_hash,human_id_hash,id FROM driver_account_deletion_requests WHERE id=$1::UUID`, requestID); err != nil {
+			SELECT casper_subject_hash,human_id_hash,id FROM driver_account_deletion_requests WHERE id=$1::UUID AND casper_subject_hash IS NOT NULL AND human_id_hash IS NOT NULL`, requestID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO deactivated_phone_identities(phone_hash,deletion_request_id)
+			SELECT phone_hash,id FROM driver_account_deletion_requests WHERE id=$1::UUID AND phone_hash IS NOT NULL`, requestID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO deactivated_email_identities(email_hash,deletion_request_id)
+			SELECT email_hash,id FROM driver_account_deletion_requests WHERE id=$1::UUID AND email_hash IS NOT NULL`, requestID); err != nil {
 		return err
 	}
 	queries := []struct {
 		query string
 		args  []any
 	}{
-		{`UPDATE users SET active=FALSE,deactivated_at=NOW(),casper_id_user_id='deleted:'||id::TEXT,human_id='deleted-'||id::TEXT,
-			roles='{}'::TEXT[],verified=FALSE,nin_verified=FALSE,kyc_tier=NULL,trust_score=NULL,updated_at=NOW() WHERE id=$1::UUID AND active=TRUE`, []any{driverID}},
+		{`UPDATE users SET active=FALSE,deactivated_at=NOW(),phone_e164=NULL,phone_verified_at=NULL,email=NULL,email_verified=FALSE,casper_id_user_id='deleted:'||id::TEXT,human_id='deleted-'||id::TEXT,
+			roles='{}'::TEXT[],verified=FALSE,nin_verified=FALSE,kyc_tier=NULL,provider_trust_score=NULL,consumer_trust_score=NULL,provider_trust_status=NULL,consumer_trust_status=NULL,trust_score_updated_at=NULL,trust_score_policy_version=NULL,updated_at=NOW() WHERE id=$1::UUID AND active=TRUE`, []any{driverID}},
 		{`UPDATE driver_profiles SET display_name='Deleted Driver',photo_url='',admin_reason='',updated_at=NOW() WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`UPDATE driver_vehicles SET package_slug='',make='',model='',model_year=NULL,color='',plate='',review_reason='',review_status='pending',updated_at=NOW() WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`UPDATE drivers SET name='Deleted Driver',profile_pic='',car_plate='',package_slug='',status='offline',available=FALSE,online_requested=FALSE,location=NULL,online_market_code=NULL,updated_at=NOW() WHERE id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_safety_contacts WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_devices WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_socket_sessions WHERE driver_id=$1::UUID`, []any{driverID}},
+		{`DELETE FROM user_sessions WHERE user_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_live_locations WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_locations WHERE driver_id=$1`, []any{driverID}},
 		{`DELETE FROM driver_documents WHERE driver_id=$1::UUID`, []any{driverID}},

@@ -107,6 +107,17 @@ variable "allowed_origins" {
   }
 }
 
+variable "admin_frontend_url" {
+  description = "HTTPS origin for single-use staff invitation, verification, and recovery links. Configure before enabling staff email flows."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.admin_frontend_url == "" || can(regex("^https://[^/]+/?$", var.admin_frontend_url))
+    error_message = "admin_frontend_url must be empty or an HTTPS origin without a path."
+  }
+}
+
 variable "app_url" {
   description = "Public HeyGo application URL used for payment redirects. Set this before enabling Cloud Run."
   type        = string
@@ -116,6 +127,23 @@ variable "app_url" {
     condition     = !var.deploy_services || can(regex("^https://", var.app_url))
     error_message = "app_url must be an HTTPS URL when deploy_services is true."
   }
+}
+
+variable "sms_provider_url" {
+  description = "HTTPS endpoint for the configured SMS OTP adapter. Required before enabling phone sign-in in a deployed environment."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.sms_provider_url == "" || can(regex("^https://", var.sms_provider_url))
+    error_message = "sms_provider_url must be empty or an HTTPS URL."
+  }
+}
+
+variable "sms_sender_id" {
+  description = "Sender identifier passed to the SMS OTP adapter."
+  type        = string
+  default     = "HeyGo"
 }
 
 variable "api_gateway_concurrency" {

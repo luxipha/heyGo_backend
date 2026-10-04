@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
-	"github.com/google/uuid"
 )
 
 type contractTestVerifier struct{}
@@ -35,7 +35,7 @@ func (s contractTestUsers) AddRole(context.Context, string, string) (gatewayauth
 
 func TestUnusedSingularLifecycleAliasesAreNotRegistered(t *testing.T) {
 	users := contractTestUsers{id: uuid.NewString()}
-	router := NewHTTPHandler(nil, nil, gatewayauth.NewMiddleware(contractTestVerifier{}, users), users, nil, nil, nil, CasperIDOAuthConfig{}, func(context.Context) error { return nil })
+	router := NewHTTPHandler(nil, nil, gatewayauth.NewMiddleware(contractTestVerifier{}, users), users, nil, nil, nil, PhoneAuthConfig{}, func(context.Context) error { return nil })
 	routes := map[string]bool{}
 	for _, route := range router.Routes() {
 		routes[route.Method+" "+route.Path] = true
@@ -76,7 +76,7 @@ func TestRiderTripStartUsesErrorEnvelopeAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	users := contractTestUsers{id: id}
-	router := NewHTTPHandler(nil, nil, gatewayauth.NewMiddleware(contractTestVerifier{}, users), users, pool, nil, []string{"https://app.heygo.test"}, CasperIDOAuthConfig{}, func(context.Context) error { return nil })
+	router := NewHTTPHandler(nil, nil, gatewayauth.NewMiddleware(contractTestVerifier{}, users), users, pool, nil, []string{"https://app.heygo.test"}, PhoneAuthConfig{}, func(context.Context) error { return nil })
 	request := func(body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/trip/start", strings.NewReader(body))

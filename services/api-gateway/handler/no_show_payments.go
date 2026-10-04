@@ -37,7 +37,7 @@ func registerRiderNoShowPaymentRoutes(rider *gin.RouterGroup, pool *pgxpool.Pool
 		user, _ := gatewayauth.CurrentUser(ctx)
 		address, err := mail.ParseAddress(user.Email)
 		if err != nil || address.Address != user.Email || strings.ContainsAny(user.Email, "\r\n") {
-			driverError(ctx, http.StatusConflict, "casperid_email_required", "A verified CasperID email is required to pay this debt")
+			driverError(ctx, http.StatusConflict, "email_required", "A valid account email is required to pay this debt")
 			return
 		}
 		payload, _ := json.Marshal(gin.H{"debtId": debtID, "riderId": user.ID, "email": user.Email, "idempotencyKey": key})

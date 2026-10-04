@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,17 +44,19 @@ func TestSupportCaseUserAndStaffWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	userID, adminID := uuid.NewString(), uuid.NewString()
-	if _, err := pool.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles) VALUES($1::UUID,$2,$3,ARRAY['driver'])`, userID, "support-test:"+userID, "support-human:"+userID); err != nil {
+	phone := fmt.Sprintf("+234%010d", uint64(time.Now().UnixNano())%10000000000)
+	if _, err := pool.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles,phone_e164,email) VALUES($1::UUID,$2,$3,ARRAY['driver'],$4,$5)`, userID, "support-test:"+userID, "support-human:"+userID, phone, "support-"+userID+"@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO admin_users(id,username,password_hash) VALUES($1::UUID,$2,'unused')`, adminID, "support-test-"+adminID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_audit WHERE admin_id=$1::UUID`, adminID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM support_cases WHERE opened_by=$1::UUID`, userID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_users WHERE id=$1::UUID`, adminID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1::UUID`, userID)
-	})
+	}()
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	authenticated := router.Group("/", gatewayauth.NewMiddleware(contractTestVerifier{}, supportTestUsers{id: userID, role: "driver"}).Authenticate)
@@ -85,6 +88,21 @@ func TestSupportCaseUserAndStaffWorkflow(t *testing.T) {
 	caseID := created.Data.CaseID
 	if _, err := uuid.Parse(caseID); err != nil {
 		t.Fatalf("case id=%q", caseID)
+	}
+	contactForRole := func(role string) *httptest.ResponseRecorder {
+		r := gin.New()
+		api := &adminAPI{pool: pool}
+		group := r.Group("/admin", func(c *gin.Context) { c.Set("admin", adminIdentity{ID: adminID, Role: role}); c.Next() }, api.authorize)
+		group.GET("/support/cases/:caseID/contact", (&supportAPI{pool: pool}).adminCaseContact)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/support/cases/"+caseID+"/contact", nil))
+		return rec
+	}
+	if rec := contactForRole("support"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), phone) {
+		t.Fatalf("Support case contact status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := contactForRole("finance"); rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), phone) {
+		t.Fatalf("Finance case contact status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	userMessageID := uuid.NewString()
 	reply := `{"body":"More details","clientMessageId":"` + userMessageID + `"}`

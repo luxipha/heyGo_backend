@@ -184,9 +184,11 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 				logs.L().Errorw("failed to begin driver location update", "driverID", driverID, "error", err)
 				continue
 			}
-			if _, err := locationTx.Exec(ctx.Request.Context(), `INSERT INTO driver_live_locations(driver_id,location,recorded_at)
+			var recordedAt time.Time
+			if err := locationTx.QueryRow(ctx.Request.Context(), `INSERT INTO driver_live_locations(driver_id,location,recorded_at)
 				VALUES($1::UUID,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography,NOW())
-				ON CONFLICT(driver_id) DO UPDATE SET location=EXCLUDED.location,recorded_at=EXCLUDED.recorded_at`, driverID, location.Location.Latitude, location.Location.Longitude); err != nil {
+				ON CONFLICT(driver_id) DO UPDATE SET location=EXCLUDED.location,recorded_at=EXCLUDED.recorded_at
+				RETURNING recorded_at`, driverID, location.Location.Latitude, location.Location.Longitude).Scan(&recordedAt); err != nil {
 				_ = locationTx.Rollback(ctx.Request.Context())
 				logs.L().Errorw("failed to persist driver location", "driverID", driverID, "error", err)
 				continue
@@ -200,6 +202,7 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 				logs.L().Errorw("failed to commit driver location", "driverID", driverID, "error", err)
 				continue
 			}
+			location.RecordedAt = &recordedAt
 			trustedData, _ := json.Marshal(location)
 			if err := bus.Producer.SendMessage(ctx, dm.Type, &contracts.EventMessage{EntityID: driverID, Data: trustedData}); err != nil {
 				logs.L().Errorw("failed to publish driver location", "driverID", driverID, "error", err)

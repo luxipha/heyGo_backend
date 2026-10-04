@@ -19,6 +19,11 @@ var ErrNoAvailableDriver = errors.New("no available driver")
 var ErrTripAlreadyMatched = errors.New("trip is already matched")
 var ErrNoActiveOffer = errors.New("trip has no active driver offer")
 
+// trustDistanceAdvantageMeters is the maximum proximity advantage granted to
+// a higher-trust provider while dispatch has no driver-to-pickup ETA matrix.
+// A missing snapshot defaults to the neutral baseline of 100.
+const trustDistanceAdvantageMeters = 500
+
 type Candidate struct {
 	Driver    *pb.Driver
 	Distance  float64
@@ -138,7 +143,7 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 	AND l.recorded_at>=NOW()-INTERVAL '30 minutes'
 	AND driver_balance_eligible(d.id,d.online_market_code)
 	AND ST_DWithin(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography,$4) AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
-	ORDER BY ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-COALESCE(u.trust_score,100)*2,d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
+	ORDER BY ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-LEAST(GREATEST(COALESCE(u.provider_trust_score,100)-100,0)*2,$6),d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID, trustDistanceAdvantageMeters).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoAvailableDriver
 	}

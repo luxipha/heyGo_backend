@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 const maxDriverDocumentBytes int64 = 15 << 20
@@ -19,7 +19,7 @@ const uploadLifetime = 15 * time.Minute
 
 func validOperationalDocument(kind string) bool {
 	switch kind {
-	case "driver_license", "vehicle_license", "roadworthiness", "auto_insurance", "hackney_permit":
+	case "driver_license", "vehicle_license", "roadworthiness", "auto_insurance", "hackney_permit", "lasdri", "lasrra_lag_id", "driver_picture", "selfie_with_id", "id_document":
 		return true
 	}
 	return false

@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 const resendEmailEndpoint = "https://api.resend.com/emails"
@@ -190,6 +191,12 @@ func (a *adminAPI) testResendSettings(ctx *gin.Context) {
 	}
 	if err != nil {
 		driverError(ctx, http.StatusBadGateway, "resend_test_failed", "Resend could not send the test email")
+		return
+	}
+	_, err = a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_type,target_id,details,before_state,after_state)
+		VALUES($1,$2::UUID,'privacy.resend_settings.test','settings','resend','{}'::JSONB,'{}'::JSONB,'{}'::JSONB)`, uuid.New(), currentAdmin(ctx).ID)
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "resend_test_audit_unavailable", "Email was sent but its audit receipt is unavailable")
 		return
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"sent": true, "to": body.To}})

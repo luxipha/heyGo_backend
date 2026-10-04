@@ -2,14 +2,16 @@ package handler
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
-	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 )
 
 func TestNoShowDebtTransfersOnlyWhenTheCollectingDriverCanFundIt(t *testing.T) {
@@ -64,6 +66,14 @@ func TestNoShowDebtTransfersOnlyWhenTheCollectingDriverCanFundIt(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO driver_no_show_claims(id,trip_id,driver_id,rider_id,market_code,policy_id,fee_kobo,arrived_at,eligible_at,status,reviewed_by,reviewed_at)
 		VALUES($1::UUID,$2::UUID,$3::UUID,$4::UUID,$5,$6::UUID,100000,NOW()-INTERVAL '10 minutes',NOW()-INTERVAL '5 minutes','approved',$7::UUID,NOW())`, claim, trip, claimant, rider, market, policyID, admin1); err != nil {
 		t.Fatal(err)
+	}
+	claimResponse := httptest.NewRecorder()
+	claimContext, _ := gin.CreateTestContext(claimResponse)
+	claimContext.Request = httptest.NewRequest(http.MethodGet, "/admin/no-show/claims/"+claim, nil)
+	claimContext.Params = gin.Params{{Key: "id", Value: claim}}
+	(&adminAPI{pool: pool}).noShowClaimDetail(claimContext)
+	if claimResponse.Code != http.StatusOK || !strings.Contains(claimResponse.Body.String(), claim) || !strings.Contains(claimResponse.Body.String(), `"policyVersion":1`) {
+		t.Fatalf("claim detail status=%d body=%s", claimResponse.Code, claimResponse.Body.String())
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO rider_no_show_debts(id,claim_id,rider_id,beneficiary_driver_id,amount_kobo,status) VALUES($1::UUID,$2::UUID,$3::UUID,$4::UUID,100000,'due')`, debt, claim, rider, claimant); err != nil {
 		t.Fatal(err)

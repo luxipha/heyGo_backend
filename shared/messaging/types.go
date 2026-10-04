@@ -1,6 +1,8 @@
 package messaging
 
 import (
+	"time"
+
 	pbd "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
@@ -16,7 +18,8 @@ type DriverTripResponseData struct {
 }
 
 type DriverLocationData struct {
-	Location struct {
+	RecordedAt *time.Time `json:"recordedAt,omitempty"`
+	Location   struct {
 		Latitude  float64  `json:"latitude"`
 		Longitude float64  `json:"longitude"`
 		Heading   *float64 `json:"heading,omitempty"`

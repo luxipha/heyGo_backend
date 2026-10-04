@@ -29,7 +29,7 @@ import (
 )
 
 // NewHTTPHandler initializes the HTTP handler with routes and middleware
-func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, oauth CasperIDOAuthConfig, readiness func(context.Context) error, eventStores ...*messaging.EventStore) *gin.Engine {
+func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, phoneAuth PhoneAuthConfig, readiness func(context.Context) error, eventStores ...*messaging.EventStore) *gin.Engine {
 	r := gin.Default()
 	eventStore := messaging.NewEventStore(pool)
 	if len(eventStores) > 0 && eventStores[0] != nil {
@@ -53,12 +53,17 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 		}
 		ctx.JSON(http.StatusOK, gin.H{"status": "ready", "service": "api-gateway"})
 	})
-	r.POST("/auth/casperid/exchange", casperIDExchangeHandler(oauth))
+	if phoneUsers, ok := users.(*gatewayauth.PostgresUserStore); ok && pool != nil {
+		registerPhoneAuthRoutes(r, pool, phoneUsers, phoneAuth)
+	}
 	registerAdminRoutes(r, pool, files)
 
 	authenticated := r.Group("/", middleware, authMiddleware.Authenticate, idempotencyMiddleware(pool))
 	authenticated.GET("/auth/me", func(ctx *gin.Context) { currentUserHandler(ctx, pool) })
 	authenticated.POST("/auth/register", func(ctx *gin.Context) { registerRoleHandler(ctx, users) })
+	if pool != nil {
+		registerPhoneSessionRoutes(authenticated, pool)
+	}
 	registerDeviceRoutes(authenticated, pool)
 	registerDriverRoutes(authenticated, pool, files)
 	registerSupportRoutes(authenticated, pool, files)
@@ -156,7 +161,7 @@ func publishLifecycleCommand(ctx *gin.Context, bus *pubsub.Client, command strin
 
 func currentUserHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 	user, _ := gatewayauth.CurrentUser(ctx)
-	data := gin.H{"id": user.ID, "humanId": user.HumanID, "roles": user.Roles, "verified": user.Verified, "kycTier": user.KYCTier, "trustScore": user.TrustScore, "eligibleToDrive": false}
+	data := gin.H{"id": user.ID, "phone": user.Phone, "phoneVerified": user.PhoneVerified, "email": user.Email, "emailVerified": user.EmailVerified, "name": user.Name, "roles": user.Roles, "casperIDLinked": user.CasperSubject != "", "trustCapacity": gin.H{"provider": user.ProviderTrust, "consumer": user.ConsumerTrust}, "eligibleToDrive": false}
 	if user.HasRole("driver") {
 		state, err := driverstate.Read(ctx.Request.Context(), pool, user.ID)
 		if err != nil {

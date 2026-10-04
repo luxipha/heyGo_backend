@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 var geofenceCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,39}$`)
@@ -19,10 +19,124 @@ var geofenceCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,39}$`)
 func registerAdminGeofenceRoutes(group *gin.RouterGroup, a *adminAPI) {
 	group.GET("/geofences", a.listGeofences)
 	group.GET("/geofences/:id", a.geofenceDetail)
+	group.GET("/geofences/:id/conflicts", a.geofenceConflicts)
+	group.POST("/geofences/preview", a.requireCSRF, a.previewGeofence)
 	group.POST("/geofences", a.requireCSRF, a.createGeofence)
 	group.POST("/geofences/:id/approve", a.requireCSRF, a.approveGeofence)
 	group.POST("/geofences/:id/retirement-requests", a.requireCSRF, a.requestGeofenceRetirement)
 	group.POST("/geofences/:id/retirement-requests/:requestID/approve", a.requireCSRF, a.approveGeofenceRetirement)
+}
+
+// previewGeofence checks an unsaved map edit. It is advisory; the approval
+// transaction repeats the spatial and effective-period check.
+func (a *adminAPI) previewGeofence(ctx *gin.Context) {
+	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, 1<<20)
+	var body struct {
+		Kind           string          `json:"kind"`
+		Boundary       json.RawMessage `json:"boundary"`
+		EffectiveFrom  time.Time       `json:"effectiveFrom"`
+		EffectiveUntil *time.Time      `json:"effectiveUntil"`
+	}
+	if ctx.ShouldBindJSON(&body) != nil || body.Kind != "market" && body.Kind != "region" && body.Kind != "airport" || body.EffectiveFrom.IsZero() || body.EffectiveUntil != nil && !body.EffectiveUntil.After(body.EffectiveFrom) {
+		driverError(ctx, 400, "invalid_geofence_preview", "Kind, polygon, and valid effective period are required")
+		return
+	}
+	var shape struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body.Boundary, &shape) != nil || shape.Type != "Polygon" && shape.Type != "MultiPolygon" {
+		driverError(ctx, 400, "invalid_geofence_boundary", "GeoJSON polygon is required")
+		return
+	}
+	var valid bool
+	err := a.pool.QueryRow(ctx.Request.Context(), `WITH b AS (SELECT ST_GeomFromGeoJSON($1)::geometry AS geom)
+		SELECT ST_IsValid(geom) AND NOT ST_IsEmpty(geom) AND ST_NDims(geom)=2 AND ST_XMin(geom)>=-180 AND ST_XMax(geom)<=180
+		AND ST_YMin(geom)>=-90 AND ST_YMax(geom)<=90 FROM b`, string(body.Boundary)).Scan(&valid)
+	if err != nil || !valid {
+		driverError(ctx, 400, "invalid_geofence_boundary", "GeoJSON boundary must be a valid geographic polygon")
+		return
+	}
+	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT id::TEXT,code,version,effective_from,effective_until FROM trip_geofences
+		WHERE kind=$1 AND status='approved' AND (effective_until IS NULL OR effective_until>$2)
+		AND ($3::TIMESTAMPTZ IS NULL OR $3>effective_from)
+		AND ST_Area(ST_Intersection(boundary,ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($4),4326))))>0
+		ORDER BY code,version LIMIT 101`, body.Kind, body.EffectiveFrom.UTC(), body.EffectiveUntil, string(body.Boundary))
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	defer rows.Close()
+	conflicts := make([]gin.H, 0)
+	for rows.Next() {
+		var id, code string
+		var version int
+		var from time.Time
+		var until *time.Time
+		if rows.Scan(&id, &code, &version, &from, &until) != nil {
+			reviewFailure(ctx)
+			return
+		}
+		conflicts = append(conflicts, gin.H{"id": id, "code": code, "version": version, "effectiveFrom": from, "effectiveUntil": until})
+	}
+	if rows.Err() != nil {
+		reviewFailure(ctx)
+		return
+	}
+	if len(conflicts) > 100 {
+		driverError(ctx, 409, "too_many_geofence_conflicts", "Conflict preview exceeds 100 zones")
+		return
+	}
+	ctx.JSON(200, contracts.APIResponse{Data: gin.H{"kind": body.Kind, "valid": true, "approvable": len(conflicts) == 0, "conflicts": conflicts, "advisory": true}})
+}
+
+// geofenceConflicts is an advisory preview. Approval repeats the check under
+// its transaction lock because another zone can be published after this read.
+func (a *adminAPI) geofenceConflicts(ctx *gin.Context) {
+	id, ok := geofenceID(ctx, "id")
+	if !ok {
+		return
+	}
+	var status string
+	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT status FROM trip_geofences WHERE id=$1::UUID`, id).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		driverError(ctx, http.StatusNotFound, "geofence_not_found", "Geofence was not found")
+		return
+	} else if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT g.id::TEXT,g.code,g.version,g.effective_from,g.effective_until
+		FROM trip_geofences g JOIN trip_geofences d ON d.id=$1::UUID
+		WHERE g.id<>d.id AND g.kind=d.kind AND g.status='approved'
+		AND (g.effective_until IS NULL OR g.effective_until>d.effective_from)
+		AND (d.effective_until IS NULL OR d.effective_until>g.effective_from)
+		AND ST_Area(ST_Intersection(g.boundary,d.boundary))>0
+		ORDER BY g.code,g.version LIMIT 101`, id)
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	defer rows.Close()
+	conflicts := make([]gin.H, 0)
+	for rows.Next() {
+		var conflictID, code string
+		var version int
+		var from time.Time
+		var until *time.Time
+		if rows.Scan(&conflictID, &code, &version, &from, &until) != nil {
+			reviewFailure(ctx)
+			return
+		}
+		conflicts = append(conflicts, gin.H{"id": conflictID, "code": code, "version": version, "effectiveFrom": from, "effectiveUntil": until})
+	}
+	if rows.Err() != nil {
+		reviewFailure(ctx)
+		return
+	}
+	if len(conflicts) > 100 {
+		driverError(ctx, http.StatusConflict, "too_many_geofence_conflicts", "Conflict preview exceeds 100 zones")
+		return
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"id": id, "status": status, "approvable": status == "draft" && len(conflicts) == 0, "conflicts": conflicts, "advisory": true}})
 }
 
 func geofenceID(ctx *gin.Context, param string) (string, bool) {

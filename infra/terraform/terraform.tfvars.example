@@ -19,7 +19,11 @@ cloud_sql_tier                      = "db-f1-micro"
 # values for the controlled Phase 2 Cloud Run deployment.
 # deploy_services = true
 # allowed_origins  = "https://app.example.com,https://admin.example.com"
+# admin_frontend_url = "https://admin.example.com"
 # app_url          = "https://app.example.com"
+# Optional when phone OTP is enabled:
+# sms_provider_url = "https://sms-adapter.example.com/otp"
+# sms_sender_id    = "HeyGo"
 
 # After authenticated push delivery has been deployed and verified, set this
 # to false in a separate cleanup plan.

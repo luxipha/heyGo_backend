@@ -27,14 +27,16 @@ func (t *TripModel) ToProto() *pb.Trip {
 }
 
 type RideFareModel struct {
-	ID               string
-	RiderID          string
-	PackageSlug      string
-	TotalFareInPaise float64
-	NoShowDebtKobo   int64
-	Route            *OSRMApiResponse
-	Pickup           *sharedtypes.Coordinate
-	Destination      *sharedtypes.Coordinate
+	ID                string
+	PricingVersionID  string
+	PricingMarketCode string
+	RiderID           string
+	PackageSlug       string
+	TotalFareInPaise  float64
+	NoShowDebtKobo    int64
+	Route             *OSRMApiResponse
+	Pickup            *sharedtypes.Coordinate
+	Destination       *sharedtypes.Coordinate
 }
 
 // ToProto converts RideFareModel to its protobuf representation
@@ -92,17 +94,4 @@ func ToRideFaresProto(fares []*RideFareModel) []*pb.RideFare {
 		protoFares[i] = fare.ToProto()
 	}
 	return protoFares
-}
-
-type PricingConfig struct {
-	PricePerUnitDistance float64
-	PricePerMinute       float64
-}
-
-// DefaultPricingConfig returns a default pricing configuration
-func DefaultPricingConfig() *PricingConfig {
-	return &PricingConfig{
-		PricePerUnitDistance: 10.0, // 10 minor currency units per meter
-		PricePerMinute:       5.0,  // 5 minor currency units per minute
-	}
 }

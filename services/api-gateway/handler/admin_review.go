@@ -8,18 +8,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/driverstate"
-	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/driverstate"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
 )
 
 func registerAdminReviewRoutes(group *gin.RouterGroup, a *adminAPI) {
 	group.GET("/drivers", a.listDrivers)
+	group.GET("/drivers/summary", a.partnerSummary)
 	group.GET("/drivers/:driverID", a.driverReview)
+	group.GET("/drivers/:driverID/verification-timeline", a.partnerTimeline)
+	group.GET("/drivers/:driverID/verified-legal-name", a.verifiedLegalName)
+	group.POST("/drivers/:driverID/verified-legal-name", a.requireCSRF, a.recordVerifiedLegalName)
+	group.PATCH("/drivers/:driverID/profile", a.requireCSRF, a.updateDriverProfile)
+	group.PUT("/drivers/:driverID/identity", a.requireCSRF, a.updateDriverIdentity)
+	group.PUT("/drivers/:driverID/vehicle", a.requireCSRF, a.updateDriverVehicle)
+	group.POST("/drivers/:driverID/manual-verification", a.requireCSRF, a.reviewManualIdentity)
 	group.GET("/drivers/:driverID/documents/:documentID/files/:side", a.documentFile)
+	group.POST("/drivers/:driverID/documents/uploads", a.requireCSRF, a.createDocumentUpload)
+	group.POST("/drivers/:driverID/documents", a.requireCSRF, a.submitDocument)
 	group.POST("/drivers/:driverID/documents/:documentID/review", a.requireCSRF, a.reviewDocument)
 	group.POST("/drivers/:driverID/inspection/uploads", a.requireCSRF, a.createReportUpload)
 	group.POST("/drivers/:driverID/inspection", a.requireCSRF, a.submitReport)
@@ -45,12 +55,9 @@ func reviewID(ctx *gin.Context, param string) (string, bool) {
 	return id.String(), true
 }
 func adminAudit(ctx *gin.Context, tx pgx.Tx, action, driverID string, details any) error {
-	raw, err := json.Marshal(details)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_driver_id,details) VALUES($1,$2::UUID,$3,NULLIF($4,'')::UUID,$5::JSONB)`, uuid.New(), currentAdmin(ctx).ID, action, driverID, raw)
-	return err
+	targetType, targetID := adminAuditTarget(action, driverID, details)
+	before, after := auditStates(details)
+	return insertAdminAudit(ctx, tx, currentAdmin(ctx).ID, action, driverID, targetType, targetID, details, before, after)
 }
 func insertDriverEvent(ctx *gin.Context, tx pgx.Tx, driverID, kind string, data any) (contracts.WSMessage, error) {
 	raw, err := json.Marshal(data)
@@ -63,41 +70,18 @@ func reviewFailure(ctx *gin.Context) {
 	driverError(ctx, http.StatusServiceUnavailable, "review_unavailable", "Review could not be saved")
 }
 func (a *adminAPI) listDrivers(ctx *gin.Context) {
-	status := ctx.DefaultQuery("status", "pending")
-	if status != "pending" && status != "approved" && status != "rejected" && status != "all" {
-		driverError(ctx, http.StatusBadRequest, "invalid_status", "Status is invalid")
-		return
-	}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT p.driver_id::TEXT,p.display_name,p.admin_status,p.updated_at FROM driver_profiles p WHERE $1='all' OR p.admin_status=$1 ORDER BY p.updated_at DESC,p.driver_id DESC LIMIT 100`, status)
-	if err != nil {
-		reviewFailure(ctx)
-		return
-	}
-	defer rows.Close()
-	items := []gin.H{}
-	for rows.Next() {
-		var id, name, state string
-		var updated time.Time
-		if rows.Scan(&id, &name, &state, &updated) != nil {
-			reviewFailure(ctx)
-			return
-		}
-		items = append(items, gin.H{"driverId": id, "displayName": name, "adminStatus": state, "updatedAt": updated})
-	}
-	if rows.Err() != nil {
-		reviewFailure(ctx)
-		return
-	}
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: items})
+	a.listPartners(ctx)
 }
+
 func (a *adminAPI) driverReview(ctx *gin.Context) {
 	id, ok := reviewDriverID(ctx)
 	if !ok {
 		return
 	}
-	var name, adminStatus, adminReason string
+	var name, phone, email, adminStatus, adminReason, manualStatus, manualReason string
+	var manualVerifiedAt *time.Time
 	var vehicle json.RawMessage
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT p.display_name,p.admin_status,p.admin_reason,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p WHERE p.driver_id=$1::UUID`, id).Scan(&name, &adminStatus, &adminReason, &vehicle)
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT p.display_name,COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
 		return
@@ -111,7 +95,7 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT DISTINCT ON(type) id::TEXT,type,status,rejection_reason,submitted_at,expires_at FROM driver_documents WHERE driver_id=$1::UUID ORDER BY type,submitted_at DESC,id DESC`, id)
+	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT DISTINCT ON(type) id::TEXT,type,status,rejection_reason,submitted_at,expires_at,metadata FROM driver_documents WHERE driver_id=$1::UUID ORDER BY type,submitted_at DESC,id DESC`, id)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -122,11 +106,12 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 		var docID, kind, status, reason string
 		var submitted time.Time
 		var expiry *time.Time
-		if rows.Scan(&docID, &kind, &status, &reason, &submitted, &expiry) != nil {
+		var metadata json.RawMessage
+		if rows.Scan(&docID, &kind, &status, &reason, &submitted, &expiry, &metadata) != nil {
 			reviewFailure(ctx)
 			return
 		}
-		documents = append(documents, gin.H{"id": docID, "type": kind, "status": status, "reason": reason, "submittedAt": submitted, "expiresAt": expiry})
+		documents = append(documents, gin.H{"id": docID, "type": kind, "status": status, "reason": reason, "submittedAt": submitted, "expiresAt": expiry, "metadata": metadata})
 	}
 	if rows.Err() != nil {
 		reviewFailure(ctx)
@@ -142,7 +127,142 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"driverId": id, "displayName": name, "adminStatus": adminStatus, "adminReason": adminReason, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}})
+	identity, err := readIdentityProfile(ctx, a.pool, id)
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	data := gin.H{"driverId": id, "displayName": name, "adminStatus": adminStatus, "adminReason": adminReason, "manualVerification": gin.H{"status": manualStatus, "reason": manualReason, "reviewedAt": manualVerifiedAt}, "identity": identity, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}
+	context, err := a.partnerContext(ctx, id)
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	data["links"] = context
+	if adminHasPermission(ctx, permissionDriverContact) {
+		data["phone"], data["email"] = phone, email
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: data})
+}
+
+func (a *adminAPI) updateDriverProfile(ctx *gin.Context) {
+	driver, ok := reviewDriverID(ctx)
+	if !ok {
+		return
+	}
+	var body struct {
+		DisplayName string `json:"displayName"`
+	}
+	if ctx.ShouldBindJSON(&body) != nil {
+		driverError(ctx, http.StatusBadRequest, "invalid_profile", "Display name is required")
+		return
+	}
+	body.DisplayName = strings.TrimSpace(body.DisplayName)
+	if body.DisplayName == "" || len(body.DisplayName) > 120 {
+		driverError(ctx, http.StatusBadRequest, "invalid_profile", "Display name is required")
+		return
+	}
+	tx, err := a.pool.Begin(ctx.Request.Context())
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	defer tx.Rollback(ctx.Request.Context())
+	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET display_name=$2,admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driver, body.DisplayName)
+	if err != nil || tag.RowsAffected() != 1 {
+		reviewFailure(ctx)
+		return
+	}
+	if err = invalidateAdminApproval(ctx, tx, driver); err == nil {
+		err = adminAudit(ctx, tx, "driver.profile.updated_by_admin", driver, gin.H{"displayName": body.DisplayName})
+	}
+	if err != nil || tx.Commit(ctx.Request.Context()) != nil {
+		reviewFailure(ctx)
+		return
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"driverId": driver, "displayName": body.DisplayName, "adminStatus": "pending"}})
+}
+
+func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
+	driver, ok := reviewDriverID(ctx)
+	if !ok {
+		return
+	}
+	var body struct {
+		PackageSlug string `json:"packageSlug"`
+		Make        string `json:"make"`
+		Model       string `json:"model"`
+		Year        int    `json:"year"`
+		Color       string `json:"color"`
+		Plate       string `json:"plate"`
+	}
+	if ctx.ShouldBindJSON(&body) != nil || !validPackage(body.PackageSlug) || strings.TrimSpace(body.Make) == "" || strings.TrimSpace(body.Model) == "" || strings.TrimSpace(body.Plate) == "" || body.Year < 1900 || body.Year > time.Now().Year()+1 || len(body.Plate) > 30 {
+		driverError(ctx, http.StatusBadRequest, "invalid_vehicle", "Valid package, make, model, year, and plate are required")
+		return
+	}
+	tx, err := a.pool.Begin(ctx.Request.Context())
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	defer tx.Rollback(ctx.Request.Context())
+	var exists bool
+	if err = tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE driver_id=$1::UUID)`, driver).Scan(&exists); err != nil || !exists {
+		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
+		return
+	}
+	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,package_slug,make,model,model_year,color,plate,review_status,review_reason,reviewed_at,updated_at)
+		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,'approved','',NOW(),NOW())
+		ON CONFLICT(driver_id) DO UPDATE SET package_slug=EXCLUDED.package_slug,make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,review_status='approved',review_reason='',reviewed_at=NOW(),updated_at=NOW()`,
+		driver, body.PackageSlug, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	if err == nil {
+		err = invalidateAdminApproval(ctx, tx, driver)
+	}
+	if err == nil {
+		err = adminAudit(ctx, tx, "driver.vehicle.updated_by_admin", driver, body)
+	}
+	if err != nil || tx.Commit(ctx.Request.Context()) != nil {
+		reviewFailure(ctx)
+		return
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"driverId": driver, "reviewStatus": "approved", "adminStatus": "pending"}})
+}
+
+func (a *adminAPI) reviewManualIdentity(ctx *gin.Context) {
+	driver, ok := reviewDriverID(ctx)
+	if !ok {
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if ctx.ShouldBindJSON(&body) != nil || (body.Status != "approved" && body.Status != "rejected") || (body.Status == "rejected" && strings.TrimSpace(body.Reason) == "") || len(body.Reason) > 1000 {
+		driverError(ctx, http.StatusBadRequest, "invalid_review", "Valid manual verification decision and rejection reason are required")
+		return
+	}
+	tx, err := a.pool.Begin(ctx.Request.Context())
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	defer tx.Rollback(ctx.Request.Context())
+	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET manual_verification_status=$2,manual_verification_reason=$3,manual_verified_by=$4::UUID,manual_verified_at=NOW(),admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driver, body.Status, strings.TrimSpace(body.Reason), currentAdmin(ctx).ID)
+	if err != nil || tag.RowsAffected() != 1 {
+		reviewFailure(ctx)
+		return
+	}
+	if err = invalidateAdminApproval(ctx, tx, driver); err == nil {
+		err = adminAudit(ctx, tx, "driver.manual_identity.review", driver, gin.H{"status": body.Status, "reason": strings.TrimSpace(body.Reason)})
+	}
+	if err == nil {
+		_, err = insertDriverEvent(ctx, tx, driver, "driver.onboarding.updated", gin.H{"manualVerificationStatus": body.Status, "reason": strings.TrimSpace(body.Reason)})
+	}
+	if err != nil || tx.Commit(ctx.Request.Context()) != nil {
+		reviewFailure(ctx)
+		return
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"driverId": driver, "manualVerificationStatus": body.Status}})
 }
 func (a *adminAPI) documentFile(ctx *gin.Context) {
 	if a.files == nil {
@@ -296,6 +416,13 @@ func (a *adminAPI) createReportUpload(ctx *gin.Context) {
 		return
 	}
 	url, headers, err := a.files.PresignPut(ctx.Request.Context(), key, body.ContentType, body.SizeBytes, uploadLifetime)
+	if err != nil {
+		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM admin_report_uploads WHERE id=$1`, id)
+		reviewFailure(ctx)
+		return
+	}
+	_, err = a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_driver_id,target_type,target_id,details,before_state,after_state)
+		VALUES($1,$2::UUID,'inspection.upload_reserved',$3::UUID,'inspection_upload',$4,'{}'::JSONB,'{}'::JSONB,'{}'::JSONB)`, uuid.New(), currentAdmin(ctx).ID, driver, id.String())
 	if err != nil {
 		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM admin_report_uploads WHERE id=$1`, id)
 		reviewFailure(ctx)
@@ -500,11 +627,11 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 	}
 	if body.Status == "approved" {
 		var ready bool
-		err = tx.QueryRow(ctx.Request.Context(), `SELECT u.verified AND u.nin_verified
-   AND COALESCE((SELECT status='completed' FROM driver_inspections WHERE driver_id=u.id ORDER BY created_at DESC,id DESC LIMIT 1),FALSE)
+		err = tx.QueryRow(ctx.Request.Context(), `SELECT (u.phone_verified_at IS NOT NULL OR u.email_verified) AND p.manual_verification_status='approved'
+	   AND COALESCE((SELECT status='completed' FROM driver_inspections WHERE driver_id=u.id ORDER BY created_at DESC,id DESC LIMIT 1),FALSE)
    AND NOT EXISTS(SELECT 1 FROM (VALUES('driver_license'),('vehicle_license'),('roadworthiness'),('auto_insurance'),('hackney_permit')) required(type)
     WHERE NOT COALESCE((SELECT status='approved' AND (expires_at IS NULL OR expires_at>NOW()) FROM driver_documents d WHERE d.driver_id=u.id AND d.type=required.type ORDER BY submitted_at DESC,id DESC LIMIT 1),FALSE))
-   FROM users u WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driver).Scan(&ready)
+	   FROM users u JOIN driver_profiles p ON p.driver_id=u.id WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driver).Scan(&ready)
 		if err != nil {
 			reviewFailure(ctx)
 			return

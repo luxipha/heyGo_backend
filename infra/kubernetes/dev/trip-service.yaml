@@ -40,11 +40,13 @@ spec:
             secretKeyRef:
               name: casperid
               key: app-id
+              optional: true
         - name: CASPERID_API_SECRET
           valueFrom:
             secretKeyRef:
               name: casperid
               key: api-secret
+              optional: true
         - name: CASPERID_BASE_URL
           valueFrom:
             configMapKeyRef:

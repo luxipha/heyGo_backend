@@ -8,6 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 # Copy the source code
 COPY services/api-gateway/ ./services/api-gateway/
+COPY services/ride-agent-gateway/agent/ ./services/ride-agent-gateway/agent/
 COPY shared/ ./shared/
 # Build the api-gateway binary
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o main ./services/api-gateway

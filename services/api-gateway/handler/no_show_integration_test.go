@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 )
 
@@ -114,5 +116,62 @@ func TestNoShowDebtTransfersOnlyWhenTheCollectingDriverCanFundIt(t *testing.T) {
 	}
 	if debtStatus != "settled" || claimStatus != "settled" {
 		t.Fatalf("debt=%s claim=%s", debtStatus, claimStatus)
+	}
+	// Exercise the owned provider-payment history independently of direct-fare settlement.
+	firstPayment := ""
+	for range 31 {
+		id := uuid.NewString()
+		if firstPayment == "" {
+			firstPayment = id
+		}
+		if _, err = pool.Exec(ctx, `INSERT INTO rider_no_show_debt_payments(id,debt_id,rider_id,amount_kobo,provider,provider_reference,idempotency_key,status) VALUES($1::UUID,$2::UUID,$3::UUID,100000,'monnify',$1,$1,'failed')`, id, debt, rider); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := gin.New()
+	g := r.Group("/rider", func(c *gin.Context) {
+		role := "rider"
+		if c.GetHeader("X-Owner") == collector {
+			role = "driver"
+		}
+		c.Set("authenticated-user", gatewayauth.User{ID: c.GetHeader("X-Owner"), Roles: []string{role}})
+	}, gatewayauth.RequireRole("rider"))
+	registerRiderNoShowPaymentRoutes(g, pool)
+	get := func(path, owner string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-Owner", owner)
+		r.ServeHTTP(w, req)
+		return w
+	}
+	var page struct {
+		Data struct {
+			Items      []map[string]any `json:"items"`
+			NextCursor *string          `json:"nextCursor"`
+		}
+	}
+	w := get("/rider/no-show-debt-payments", rider)
+	if w.Code != 200 {
+		t.Fatalf("history=%s", w.Body)
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Data.Items) != 30 || page.Data.NextCursor == nil {
+		t.Fatal("payment pagination missing")
+	}
+	cursor := *page.Data.NextCursor
+	w = get("/rider/no-show-debt-payments?cursor="+cursor, rider)
+	if err = json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 || len(page.Data.Items) != 1 || page.Data.NextCursor != nil {
+		t.Fatal("payment cursor skipped/duplicated records", err)
+	}
+	if w = get("/rider/no-show-debt-payments", uuid.NewString()); w.Code != 200 || !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Fatal("foreign payments leaked")
+	}
+	if w = get("/rider/no-show-debt-payments/"+firstPayment, uuid.NewString()); w.Code != 404 {
+		t.Fatal("foreign payment detail leaked")
+	}
+	if w = get("/rider/no-show-debt-payments", collector); w.Code != 403 {
+		t.Fatal("Driver accessed Rider payment history")
 	}
 }

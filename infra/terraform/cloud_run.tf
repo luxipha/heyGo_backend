@@ -2,10 +2,11 @@ locals {
   runtime_image_prefix = "${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_repository_id}"
 
   api_gateway_secrets = {
-    DATABASE_URL             = "database-url"
-    INTERNAL_SERVICE_TOKEN   = "internal-service-token"
-    OTP_PEPPER               = "otp-pepper"
-    HEYGO_ADMIN_SETTINGS_KEY = "admin-settings-key"
+    DATABASE_URL              = "database-url"
+    INTERNAL_SERVICE_TOKEN    = "internal-service-token"
+    OTP_PEPPER                = "otp-pepper"
+    HEYGO_ADMIN_SETTINGS_KEY  = "admin-settings-key"
+    RIDE_AGENT_INTERNAL_TOKEN = "ride-agent-internal-token"
   }
   driver_service_secrets = {
     DATABASE_URL           = "database-url"
@@ -497,12 +498,12 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         value = var.admin_frontend_url
       }
       env {
-        name  = "SMS_PROVIDER_URL"
-        value = var.sms_provider_url
+        name  = "RIDE_AGENT_URL"
+        value = google_cloud_run_v2_service.ride_agent[0].uri
       }
       env {
-        name  = "SMS_SENDER_ID"
-        value = var.sms_sender_id
+        name  = "RIDE_AGENT_AUDIENCE"
+        value = google_cloud_run_v2_service.ride_agent[0].uri
       }
       env {
         name  = "DRIVER_SERVICE_URL"
@@ -535,19 +536,6 @@ resource "google_cloud_run_v2_service" "api_gateway" {
           value_source {
             secret_key_ref {
               secret  = google_secret_manager_secret.runtime[env.value].secret_id
-              version = "latest"
-            }
-          }
-        }
-      }
-
-      dynamic "env" {
-        for_each = var.sms_provider_url == "" ? [] : [1]
-        content {
-          name = "SMS_PROVIDER_TOKEN"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.runtime["sms-provider-token"].secret_id
               version = "latest"
             }
           }
@@ -594,13 +582,14 @@ resource "google_cloud_run_v2_service_iam_member" "public_payment_webhook" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "api_gateway_internal_invoker" {
-  for_each = var.deploy_services ? toset(["driver-service", "trip-service"]) : toset([])
+  for_each = var.deploy_services ? toset(["driver-service", "trip-service", "ride-agent-gateway"]) : toset([])
 
   project  = var.project_id
   location = var.region
   name = {
-    driver-service = google_cloud_run_v2_service.driver[0].name
-    trip-service   = google_cloud_run_v2_service.trip[0].name
+    driver-service     = google_cloud_run_v2_service.driver[0].name
+    trip-service       = google_cloud_run_v2_service.trip[0].name
+    ride-agent-gateway = google_cloud_run_v2_service.ride_agent[0].name
   }[each.value]
   role   = "roles/run.invoker"
   member = "serviceAccount:${google_service_account.runtime["api-gateway"].email}"

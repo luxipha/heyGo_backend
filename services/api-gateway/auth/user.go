@@ -24,6 +24,7 @@ type User struct {
 	Phone         string         `json:"phone"`
 	PhoneVerified bool           `json:"phoneVerified"`
 	Name          string         `json:"name,omitempty"`
+	RiderName     string         `json:"riderDisplayName"`
 	Email         string         `json:"email,omitempty"`
 	EmailVerified bool           `json:"emailVerified"`
 	CasperSubject string         `json:"-"`
@@ -113,6 +114,14 @@ func (s *PostgresUserStore) UpsertIdentity(ctx context.Context, identity shareda
 	user.EmailVerified = identity.EmailVerified
 	user.CasperSubject = identity.Subject
 	user.Name = identity.Name
+	if user.HasRole("rider") {
+		if err := s.pool.QueryRow(ctx, `SELECT COALESCE((SELECT display_name FROM rider_profiles WHERE rider_id=$1::UUID),'')`, user.ID).Scan(&user.RiderName); err != nil {
+			return User{}, fmt.Errorf("read rider name: %w", err)
+		}
+		if !user.HasRole("driver") {
+			user.Name = user.RiderName
+		}
+	}
 	if storedProviderScore != nil {
 		user.ProviderTrust = &TrustSnapshot{Score: *storedProviderScore, Status: providerStatus, CalculatedAt: trustUpdatedAtOrZero(trustUpdatedAt), PolicyVersion: trustPolicy}
 	}
@@ -206,11 +215,13 @@ func (s *PostgresUserStore) readUser(ctx context.Context, predicate string, valu
 		COALESCE(u.email,''),u.email_verified,u.roles,u.verified,COALESCE(u.kyc_tier,''),
 		u.provider_trust_score,u.consumer_trust_score,COALESCE(u.provider_trust_status,''),COALESCE(u.consumer_trust_status,''),
 		u.trust_score_updated_at,COALESCE(u.trust_score_policy_version,''),
-		COALESCE((SELECT p.display_name FROM driver_profiles p WHERE p.driver_id=u.id),'')
+		CASE WHEN 'rider'=ANY(u.roles) AND NOT ('driver'=ANY(u.roles)) THEN COALESCE((SELECT p.display_name FROM rider_profiles p WHERE p.rider_id=u.id),'')
+		ELSE COALESCE((SELECT p.display_name FROM driver_profiles p WHERE p.driver_id=u.id),'') END,
+		COALESCE((SELECT p.display_name FROM rider_profiles p WHERE p.rider_id=u.id),'')
 		FROM users u WHERE `+predicate+` AND u.active=TRUE`, value).Scan(
 		&user.ID, &user.HumanID, &user.CasperSubject, &user.Phone, &phoneVerifiedAt, &user.Email, &user.EmailVerified,
 		&user.Roles, &user.Verified, &user.KYCTier, &providerScore, &consumerScore,
-		&providerStatus, &consumerStatus, &trustUpdatedAt, &trustPolicy, &user.Name,
+		&providerStatus, &consumerStatus, &trustUpdatedAt, &trustPolicy, &user.Name, &user.RiderName,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrAccountDeactivated

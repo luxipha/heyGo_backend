@@ -85,6 +85,14 @@ func TestSOSIntakeLocationRetention(t *testing.T) {
 	if second := makeCall(); second.Code != http.StatusOK {
 		t.Fatalf("SOS retry status=%d body=%s", second.Code, second.Body.String())
 	}
+	body = `{"clientRequestId":"` + request + `","location":{"latitude":6.5,"longitude":3.4,"capturedAt":"` + time.Now().Add(-10*time.Minute).UTC().Format(time.RFC3339) + `"}}`
+	if replay := makeCall(); replay.Code != http.StatusOK {
+		t.Fatalf("stale original SOS retry must recover intake: %s", replay.Body.String())
+	}
+	body = `{"clientRequestId":"` + uuid.NewString() + `","location":{"latitude":6.5,"longitude":3.4,"capturedAt":"` + time.Now().Add(-10*time.Minute).UTC().Format(time.RFC3339) + `"}}`
+	if stale := makeCall(); stale.Code != http.StatusBadRequest {
+		t.Fatalf("new stale SOS must be rejected: %s", stale.Body.String())
+	}
 	if err := pool.QueryRow(dbctx, `SELECT i.case_id::TEXT,i.id::TEXT FROM safety_incidents i JOIN sos_intakes s ON s.incident_id=i.id WHERE s.trip_id=$1::UUID`, trip).Scan(&caseID, &incidentID); err != nil {
 		t.Fatal(err)
 	}

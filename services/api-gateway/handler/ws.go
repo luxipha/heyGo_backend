@@ -40,7 +40,7 @@ func ridersWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagin
 	user, _ := gatewayauth.CurrentUser(ctx)
 	riderID := user.ID
 
-	cancelStream, err := attachEventStream(ctx.Request.Context(), connManager, conn, store, riderID, ctx.Query("afterEventId"))
+	cancelStream, err := attachEventStream(ctx.Request.Context(), connManager, conn, store, riderID, riderReplayCursor(ctx.Query("afterEventId")))
 	if err != nil {
 		logs.L().Errorw("failed to attach rider event stream", "riderID", riderID, "error", err)
 		return
@@ -177,6 +177,13 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 				logs.L().Warnw("Invalid driver location", "driverID", driverID, "error", err)
 				continue
 			}
+			capturedAt := time.Now().UTC()
+			if location.RecordedAt != nil {
+				capturedAt = *location.RecordedAt
+			}
+			if capturedAt.After(time.Now().Add(10*time.Second)) || capturedAt.Before(time.Now().Add(-2*time.Minute)) {
+				continue
+			}
 			// Persist the trusted socket reading before acknowledging it through
 			// Pub/Sub. Go Online can then use a location sent while still offline.
 			locationTx, err := pool.Begin(ctx.Request.Context())
@@ -186,9 +193,10 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			}
 			var recordedAt time.Time
 			if err := locationTx.QueryRow(ctx.Request.Context(), `INSERT INTO driver_live_locations(driver_id,location,recorded_at)
-				VALUES($1::UUID,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography,NOW())
+				SELECT $1::UUID,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography,$4 WHERE EXISTS(SELECT 1 FROM driver_socket_sessions WHERE driver_id=$1::UUID AND session_id=$5::UUID AND expires_at>NOW())
 				ON CONFLICT(driver_id) DO UPDATE SET location=EXCLUDED.location,recorded_at=EXCLUDED.recorded_at
-				RETURNING recorded_at`, driverID, location.Location.Latitude, location.Location.Longitude).Scan(&recordedAt); err != nil {
+				WHERE EXCLUDED.recorded_at>driver_live_locations.recorded_at AND EXISTS(SELECT 1 FROM driver_socket_sessions WHERE driver_id=$1::UUID AND session_id=$5::UUID AND expires_at>NOW())
+ RETURNING recorded_at`, driverID, location.Location.Latitude, location.Location.Longitude, capturedAt, sessionID).Scan(&recordedAt); err != nil {
 				_ = locationTx.Rollback(ctx.Request.Context())
 				logs.L().Errorw("failed to persist driver location", "driverID", driverID, "error", err)
 				continue
@@ -196,6 +204,10 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			if _, err := locationTx.Exec(ctx.Request.Context(), `SELECT refresh_driver_operating_market($1::UUID)`, driverID); err != nil {
 				_ = locationTx.Rollback(ctx.Request.Context())
 				logs.L().Errorw("failed to refresh driver market", "driverID", driverID, "error", err)
+				continue
+			}
+			if err := appendRiderLocation(ctx.Request.Context(), locationTx, driverID, recordedAt, location.Location.Latitude, location.Location.Longitude, location.RecordedAt != nil); err != nil {
+				_ = locationTx.Rollback(ctx.Request.Context())
 				continue
 			}
 			if err := locationTx.Commit(ctx.Request.Context()); err != nil {
@@ -235,4 +247,29 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			logs.L().Warnw("Unknown message from driver", "driverID", driverID, "type", dm.Type)
 		}
 	}
+}
+
+func riderReplayCursor(cursor string) string {
+	if cursor == "" {
+		return "evt_0"
+	}
+	return cursor
+}
+
+func appendRiderLocation(ctx context.Context, tx pgx.Tx, driverID string, at time.Time, lat, lng float64, deviceCapture ...bool) error {
+	var tripID, riderID, assignmentID string
+	err := tx.QueryRow(ctx, `SELECT t.id::TEXT,t.rider_id::TEXT,t.id::TEXT||':'||a.attempt::TEXT FROM trips t JOIN driver_assignments a ON a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND a.status='accepted' AND a.responded_at<=$2 WHERE t.assigned_driver_id=$1::UUID AND t.status IN ('accepted','arrived','started') ORDER BY t.updated_at DESC LIMIT 1 FOR SHARE OF t`, driverID, at).Scan(&tripID, &riderID, &assignmentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	source := "server_received"
+	if len(deviceCapture) > 0 && deviceCapture[0] {
+		source = "device_captured"
+	}
+	data, _ := json.Marshal(map[string]any{"captureTimeSource": source, "tripId": tripID, "assignmentId": assignmentID, "driverId": driverID, "capturedAt": at, "recordedAt": time.Now().UTC(), "freshnessSeconds": 120, "location": map[string]any{"latitude": lat, "longitude": lng}})
+	_, err = messaging.AppendEventTx(ctx, tx, riderID, "location:"+assignmentID+":"+at.UTC().Format(time.RFC3339Nano), contracts.DriverEventLocationUpdated, data)
+	return err
 }

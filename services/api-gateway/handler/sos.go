@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
@@ -46,6 +47,31 @@ func (a *supportAPI) createSOS(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_sos", "clientRequestId must be a UUID")
 		return
 	}
+	// A retry must return the first intake even if the Trip has since ended.
+	tx, err := a.pool.Begin(ctx.Request.Context())
+	if err != nil {
+		driverError(ctx, 503, "sos_unavailable", "SOS could not be recorded")
+		return
+	}
+	defer tx.Rollback(ctx.Request.Context())
+	if _, err := tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, reporter+":"+requestID.String()); err != nil {
+		driverError(ctx, 503, "sos_unavailable", "SOS could not be recorded")
+		return
+	}
+	var existingIncident, existingCase, existingTrip string
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT s.incident_id::TEXT,i.case_id::TEXT,s.trip_id::TEXT FROM sos_intakes s JOIN safety_incidents i ON i.id=s.incident_id WHERE s.reporter_id=$1::UUID AND s.client_request_id=$2`, reporter, requestID).Scan(&existingIncident, &existingCase, &existingTrip)
+	if err == nil {
+		if existingTrip != tripID.String() {
+			driverError(ctx, 409, "sos_request_id_reused", "SOS request identity belongs to another trip")
+			return
+		}
+		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"incidentId": existingIncident, "caseId": existingCase, "status": "received"}})
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		driverError(ctx, http.StatusServiceUnavailable, "sos_unavailable", "SOS could not be recorded")
+		return
+	}
 	var latitude, longitude any
 	var recordedAt *time.Time
 	source := "unavailable"
@@ -60,26 +86,9 @@ func (a *supportAPI) createSOS(ctx *gin.Context) {
 		}
 		latitude, longitude, recordedAt, source = *loc.Latitude, *loc.Longitude, loc.CapturedAt, "reporter"
 	}
-	// A retry must return the first intake even if the Trip has since ended.
-	var existingIncident, existingCase string
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT s.incident_id::TEXT,i.case_id::TEXT FROM sos_intakes s JOIN safety_incidents i ON i.id=s.incident_id WHERE s.reporter_id=$1::UUID AND s.client_request_id=$2`, reporter, requestID).Scan(&existingIncident, &existingCase)
-	if err == nil {
-		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"incidentId": existingIncident, "caseId": existingCase, "status": "received"}})
-		return
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		driverError(ctx, http.StatusServiceUnavailable, "sos_unavailable", "SOS could not be recorded")
-		return
-	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
-	if err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "sos_unavailable", "SOS could not be recorded")
-		return
-	}
-	defer tx.Rollback(ctx.Request.Context())
 	var driverID string
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT assigned_driver_id::TEXT FROM trips WHERE id=$1 AND status IN ('assigned','accepted','arrived','started')
-		AND (($2='rider' AND rider_id=$3::UUID) OR ($2='driver' AND assigned_driver_id=$3::UUID)) FOR UPDATE`, tripID, audience, reporter).Scan(&driverID)
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT assigned_driver_id::TEXT,CASE WHEN rider_id=$3::UUID THEN 'rider' ELSE 'driver' END FROM trips WHERE id=$1 AND status IN ('assigned','accepted','arrived','started')
+		AND (($2 AND rider_id=$3::UUID) OR ($4 AND assigned_driver_id=$3::UUID)) FOR UPDATE`, tripID, sosHasRole(ctx, "rider"), reporter, sosHasRole(ctx, "driver")).Scan(&driverID, &audience)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusConflict, "sos_trip_unavailable", "SOS requires an active linked Trip")
 		return
@@ -179,4 +188,9 @@ func StartSOSLocationPurge(ctx context.Context, pool *pgxpool.Pool) {
 			}
 		}
 	}()
+}
+
+func sosHasRole(ctx *gin.Context, role string) bool {
+	user, _ := gatewayauth.CurrentUser(ctx)
+	return user.HasRole(role)
 }

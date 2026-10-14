@@ -29,6 +29,11 @@ type resendSettings struct {
 }
 
 func registerAdminPrivacyRoutes(group *gin.RouterGroup, api *adminAPI) {
+	group.GET("/settings/sms", api.getSMSSettings)
+	group.PUT("/settings/sms", api.requireCSRF, api.putSMSSettings)
+	group.GET("/settings/email-delivery", api.getEmailDelivery)
+	group.PUT("/settings/email-delivery", api.requireCSRF, api.putEmailDelivery)
+	group.POST("/settings/email-delivery/test", api.requireCSRF, api.testEmailDelivery)
 	group.GET("/settings/resend", api.getResendSettings)
 	group.PUT("/settings/resend", api.requireCSRF, api.putResendSettings)
 	group.POST("/settings/resend/test", api.requireCSRF, api.testResendSettings)
@@ -235,6 +240,9 @@ func sendResendEmailTo(ctx context.Context, endpoint, idempotencyKey, apiKey, fr
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == 429 || response.StatusCode >= 500 {
+			return fmt.Errorf("%w: Resend rejected request (%d)", errEmailUnavailable, response.StatusCode)
+		}
 		return fmt.Errorf("Resend returned status %d", response.StatusCode)
 	}
 	return nil

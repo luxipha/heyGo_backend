@@ -11,15 +11,22 @@ locals {
     "monnify-api-key",
     "monnify-secret-key",
     "monnify-contract-code",
+    "ride-agent-internal-token",
+    "ride-agent-places-key",
   ])
 
   service_secret_access = {
-    api-gateway = setunion(toset([
+    api-gateway = toset([
       "database-url",
       "internal-service-token",
       "otp-pepper",
       "admin-settings-key",
-    ]), var.sms_provider_url == "" ? toset([]) : toset(["sms-provider-token"]))
+      "ride-agent-internal-token",
+    ])
+    ride-agent-gateway = toset([
+      "ride-agent-internal-token",
+      "ride-agent-places-key",
+    ])
     driver-service = toset([
       "database-url",
       "internal-service-token",
@@ -56,6 +63,16 @@ resource "random_password" "internal_service_token" {
 resource "random_password" "otp_pepper" {
   length  = 64
   special = false
+}
+
+resource "random_password" "ride_agent_internal_token" {
+  length  = 48
+  special = false
+}
+
+resource "google_secret_manager_secret_version" "ride_agent_internal_token" {
+  secret      = google_secret_manager_secret.runtime["ride-agent-internal-token"].id
+  secret_data = random_password.ride_agent_internal_token.result
 }
 
 resource "random_id" "admin_settings_key" {

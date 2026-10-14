@@ -48,6 +48,7 @@ jobs:
           - driver-service
           - payment-service
           - trip-service
+          - ride-agent-gateway
           - migration
     steps:
       - name: Check out repository
@@ -83,6 +84,7 @@ jobs:
           - driver-service
           - payment-service
           - trip-service
+          - ride-agent-gateway
           - migration
     steps:
       - name: Check out repository

@@ -1,0 +1,49 @@
+name: heygo-rider-staging
+services:
+  database:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_USER: rider_staging
+      POSTGRES_PASSWORD: ${RIDER_STAGING_DB_PASSWORD:?Generate the staging environment first}
+      POSTGRES_DB: heygo_rider_staging
+    ports: ["127.0.0.1:55440:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rider_staging -d heygo_rider_staging"]
+      interval: 5s
+      retries: 20
+    volumes: ["rider_staging_data:/var/lib/postgresql/data"]
+  broker:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --project=heygo-rider-staging-local --host-port=0.0.0.0:8085
+    ports: ["127.0.0.1:8086:8085"]
+  trip:
+    build: {context: .., dockerfile: services/trip-service/Dockerfile}
+    env_file: ../.dev/rider-staging.env
+    environment:
+      GRPC_ADDR: :9000
+    depends_on:
+      database: {condition: service_healthy}
+      broker: {condition: service_started}
+  driver:
+    build: {context: .., dockerfile: services/driver-service/Dockerfile}
+    env_file: ../.dev/rider-staging.env
+    environment:
+      GRPC_ADDR: :9100
+    depends_on:
+      database: {condition: service_healthy}
+      broker: {condition: service_started}
+  agent:
+    build: {context: .., dockerfile: services/ride-agent-gateway/Dockerfile}
+    env_file: ../.dev/rider-staging.env
+  gateway:
+    build: {context: .., dockerfile: services/api-gateway/Dockerfile}
+    env_file: ../.dev/rider-staging.env
+    ports: ["127.0.0.1:8087:8080"]
+    depends_on:
+      database: {condition: service_healthy}
+      broker: {condition: service_started}
+      trip: {condition: service_started}
+      driver: {condition: service_started}
+      agent: {condition: service_started}
+volumes:
+  rider_staging_data:

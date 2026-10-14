@@ -72,7 +72,7 @@ resource "google_sql_user" "migration" {
 }
 
 resource "google_project_iam_member" "runtime_cloud_sql_client" {
-  for_each = local.runtime_services
+  for_each = setsubtract(local.runtime_services, toset(["ride-agent-gateway"]))
 
   project = var.project_id
   role    = "roles/cloudsql.client"

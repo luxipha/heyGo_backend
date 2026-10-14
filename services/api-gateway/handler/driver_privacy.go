@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -240,6 +241,18 @@ func processNextDriverDataExport(ctx context.Context, pool *pgxpool.Pool, files 
 type privacyEmailSender func(context.Context, string, string, string, string, string, string, string, string) error
 
 func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.Pool, files storage.ObjectStore, encryptionKey []byte, send privacyEmailSender) bool {
+	return processNextPrivateDataExport(ctx, pool, files, encryptionKey, send, "driver")
+}
+func processNextPrivateDataExport(ctx context.Context, pool *pgxpool.Pool, files storage.ObjectStore, encryptionKey []byte, send privacyEmailSender, scope string) bool {
+	table, ownerColumn := "driver_data_exports", "driver_id"
+	if scope == "rider" {
+		table, ownerColumn = "rider_data_exports", "rider_id"
+	} else if scope != "driver" {
+		return false
+	}
+	sql := func(query string) string {
+		return strings.ReplaceAll(strings.ReplaceAll(query, "driver_data_exports", table), "driver_id", ownerColumn)
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false
@@ -247,9 +260,10 @@ func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.P
 	var id, driverID, recipient string
 	var storedArchiveKey, storedFromEmail, storedFromName *string
 	var storedLinkCiphertext []byte
-	err = tx.QueryRow(ctx, `SELECT id::TEXT,driver_id::TEXT,requested_email,archive_storage_key,archive_link_ciphertext,mail_from_email,mail_from_name
+	var storedExpiresAt *time.Time
+	err = tx.QueryRow(ctx, sql(`SELECT id::TEXT,driver_id::TEXT,requested_email,archive_storage_key,archive_link_ciphertext,mail_from_email,mail_from_name,expires_at
 		FROM driver_data_exports WHERE (status='pending' AND next_attempt_at<=NOW()) OR (status='processing' AND lease_until<NOW())
-		ORDER BY requested_at FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &driverID, &recipient, &storedArchiveKey, &storedLinkCiphertext, &storedFromEmail, &storedFromName)
+		ORDER BY requested_at FOR UPDATE SKIP LOCKED LIMIT 1`)).Scan(&id, &driverID, &recipient, &storedArchiveKey, &storedLinkCiphertext, &storedFromEmail, &storedFromName, &storedExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_ = tx.Rollback(ctx)
 		return false
@@ -258,7 +272,7 @@ func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.P
 		_ = tx.Rollback(ctx)
 		return false
 	}
-	_, err = tx.Exec(ctx, `UPDATE driver_data_exports SET status='processing',attempt_count=attempt_count+1,lease_until=NOW()+INTERVAL '5 minutes',updated_at=NOW() WHERE id=$1::UUID`, id)
+	_, err = tx.Exec(ctx, sql(`UPDATE driver_data_exports SET status='processing',attempt_count=attempt_count+1,lease_until=NOW()+INTERVAL '5 minutes',updated_at=NOW() WHERE id=$1::UUID`), id)
 	if err == nil {
 		err = tx.Commit(ctx)
 	} else {
@@ -268,8 +282,8 @@ func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.P
 		return true
 	}
 	var active bool
-	if err := pool.QueryRow(ctx, `SELECT active FROM users WHERE id=$1::UUID`, driverID).Scan(&active); err != nil || !active {
-		_, _ = pool.Exec(ctx, `UPDATE driver_data_exports SET status='cancelled',requested_email='',lease_until=NULL,updated_at=NOW() WHERE id=$1::UUID AND status='processing'`, id)
+	if err := pool.QueryRow(ctx, sql(`SELECT active FROM users WHERE id=$1::UUID`), driverID).Scan(&active); err != nil || !active {
+		_, _ = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET status='cancelled',requested_email='',lease_until=NULL,updated_at=NOW() WHERE id=$1::UUID AND status='processing'`), id)
 		return true
 	}
 	settings, configured, settingsErr := readResendSettingsPool(ctx, pool)
@@ -280,15 +294,22 @@ func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.P
 	} else if apiKey, decryptErr := openAdminSecret(encryptionKey, settings.APIKeyCiphertext); decryptErr != nil {
 		err = fmt.Errorf("Resend settings cannot be opened")
 	} else {
-		if storedArchiveKey != nil {
+		if storedExpiresAt != nil && !storedExpiresAt.After(time.Now()) {
+			err = fmt.Errorf("export link expired")
+		}
+		if err == nil && storedArchiveKey != nil {
 			key = *storedArchiveKey
-		} else {
-			key, err = buildDriverDataArchive(ctx, pool, files, driverID, id)
+		} else if err == nil {
+			if scope == "rider" {
+				key, err = buildRiderDataArchive(ctx, pool, files, driverID, id)
+			} else {
+				key, err = buildDriverDataArchive(ctx, pool, files, driverID, id)
+			}
 			if err == nil {
 				var result pgconn.CommandTag
-				result, err = pool.Exec(ctx, `UPDATE driver_data_exports SET archive_storage_key=$2 WHERE id=$1::UUID AND status='processing'`, id, key)
+				result, err = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET archive_storage_key=$2 WHERE id=$1::UUID AND status='processing'`), id, key)
 				if err == nil && result.RowsAffected() == 0 {
-					_ = files.Delete(ctx, key)
+					_, _ = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET archive_storage_key=$2,expires_at=NOW() WHERE id=$1::UUID AND status IN ('cancelled','failed')`), id, key)
 					err = fmt.Errorf("export request was cancelled")
 				}
 			}
@@ -304,12 +325,14 @@ func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.P
 			var presigned string
 			presigned, err = files.PresignGet(ctx, key, driverExportLifetime)
 			if err == nil {
+				expires := time.Now().UTC().Add(driverExportLifetime)
+				storedExpiresAt = &expires
 				var cipherText []byte
 				cipherText, err = sealAdminValue(encryptionKey, presigned, "heygo-data-export-link-v1")
 				if err == nil {
 					var result pgconn.CommandTag
-					result, err = pool.Exec(ctx, `UPDATE driver_data_exports SET archive_link_ciphertext=$2,mail_from_email=$3,mail_from_name=$4
-						WHERE id=$1::UUID AND status='processing'`, id, cipherText, fromEmail, fromName)
+					result, err = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET archive_link_ciphertext=$2,mail_from_email=$3,mail_from_name=$4,expires_at=$5
+						WHERE id=$1::UUID AND status='processing'`), id, cipherText, fromEmail, fromName, storedExpiresAt)
 					if err == nil && result.RowsAffected() == 0 {
 						err = fmt.Errorf("export request was cancelled")
 					}
@@ -319,27 +342,34 @@ func processNextDriverDataExportUsingSender(ctx context.Context, pool *pgxpool.P
 		}
 		if err == nil {
 			var stillEligible bool
-			if checkErr := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_data_exports e JOIN users u ON u.id=e.driver_id WHERE e.id=$1::UUID AND e.status='processing' AND u.active=TRUE)`, id).Scan(&stillEligible); checkErr != nil || !stillEligible {
+			if checkErr := pool.QueryRow(ctx, sql(`SELECT EXISTS(SELECT 1 FROM driver_data_exports e JOIN users u ON u.id=e.driver_id WHERE e.id=$1::UUID AND e.status='processing' AND u.active=TRUE AND ($2='driver' OR (u.email_verified=TRUE AND LOWER(u.email)=LOWER(e.requested_email))))`), id, scope).Scan(&stillEligible); checkErr != nil || !stillEligible {
 				err = fmt.Errorf("export request was cancelled")
 			} else {
-				textBody := "Your HeyGo Driver data archive is ready. This private download link expires in 7 days: " + link
-				htmlBody := "<p>Your HeyGo Driver data archive is ready.</p><p>This private download link expires in 7 days: <a href=\"" + html.EscapeString(link) + "\">Download your archive</a></p>"
-				err = send(ctx, "driver-data-export/"+id, apiKey, fromEmail, fromName, recipient, "Your HeyGo data archive", textBody, htmlBody)
+				roleName := "Driver"
+				if scope == "rider" {
+					roleName = "Rider"
+				}
+				textBody := "Your HeyGo " + roleName + " data archive is ready. This private download link expires in 7 days: " + link
+				htmlBody := "<p>Your HeyGo " + roleName + " data archive is ready.</p><p>This private download link expires in 7 days: <a href=\"" + html.EscapeString(link) + "\">Download your archive</a></p>"
+				err = send(ctx, scope+"-data-export/"+id, apiKey, fromEmail, fromName, recipient, "Your HeyGo data archive", textBody, htmlBody)
 			}
 		}
 	}
 	if err != nil {
-		_, _ = pool.Exec(ctx, `UPDATE driver_data_exports SET status=CASE WHEN attempt_count>=5 THEN 'failed' WHEN $2='export request was cancelled' THEN 'cancelled' ELSE 'pending' END,
-			requested_email=CASE WHEN attempt_count>=5 OR $2='export request was cancelled' THEN '' ELSE requested_email END,
-			archive_link_ciphertext=CASE WHEN attempt_count>=5 OR $2='export request was cancelled' THEN NULL ELSE archive_link_ciphertext END,
+		_, _ = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET status=CASE WHEN attempt_count>=5 OR $2='export link expired' THEN 'failed' WHEN $2='export request was cancelled' THEN 'cancelled' ELSE 'pending' END,
+			requested_email=CASE WHEN attempt_count>=5 OR $2 IN ('export request was cancelled','export link expired') THEN '' ELSE requested_email END,
+			archive_link_ciphertext=CASE WHEN attempt_count>=5 OR $2 IN ('export request was cancelled','export link expired') THEN NULL ELSE archive_link_ciphertext END,
 			expires_at=CASE WHEN attempt_count>=5 AND archive_storage_key IS NOT NULL THEN NOW() ELSE expires_at END,
 			next_attempt_at=NOW()+make_interval(secs=>LEAST(3600,power(2,LEAST(attempt_count,10))::INTEGER)),
-			lease_until=NULL,last_error='delivery_or_archive_failed',updated_at=NOW() WHERE id=$1::UUID AND status='processing'`, id, err.Error())
+			lease_until=NULL,last_error='delivery_or_archive_failed',updated_at=NOW() WHERE id=$1::UUID AND status='processing'`), id, err.Error())
 		return true
 	}
 	expiresAt := time.Now().UTC().Add(driverExportLifetime)
-	_, _ = pool.Exec(ctx, `UPDATE driver_data_exports SET status='sent',sent_at=NOW(),expires_at=$2,next_attempt_at=$2,
-		lease_until=NULL,last_error='',updated_at=NOW() WHERE id=$1::UUID AND status='processing'`, id, expiresAt)
+	if storedExpiresAt != nil {
+		expiresAt = *storedExpiresAt
+	}
+	_, _ = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET status='sent',sent_at=NOW(),expires_at=$2,next_attempt_at=$2,
+		lease_until=NULL,last_error='',updated_at=NOW() WHERE id=$1::UUID AND status='processing'`), id, expiresAt)
 	return true
 }
 
@@ -353,15 +383,22 @@ func readResendSettingsPool(ctx context.Context, pool *pgxpool.Pool) (resendSett
 }
 
 func expireDriverExports(ctx context.Context, pool *pgxpool.Pool, files storage.ObjectStore) {
+	expirePrivateExports(ctx, pool, files, "driver_data_exports")
+}
+func expirePrivateExports(ctx context.Context, pool *pgxpool.Pool, files storage.ObjectStore, table string) {
+	if table != "driver_data_exports" && table != "rider_data_exports" {
+		return
+	}
+	sql := func(query string) string { return strings.ReplaceAll(query, "driver_data_exports", table) }
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return
 	}
 	var id, key string
-	err = tx.QueryRow(ctx, `SELECT id::TEXT,archive_storage_key FROM driver_data_exports
-		WHERE ((status='sent' AND expires_at<=NOW()) OR (status='failed' AND archive_storage_key IS NOT NULL))
+	err = tx.QueryRow(ctx, sql(`SELECT id::TEXT,archive_storage_key FROM driver_data_exports
+		WHERE ((status='sent' AND expires_at<=NOW()) OR (status IN ('failed','cancelled') AND archive_storage_key IS NOT NULL))
 		AND (lease_until IS NULL OR lease_until<NOW())
-		FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &key)
+		FOR UPDATE SKIP LOCKED LIMIT 1`)).Scan(&id, &key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_ = tx.Rollback(ctx)
 		return
@@ -370,15 +407,15 @@ func expireDriverExports(ctx context.Context, pool *pgxpool.Pool, files storage.
 		_ = tx.Rollback(ctx)
 		return
 	}
-	if _, err := tx.Exec(ctx, `UPDATE driver_data_exports SET lease_until=NOW()+INTERVAL '2 minutes' WHERE id=$1::UUID`, id); err != nil || tx.Commit(ctx) != nil {
+	if _, err := tx.Exec(ctx, sql(`UPDATE driver_data_exports SET lease_until=NOW()+INTERVAL '2 minutes' WHERE id=$1::UUID`), id); err != nil || tx.Commit(ctx) != nil {
 		_ = tx.Rollback(ctx)
 		return
 	}
 	if files.Delete(ctx, key) == nil {
-		_, _ = pool.Exec(ctx, `UPDATE driver_data_exports SET status=CASE WHEN status='sent' THEN 'expired' ELSE status END,archive_storage_key=NULL,
-			archive_link_ciphertext=NULL,mail_from_email=NULL,mail_from_name=NULL,requested_email='',lease_until=NULL,updated_at=NOW() WHERE id=$1::UUID AND status IN ('sent','failed')`, id)
+		_, _ = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET status=CASE WHEN status='sent' THEN 'expired' ELSE status END,archive_storage_key=NULL,
+			archive_link_ciphertext=NULL,mail_from_email=NULL,mail_from_name=NULL,requested_email='',lease_until=NULL,updated_at=NOW() WHERE id=$1::UUID AND status IN ('sent','failed','cancelled')`), id)
 	} else {
-		_, _ = pool.Exec(ctx, `UPDATE driver_data_exports SET lease_until=NULL WHERE id=$1::UUID`, id)
+		_, _ = pool.Exec(ctx, sql(`UPDATE driver_data_exports SET lease_until=NULL WHERE id=$1::UUID`), id)
 	}
 }
 
@@ -434,11 +471,14 @@ func StartPrivacyJobs(ctx context.Context, pool *pgxpool.Pool, files storage.Obj
 			case <-ticker.C:
 				jobCtx, cancel := context.WithTimeout(ctx, time.Minute)
 				worked := processNextDriverDataExport(jobCtx, pool, files, key)
+				riderWorked := processNextPrivateDataExport(jobCtx, pool, files, key, sendResendEmailWithKey, "rider")
+				worked = worked || riderWorked
 				if !worked {
 					worked = processDriverDeletionFile(jobCtx, pool, files)
 				}
 				if !worked {
 					expireDriverExports(jobCtx, pool, files)
+					expirePrivateExports(jobCtx, pool, files, "rider_data_exports")
 				}
 				cancel()
 			}
@@ -451,12 +491,25 @@ func StartPrivacyJobs(ctx context.Context, pool *pgxpool.Pool, files storage.Obj
 // requests safe, and the bound prevents a large backlog from exceeding the
 // request deadline.
 func RunPrivacyJobsOnce(ctx context.Context, pool *pgxpool.Pool, files storage.ObjectStore, limit int) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
 	if files == nil || limit <= 0 {
 		return
 	}
 	key, _ := hex.DecodeString(os.Getenv("HEYGO_ADMIN_SETTINGS_KEY"))
-	for range limit {
-		if processNextDriverDataExport(ctx, pool, files, key) {
+	for i := range limit {
+		scope := "driver"
+		if i%2 == 1 {
+			scope = "rider"
+		}
+		if processNextPrivateDataExport(ctx, pool, files, key, sendResendEmailWithKey, scope) {
+			continue
+		}
+		other := "rider"
+		if scope == "rider" {
+			other = "driver"
+		}
+		if processNextPrivateDataExport(ctx, pool, files, key, sendResendEmailWithKey, other) {
 			continue
 		}
 		if processDriverDeletionFile(ctx, pool, files) {
@@ -465,4 +518,5 @@ func RunPrivacyJobsOnce(ctx context.Context, pool *pgxpool.Pool, files storage.O
 		break
 	}
 	expireDriverExports(ctx, pool, files)
+	expirePrivateExports(ctx, pool, files, "rider_data_exports")
 }

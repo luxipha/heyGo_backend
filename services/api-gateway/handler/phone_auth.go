@@ -90,6 +90,7 @@ type phoneAuthAPI struct {
 	pepper      []byte
 	smsSender   SMSSender
 	emailSender EmailOTPSender
+	deliveryKey []byte
 }
 
 type configuredResendOTPSender struct {
@@ -101,18 +102,10 @@ func (s *configuredResendOTPSender) SendOTP(ctx context.Context, email, code str
 	if len(s.key) != 32 {
 		return fmt.Errorf("Resend settings encryption is not configured")
 	}
-	settings, configured, err := readResendSettingsPool(ctx, s.pool)
-	if err != nil || !configured {
-		return fmt.Errorf("Resend is not configured")
-	}
-	apiKey, err := openAdminSecret(s.key, settings.APIKeyCiphertext)
-	if err != nil {
-		return err
-	}
 	subject := "Your HeyGo sign-in code"
 	textBody := "Your HeyGo sign-in code is " + code + ". It expires in 5 minutes. If you did not request this code, you can ignore this email."
 	htmlBody := "<p>Your HeyGo sign-in code is <strong>" + code + "</strong>.</p><p>It expires in 5 minutes. If you did not request this code, you can ignore this email.</p>"
-	return sendResendEmail(ctx, apiKey, settings.FromEmail, settings.FromName, email, subject, textBody, htmlBody)
+	return sendConfiguredEmail(ctx, s.pool, s.key, email, subject, textBody, htmlBody)
 }
 
 func registerPhoneAuthRoutes(router *gin.Engine, pool *pgxpool.Pool, users *gatewayauth.PostgresUserStore, config PhoneAuthConfig) {
@@ -120,11 +113,16 @@ func registerPhoneAuthRoutes(router *gin.Engine, pool *pgxpool.Pool, users *gate
 	if emailSender == nil {
 		emailSender = &configuredResendOTPSender{pool: pool, key: config.ResendSecretKey}
 	}
+	smsSender := config.Sender
+	if smsSender == nil {
+		smsSender = &configuredKudiSMSSender{pool: pool, key: config.ResendSecretKey}
+	}
 	api := &phoneAuthAPI{
-		pool: pool, users: users, pepper: config.OTPPepper, smsSender: config.Sender,
+		pool: pool, users: users, pepper: config.OTPPepper, smsSender: smsSender, deliveryKey: config.ResendSecretKey,
 		emailSender: emailSender,
 	}
 	otpLimiter := httpmiddleware.NewRateLimiter(10, time.Minute)
+	router.GET("/auth/channels", httpmiddleware.NewRateLimiter(30, time.Minute).Middleware, api.authChannels)
 	router.POST("/auth/otp/request", otpLimiter.Middleware, api.requestOTP)
 	router.POST("/auth/otp/verify", otpLimiter.Middleware, api.verifyOTP)
 	router.POST("/auth/phone/otp/request", otpLimiter.Middleware, api.requestOTP)
@@ -163,6 +161,10 @@ func registerPhoneSessionRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Po
 		}
 		user, _ := gatewayauth.CurrentUser(ctx)
 		var verified bool
+		if user.HasRole("rider") && body.Email != user.Email {
+			driverError(ctx, http.StatusConflict, "email_verification_required", "Verify the new email through Rider account settings before linking it")
+			return
+		}
 		if err := pool.QueryRow(ctx.Request.Context(), `UPDATE users SET email=$2,email_verified=CASE WHEN email=$2 THEN email_verified ELSE FALSE END,updated_at=NOW() WHERE id=$1::UUID AND active=TRUE RETURNING email_verified`, user.ID, body.Email).Scan(&verified); err != nil {
 			driverError(ctx, http.StatusServiceUnavailable, "account_unavailable", "Account details could not be updated")
 			return
@@ -172,7 +174,8 @@ func registerPhoneSessionRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Po
 }
 
 func (a *phoneAuthAPI) requestOTP(ctx *gin.Context) {
-	if len(a.pepper) < 32 || a.smsSender == nil {
+	ready, readinessErr := a.channelReady(ctx.Request.Context(), "phone")
+	if len(a.pepper) < 32 || readinessErr != nil || !ready {
 		driverError(ctx, http.StatusServiceUnavailable, "sms_unavailable", "SMS sign-in is not configured")
 		return
 	}
@@ -192,7 +195,8 @@ func (a *phoneAuthAPI) requestOTP(ctx *gin.Context) {
 }
 
 func (a *phoneAuthAPI) requestEmailOTP(ctx *gin.Context) {
-	if len(a.pepper) < 32 || a.emailSender == nil {
+	ready, readinessErr := a.channelReady(ctx.Request.Context(), "email")
+	if len(a.pepper) < 32 || readinessErr != nil || !ready {
 		driverError(ctx, http.StatusServiceUnavailable, "email_unavailable", "Email sign-in is not configured")
 		return
 	}
@@ -354,9 +358,16 @@ func (a *phoneAuthAPI) verifyChallenge(ctx *gin.Context, channel, destination, r
 		err = tx.QueryRow(ctx.Request.Context(), `INSERT INTO users(id,email,email_verified,roles,created_at,updated_at)
 			VALUES($1::UUID,$2,TRUE,'{}'::TEXT[],NOW(),NOW())
 			ON CONFLICT(LOWER(email)) WHERE email IS NOT NULL DO UPDATE SET email_verified=TRUE,updated_at=NOW()
-			WHERE users.active=TRUE RETURNING id::TEXT`, userID, destination).Scan(&userID)
+			WHERE users.active=TRUE AND (NOT ('rider'=ANY(users.roles)) OR users.email_verified=TRUE) RETURNING id::TEXT`, userID, destination).Scan(&userID)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
+		if channel == "email" {
+			var active bool
+			if lookupErr := tx.QueryRow(ctx.Request.Context(), `SELECT active FROM users WHERE LOWER(email)=LOWER($1)`, destination).Scan(&active); lookupErr == nil && active {
+				driverError(ctx, http.StatusConflict, "email_link_required", "Sign in with your existing account and verify this email from account settings, or contact Support")
+				return
+			}
+		}
 		driverError(ctx, http.StatusForbidden, "account_deactivated", "This HeyGo account is deactivated")
 		return
 	}
@@ -403,7 +414,11 @@ func (a *phoneAuthAPI) refresh(ctx *gin.Context) {
 	err = tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,user_id::TEXT,device_name FROM user_sessions
 		WHERE refresh_token_hash=$1 AND revoked_at IS NULL AND refresh_expires_at>NOW() FOR UPDATE`, gatewayauth.TokenHash(body.RefreshToken)).Scan(&sessionID, &userID, &deviceName)
 	if err != nil {
-		driverError(ctx, http.StatusUnauthorized, "invalid_refresh_token", "A valid refresh token is required")
+		if errors.Is(err, pgx.ErrNoRows) {
+			driverError(ctx, http.StatusUnauthorized, "invalid_refresh_token", "A valid refresh token is required")
+		} else {
+			driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Session refresh is temporarily unavailable")
+		}
 		return
 	}
 	tokens, err := newSessionTokens()

@@ -3,6 +3,7 @@ package types
 import (
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
+	"time"
 )
 
 type TripModel struct {
@@ -27,6 +28,9 @@ func (t *TripModel) ToProto() *pb.Trip {
 }
 
 type RideFareModel struct {
+	PreviewID         string
+	ExpiresAt         time.Time
+	ConsumedTripID    string
 	ID                string
 	PricingVersionID  string
 	PricingMarketCode string

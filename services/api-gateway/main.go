@@ -29,6 +29,7 @@ var (
 	projectID = env.GetString("GCP_PROJECT_ID", env.GetString("GOOGLE_CLOUD_PROJECT", "heygo-ng"))
 	groupID   = "api-gateway-group"
 	topics    = []string{
+		contracts.TripEventCreated,
 		contracts.TripEventNoDriversFound,
 		contracts.TripEventDriverAssigned,
 		contracts.DriverCmdTripRequest,
@@ -179,11 +180,6 @@ func main() {
 	phoneAuth := handler.PhoneAuthConfig{
 		OTPPepper:       []byte(env.GetString("OTP_PEPPER", "")),
 		ResendSecretKey: decodeHexKey(env.GetString("HEYGO_ADMIN_SETTINGS_KEY", "")),
-		Sender: handler.NewHTTPSMSSender(
-			env.GetString("SMS_PROVIDER_URL", ""),
-			env.GetString("SMS_PROVIDER_TOKEN", ""),
-			env.GetString("SMS_SENDER_ID", "HeyGo"),
-		),
 	}
 	httpServer := NewhttpServer(httpAddr, bus, connManager, authMiddleware, users, pool, eventStore, files, origins, phoneAuth, readiness, pushHandler)
 	go func() {

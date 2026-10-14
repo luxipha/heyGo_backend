@@ -94,3 +94,11 @@ resource "google_service_account_iam_member" "github_event_invoker_user" {
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.github_deployer.email}"
 }
+
+# WIF deployment credentials mint a Google ID token for the protected candidate
+# health check. The grant is confined to the deployment account itself.
+resource "google_service_account_iam_member" "github_self_token_creator" {
+  service_account_id = google_service_account.github_deployer.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.github_deployer.email}"
+}

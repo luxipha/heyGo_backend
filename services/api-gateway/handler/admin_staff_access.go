@@ -67,15 +67,7 @@ func (a *adminAPI) sendStaffEmail(ctx context.Context, to, subject, body string)
 	if a.staffEmailSender != nil {
 		return a.staffEmailSender(ctx, to, subject, body)
 	}
-	settings, configured, err := a.readResendSettings(ctx)
-	if err != nil || !configured || len(a.settingsKey) != 32 {
-		return errors.New("staff email delivery is not configured")
-	}
-	key, err := openAdminSecret(a.settingsKey, settings.APIKeyCiphertext)
-	if err != nil {
-		return err
-	}
-	return sendResendEmail(ctx, key, settings.FromEmail, settings.FromName, to, subject, body, "")
+	return sendConfiguredEmail(ctx, a.pool, a.settingsKey, to, subject, body, "")
 }
 
 func staffAccessLink(base, purpose, token string) string {

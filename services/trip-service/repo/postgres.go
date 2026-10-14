@@ -14,12 +14,18 @@ import (
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/shared/tripstate"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 )
 
 type postgresTripRepo struct{ pool *pgxpool.Pool }
 
 var ErrOfferNotActive = errors.New("driver is not the active assignee for trip")
+var ErrFareExpired = errors.New("fare_expired")
+var ErrFareForeign = errors.New("fare_foreign")
+var ErrFareInvalid = errors.New("fare_invalid")
+var ErrDebtChanged = errors.New("debt_changed")
+var ErrActiveRiderTrip = errors.New("rider already has an active trip")
 var ErrRiderRestricted = errors.New("rider is restricted from requesting new trips")
 var ErrPricingUnavailable = errors.New("published pricing is unavailable or market classification is ambiguous")
 
@@ -64,11 +70,60 @@ func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longit
 }
 
 func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*types.TripModel, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("begin trip creation: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// Serialize trip creation for this Rider. ReadCommitted observes a competing
+	// creation after the user row lock is acquired, avoiding snapshot races.
+	var riderID string
+	if err := tx.QueryRow(ctx, `SELECT id::TEXT FROM users WHERE id=$1::UUID AND active=TRUE AND roles @> ARRAY['rider']::TEXT[] FOR UPDATE`, trip.RiderID).Scan(&riderID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRiderRestricted
+		}
+		return nil, err
+	}
+	var owner, consumed string
+	var expires time.Time
+	var consumedAt *time.Time
+	var debt int64
+	err = tx.QueryRow(ctx, `SELECT rider_id::TEXT,COALESCE(consumed_trip_id::TEXT,''),expires_at,no_show_debt_kobo,consumed_at FROM ride_fares WHERE id=$1::UUID FOR UPDATE`, trip.RideFare.ID).Scan(&owner, &consumed, &expires, &debt, &consumedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrFareInvalid
+	}
+	if err != nil {
+		return nil, err
+	}
+	if owner != trip.RiderID {
+		return nil, ErrFareForeign
+	}
+	if consumed != "" {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		existing, err := r.GetByID(ctx, consumed)
+		if err != nil {
+			return nil, err
+		}
+		if existing.RiderID != trip.RiderID || existing.RideFare == nil || existing.RideFare.ID != trip.RideFare.ID {
+			return nil, ErrFareInvalid
+		}
+		return existing, nil
+	}
+	if consumedAt != nil {
+		return nil, ErrFareInvalid
+	}
+	if !expires.After(time.Now()) {
+		return nil, ErrFareExpired
+	}
+	var currentDebt int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(d.amount_kobo),0)::BIGINT FROM rider_no_show_debts d WHERE d.rider_id=$1::UUID AND d.status='due' AND NOT EXISTS(SELECT 1 FROM trip_no_show_debt_settlements s WHERE s.debt_id=d.id AND s.status IN ('pending','settled'))`, trip.RiderID).Scan(&currentDebt); err != nil {
+		return nil, err
+	}
+	if currentDebt != debt || debt != trip.RideFare.NoShowDebtKobo {
+		return nil, ErrDebtChanged
+	}
 	classifiedAt := time.Now().UTC()
 	classification, err := classifyTrip(ctx, tx, trip.RideFare, classifiedAt)
 	if err != nil {
@@ -77,9 +132,16 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 	if trip.RideFare.PricingMarketCode != "" && trip.RideFare.PricingMarketCode != classification.MarketCode {
 		return nil, ErrPricingUnavailable
 	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trips t LEFT JOIN trip_settlements s ON s.trip_id=t.id WHERE t.rider_id=$1::UUID AND `+tripstate.RiderRecoverableSQL+`)`, trip.RiderID).Scan(&active); err != nil {
+		return nil, err
+	}
+	if active {
+		return nil, ErrActiveRiderTrip
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO trips (id,rider_id,ride_fare_id,status,created_at,updated_at,
-		market_code,origin_region_code,destination_region_code,regulatory_tags,classification_geofences,classified_at,no_show_debt_kobo)
-		VALUES ($1::UUID,$2::UUID,$3::UUID,$4,$5,$5,$6,$7,$8,$9,$10::JSONB,$5,$11)`,
+		market_code,origin_region_code,destination_region_code,regulatory_tags,classification_geofences,classified_at,no_show_debt_kobo,matching_deadline)
+		VALUES ($1::UUID,$2::UUID,$3::UUID,$4,$5,$5,$6,$7,$8,$9,$10::JSONB,$5,$11,$5::TIMESTAMPTZ+INTERVAL '2 minutes')`,
 		trip.ID, trip.RiderID, trip.RideFare.ID, trip.Status, classifiedAt,
 		classification.MarketCode, classification.OriginRegionCode, classification.DestinationRegionCode,
 		classification.Tags, classification.Geofences, trip.RideFare.NoShowDebtKobo)
@@ -89,6 +151,9 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 			return nil, ErrRiderRestricted
 		}
 		return nil, fmt.Errorf("create trip: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE ride_fares SET consumed_trip_id=$2::UUID,consumed_at=NOW() WHERE id=$1::UUID`, trip.RideFare.ID, trip.ID); err != nil {
+		return nil, err
 	}
 	if trip.RideFare.NoShowDebtKobo > 0 {
 		var fareCreatedAt time.Time
@@ -158,11 +223,11 @@ func (r *postgresTripRepo) SaveRideFare(ctx context.Context, fare *types.RideFar
 		return fmt.Errorf("begin save ride fare: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `INSERT INTO ride_fares (id,rider_id,package_slug,total_fare_minor,route,pickup,destination,no_show_debt_kobo,pricing_version_id,pricing_market_code)
+	err = tx.QueryRow(ctx, `INSERT INTO ride_fares (id,rider_id,package_slug,total_fare_minor,route,pickup,destination,no_show_debt_kobo,pricing_version_id,pricing_market_code,preview_id)
 		VALUES ($1::UUID,$2::UUID,$3,$4,$5,
 		CASE WHEN $6::DOUBLE PRECISION IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($7::DOUBLE PRECISION,$6::DOUBLE PRECISION),4326)::geography END,
-		CASE WHEN $8::DOUBLE PRECISION IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($9::DOUBLE PRECISION,$8::DOUBLE PRECISION),4326)::geography END,0,NULLIF($10,'')::UUID,$11)`,
-		fare.ID, fare.RiderID, fare.PackageSlug, fare.TotalFareInPaise, route, pickupLat, pickupLng, destinationLat, destinationLng, fare.PricingVersionID, fare.PricingMarketCode)
+		CASE WHEN $8::DOUBLE PRECISION IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($9::DOUBLE PRECISION,$8::DOUBLE PRECISION),4326)::geography END,0,NULLIF($10,'')::UUID,$11,COALESCE(NULLIF($12,'')::UUID,gen_random_uuid())) RETURNING preview_id::TEXT,expires_at`,
+		fare.ID, fare.RiderID, fare.PackageSlug, fare.TotalFareInPaise, route, pickupLat, pickupLng, destinationLat, destinationLng, fare.PricingVersionID, fare.PricingMarketCode, fare.PreviewID).Scan(&fare.PreviewID, &fare.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("save ride fare: %w", err)
 	}
@@ -187,10 +252,10 @@ func (r *postgresTripRepo) GetRideFareByID(ctx context.Context, fareID string) (
 	var route []byte
 	var pickupLat, pickupLng, destinationLat, destinationLng *float64
 	err := r.pool.QueryRow(ctx, `SELECT id::TEXT,rider_id::TEXT,package_slug,total_fare_minor,route,no_show_debt_kobo,COALESCE(pricing_version_id::TEXT,''),COALESCE(pricing_market_code,''),
-		ST_Y(pickup::geometry),ST_X(pickup::geometry),ST_Y(destination::geometry),ST_X(destination::geometry)
-		FROM ride_fares WHERE id=$1::UUID AND expires_at>NOW()`, fareID).Scan(&fare.ID, &fare.RiderID, &fare.PackageSlug, &fare.TotalFareInPaise, &route, &fare.NoShowDebtKobo, &fare.PricingVersionID, &fare.PricingMarketCode, &pickupLat, &pickupLng, &destinationLat, &destinationLng)
+		ST_Y(pickup::geometry),ST_X(pickup::geometry),ST_Y(destination::geometry),ST_X(destination::geometry),preview_id::TEXT,expires_at,COALESCE(consumed_trip_id::TEXT,'')
+		FROM ride_fares WHERE id=$1::UUID`, fareID).Scan(&fare.ID, &fare.RiderID, &fare.PackageSlug, &fare.TotalFareInPaise, &route, &fare.NoShowDebtKobo, &fare.PricingVersionID, &fare.PricingMarketCode, &pickupLat, &pickupLng, &destinationLat, &destinationLng, &fare.PreviewID, &fare.ExpiresAt, &fare.ConsumedTripID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, ErrFareInvalid
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get ride fare: %w", err)
@@ -222,7 +287,7 @@ func (r *postgresTripRepo) UpdateWithDriver(ctx context.Context, tripID string, 
 		FROM driver_assignments a, drivers d
 		WHERE t.id=$1::UUID AND a.trip_id=t.id AND a.driver_id=$2::UUID
 		  AND d.id=a.driver_id AND d.online_requested=TRUE AND d.status='offered'
-		  AND a.status='offered' AND a.expires_at>NOW() AND t.status IN ('pending','assigned')`, tripID, driver.Id)
+		  AND a.status='offered' AND a.expires_at>NOW() AND COALESCE(t.matching_deadline,t.created_at+INTERVAL '2 minutes')>NOW() AND t.status IN ('pending','assigned')`, tripID, driver.Id)
 	if err != nil {
 		return nil, fmt.Errorf("accept trip: %w", err)
 	}
@@ -515,6 +580,9 @@ func (r *postgresTripRepo) Rate(ctx context.Context, tripID, actorID string, rat
 	}
 	if err != nil {
 		return TrustSubject{}, false, err
+	}
+	if subjectID == actorID {
+		return TrustSubject{}, false, fmt.Errorf("completed trip is not accessible to this user")
 	}
 	if !actorIsRider && comment != "" {
 		return TrustSubject{}, false, fmt.Errorf("only riders may submit written rating comments")

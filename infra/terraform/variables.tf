@@ -130,7 +130,7 @@ variable "app_url" {
 }
 
 variable "sms_provider_url" {
-  description = "HTTPS endpoint for the configured SMS OTP adapter. Required before enabling phone sign-in in a deployed environment."
+  description = "Deprecated compatibility input; phone OTP now uses Admin-managed Kudi settings. Not injected into Cloud Run."
   type        = string
   default     = ""
 
@@ -141,7 +141,7 @@ variable "sms_provider_url" {
 }
 
 variable "sms_sender_id" {
-  description = "Sender identifier passed to the SMS OTP adapter."
+  description = "Deprecated compatibility input; configure the approved Kudi sender through Admin."
   type        = string
   default     = "HeyGo"
 }

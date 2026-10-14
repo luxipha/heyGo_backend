@@ -82,15 +82,21 @@ func TestOutboxPubSubGatewayReplayDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(bus.Close)
+	// The consumer is deliberately offline while publishing. The business state
+	// and outbox commit do not imply that a Rider has received the update.
+	if published, err := publishNext(ctx, pool, bus.Producer); err != nil || !published {
+		t.Fatalf("initial Pub/Sub publish: published=%v err=%v", published, err)
+	}
+	var beforeDelivery int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_events WHERE recipient_id=$1::UUID`, riderID).Scan(&beforeDelivery); err != nil || beforeDelivery != 0 {
+		t.Fatalf("offline consumer observed delivery: %d %v", beforeDelivery, err)
+	}
 	consumerCtx, stopConsumer := context.WithCancel(ctx)
 	t.Cleanup(stopConsumer)
 	go func() {
 		_ = NewTopicConsumer(bus, nil, []string{contracts.TripEventStarted}, NewEventStore(pool)).Consume(consumerCtx)
 	}()
-	if published, err := publishNext(ctx, pool, bus.Producer); err != nil || !published {
-		t.Fatalf("initial Pub/Sub publish: published=%v err=%v", published, err)
-	}
-	waitForEventCount(t, ctx, pool, riderID, 1)
+	waitForEventCount(t, ctx, pool, riderID, 2)
 	if _, err := pool.Exec(ctx, `UPDATE trip_event_outbox SET published_at=NULL WHERE id=$1`, outboxID); err != nil {
 		t.Fatal(err)
 	}
@@ -102,8 +108,8 @@ func TestOutboxPubSubGatewayReplayDeduplicates(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_events WHERE recipient_id=$1::UUID`, riderID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("replayed Pub/Sub event created %d user events; want 1", count)
+	if count != 2 {
+		t.Fatalf("replayed Pub/Sub event created %d user events; want one lifecycle event plus one Rider inbox hint", count)
 	}
 }
 

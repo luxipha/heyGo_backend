@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
 	"github.com/luxipha/heyGo_backend/services/trip-service/service"
@@ -17,13 +18,18 @@ import (
 )
 
 type DriverConsumer struct {
-	bus *pubsub.Client
-	svc service.TripService
+	bus  *pubsub.Client
+	svc  service.TripService
+	pool *pgxpool.Pool
 }
 
 // NewDriverConsumer creates a driver command consumer.
-func NewDriverConsumer(bus *pubsub.Client, svc service.TripService) *DriverConsumer {
-	return &DriverConsumer{bus: bus, svc: svc}
+func NewDriverConsumer(bus *pubsub.Client, svc service.TripService, pools ...*pgxpool.Pool) *DriverConsumer {
+	consumer := &DriverConsumer{bus: bus, svc: svc}
+	if len(pools) > 0 {
+		consumer.pool = pools[0]
+	}
+	return consumer
 }
 
 // Consume starts consuming messages from the specified topics and processes them.
@@ -53,6 +59,9 @@ func (dc *DriverConsumer) Handle(ctx context.Context, msg *pubsub.Message) error
 		}
 		if payload.ActorID != eventMsg.EntityID {
 			return fmt.Errorf("lifecycle actor mismatch")
+		}
+		if payload.CommandID != "" {
+			return dc.handleRiderCommand(ctx, msg.Topic, payload)
 		}
 		if err := dc.handleLifecycle(ctx, msg.Topic, payload); err != nil {
 			return err

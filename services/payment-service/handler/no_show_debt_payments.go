@@ -7,16 +7,20 @@ import (
 	"net/mail"
 	"strings"
 
-	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/services/payment-service/repo"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 func (h *WebhookHandler) createNoShowDebtPayment(c *gin.Context) {
 	if h.topups == nil || h.topups.InternalToken == "" || subtle.ConstantTimeCompare([]byte(c.GetHeader("X-Internal-Service-Token")), []byte(h.topups.InternalToken)) != 1 {
 		c.Status(http.StatusUnauthorized)
+		return
+	}
+	if h.topups.Pool == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "debt_payment_unavailable"})
 		return
 	}
 	var body struct {
@@ -49,6 +53,17 @@ func (h *WebhookHandler) createNoShowDebtPayment(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(ctx)
+	// Revalidate the persisted email instead of trusting an internal email claim.
+	var verifiedEmail string
+	err = tx.QueryRow(ctx, `SELECT email FROM users WHERE id=$1::UUID AND active=TRUE AND email_verified=TRUE AND roles @> ARRAY['rider']::TEXT[] FOR SHARE`, body.RiderID).Scan(&verifiedEmail)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && verifiedEmail != body.Email) {
+		c.JSON(http.StatusConflict, gin.H{"code": "email_not_verified"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "debt_payment_unavailable"})
+		return
+	}
 	var existingID, existingDebt, existingStatus string
 	var existingAmount int64
 	var existingCheckout, existingReference, existingTransaction *string
@@ -121,6 +136,10 @@ func (h *WebhookHandler) createNoShowDebtPayment(c *gin.Context) {
 		return
 	}
 	id := uuid.NewString()
+	if h.topups.Initializer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "debt_payment_unavailable"})
+		return
+	}
 	merchantReference := "heygo-nsd-" + id
 	if _, err := tx.Exec(ctx, `INSERT INTO rider_no_show_debt_payments(id,debt_id,rider_id,amount_kobo,provider,provider_reference,idempotency_key,status)
 		VALUES($1::UUID,$2::UUID,$3::UUID,$4,'monnify',$5,$6,'pending')`, id, body.DebtID, body.RiderID, amount, merchantReference, body.IdempotencyKey); err != nil {
@@ -133,8 +152,9 @@ func (h *WebhookHandler) createNoShowDebtPayment(c *gin.Context) {
 	}
 	session, err := h.topups.Initializer.CreateNoShowDebtPaymentSession(ctx, amount, merchantReference, body.Email, body.RiderID, body.DebtID)
 	if err != nil {
-		_, _ = h.topups.Pool.Exec(ctx, `UPDATE rider_no_show_debt_payments SET status='failed' WHERE id=$1::UUID AND status='pending'`, id)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "checkout_unavailable"})
+		// An interrupted provider response does not prove that no checkout was
+		// created. Keep the reservation pending for recovery/reconciliation.
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "checkout_unresolved"})
 		return
 	}
 	tag, err := h.topups.Pool.Exec(ctx, `UPDATE rider_no_show_debt_payments SET provider_transaction_reference=$2,checkout_url=$3 WHERE id=$1::UUID AND status='pending'`, id, session.TransactionReference, session.CheckoutURL)

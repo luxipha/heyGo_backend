@@ -299,6 +299,19 @@ func validateSupportMessage(body string, uploadIDs []string, clientID string) er
 }
 
 func (a *supportAPI) createCase(ctx *gin.Context, owner, audience string, body createSupportCaseBody, tripID, topicKind, priority string) (string, error) {
+	requestPayload, _ := json.Marshal(gin.H{"topicCode": body.TopicCode, "detailCode": body.DetailCode, "subject": body.Subject, "description": strings.TrimSpace(body.Description), "uploadIds": body.UploadIDs, "tripId": tripID, "audience": audience})
+	var existing string
+	var same bool
+	replayErr := a.pool.QueryRow(ctx.Request.Context(), `SELECT case_id::TEXT,payload=$3::JSONB FROM support_case_requests WHERE owner_id=$1::UUID AND client_request_id=$2::UUID`, owner, body.ClientID, requestPayload).Scan(&existing, &same)
+	if replayErr == nil {
+		if !same {
+			return "", errors.New("support request identity was reused")
+		}
+		return existing, nil
+	}
+	if !errors.Is(replayErr, pgx.ErrNoRows) {
+		return "", replayErr
+	}
 	var topicLabel string
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT label FROM support_topics WHERE code=$1 AND topic_kind=$2 AND enabled AND (audience='both' OR audience=$3)`, body.TopicCode, topicKind, audience).Scan(&topicLabel)
 	if err != nil {
@@ -321,6 +334,19 @@ func (a *supportAPI) createCase(ctx *gin.Context, owner, audience string, body c
 		return "", err
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	if _, err := tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, "support-request:"+owner+":"+body.ClientID); err != nil {
+		return "", err
+	}
+	replayErr = tx.QueryRow(ctx.Request.Context(), `SELECT case_id::TEXT,payload=$3::JSONB FROM support_case_requests WHERE owner_id=$1::UUID AND client_request_id=$2::UUID`, owner, body.ClientID, requestPayload).Scan(&existing, &same)
+	if replayErr == nil {
+		if !same {
+			return "", errors.New("support request identity was reused")
+		}
+		return existing, nil
+	}
+	if !errors.Is(replayErr, pgx.ErrNoRows) {
+		return "", replayErr
+	}
 	caseID, messageID := uuid.NewString(), uuid.NewString()
 	var trip any
 	if tripID != "" {
@@ -338,6 +364,9 @@ func (a *supportAPI) createCase(ctx *gin.Context, owner, audience string, body c
 		return "", err
 	}
 	if _, err = messaging.AppendEventTx(ctx.Request.Context(), tx, owner, "support-case-created:"+caseID, "support.case.updated", json.RawMessage(`{"caseId":"`+caseID+`","status":"open"}`)); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO support_case_requests(owner_id,client_request_id,case_id,payload) VALUES($1::UUID,$2::UUID,$3::UUID,$4::JSONB)`, owner, body.ClientID, caseID, requestPayload); err != nil {
 		return "", err
 	}
 	if err = tx.Commit(ctx.Request.Context()); err != nil {
@@ -381,6 +410,10 @@ func consumeSupportUploads(ctx *gin.Context, tx pgx.Tx, owner, messageID string,
 }
 
 func supportFailure(ctx *gin.Context, err error) {
+	if strings.Contains(err.Error(), "support request identity was reused") {
+		driverError(ctx, 409, "support_request_id_reused", "Request identity belongs to another Support request")
+		return
+	}
 	if strings.Contains(err.Error(), "support topic is not available") || strings.Contains(err.Error(), "evidence upload") || strings.Contains(err.Error(), "message must contain") || strings.Contains(err.Error(), "client message ID was reused") || strings.Contains(err.Error(), "subject must be") {
 		driverError(ctx, http.StatusBadRequest, "invalid_support_case", err.Error())
 		return

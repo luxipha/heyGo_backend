@@ -21,6 +21,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var (
@@ -103,6 +104,7 @@ func main() {
 		}
 	}
 	paymentRepo := repo.NewPostgresPaymentRepository(databasePool)
+	prometheus.MustRegister(repo.NewPaymentBacklogCollector(databasePool))
 
 	paymentProcessor := service.NewMonnifyClient(paymentCfg)
 	paymentService := service.NewPaymentService(paymentProcessor, paymentRepo)
@@ -111,6 +113,20 @@ func main() {
 	var pushHandler http.Handler
 	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
 	case "pull":
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				if _, err := repo.DrainPaymentEvents(ctx, databasePool, bus.Producer, 100); err != nil && ctx.Err() == nil {
+					logs.L().Warn("Payment event recovery failed; pending rows retained")
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 		go func() {
 			if err := tripConsumer.Consume(ctx, topics); err != nil && ctx.Err() == nil {
 				logs.L().Warnw("Error consuming payment topics", "error", err)
@@ -139,6 +155,8 @@ func main() {
 		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
 			Initializer: paymentProcessor, Verifier: paymentProcessor, BankVerifier: paymentProcessor, RefundExecutor: paymentProcessor}, readiness)
 	root := http.NewServeMux()
+	root.Handle("/internal/tasks/payment-events/drain", handler.PaymentEventDrainHandler(databasePool, bus.Producer,
+		sharedauth.NewPubSubPushAuthorizer(env.GetString("PUBSUB_PUSH_AUDIENCE", ""), env.GetString("PUBSUB_PUSH_SERVICE_ACCOUNT", ""))))
 	if pushHandler != nil {
 		root.Handle("/internal/pubsub/", pushHandler)
 	}

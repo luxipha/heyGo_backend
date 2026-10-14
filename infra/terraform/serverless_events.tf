@@ -82,6 +82,35 @@ resource "google_cloud_scheduler_job" "outbox_recovery" {
   depends_on = [google_cloud_run_v2_service_iam_member.event_invoker]
 }
 
+resource "google_cloud_scheduler_job" "payment_event_recovery" {
+  count            = var.deploy_services ? 1 : 0
+  project          = var.project_id
+  region           = var.region
+  name             = "payment-event-recovery"
+  description      = "Recover unpublished payment webhook events with stable event IDs."
+  schedule         = "* * * * *"
+  time_zone        = "Etc/UTC"
+  attempt_deadline = "60s"
+
+  retry_config {
+    retry_count          = 3
+    min_backoff_duration = "5s"
+    max_backoff_duration = "60s"
+    max_doublings        = 3
+  }
+  http_target {
+    uri         = "${google_cloud_run_v2_service.payment[0].uri}/internal/tasks/payment-events/drain"
+    http_method = "POST"
+    body        = base64encode("{}")
+    headers     = { "Content-Type" = "application/json" }
+    oidc_token {
+      service_account_email = google_service_account.event_invoker.email
+      audience              = "https://pubsub.heygo.internal/payment-service"
+    }
+  }
+  depends_on = [google_cloud_run_v2_service_iam_member.event_invoker]
+}
+
 resource "google_cloud_scheduler_job" "gateway_maintenance" {
   count = var.deploy_services ? 1 : 0
 

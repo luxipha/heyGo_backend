@@ -19,6 +19,7 @@ var auditSafeFields = map[string]bool{
 	"invitationPending": true, "version": true,
 	"enabled": true, "sortOrder": true, "assignedAdminId": true,
 	"restricted": true, "kind": true,
+	"resendEnabled": true, "smtpEnabled": true, "primaryProvider": true, "fallbackEnabled": true, "passwordChanged": true,
 	"amountKobo": true, "maxRequestKobo": true, "maxDailyKobo": true,
 }
 
@@ -61,6 +62,12 @@ func adminAuditTarget(action, driverID string, details any) (string, string) {
 		if code, ok := input["code"].(string); ok {
 			return "support_topic", code
 		}
+	}
+	if strings.HasPrefix(action, "sms.settings") {
+		return "settings", "sms"
+	}
+	if strings.HasPrefix(action, "email.delivery_settings") {
+		return "settings", "email-delivery"
 	}
 	if strings.HasPrefix(action, "privacy.resend_settings") {
 		return "settings", "resend"

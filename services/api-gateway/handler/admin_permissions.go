@@ -101,7 +101,7 @@ func adminRoutePermission(method, path string) string {
 			return permissionSupportRead
 		}
 		return permissionSupportWrite
-	case strings.HasPrefix(path, "/admin/settings/resend"):
+	case strings.HasPrefix(path, "/admin/settings/resend"), strings.HasPrefix(path, "/admin/settings/email-delivery"), strings.HasPrefix(path, "/admin/settings/sms"):
 		return permissionSettings
 	case path == "/admin/trips" || strings.HasPrefix(path, "/admin/trips/"):
 		if read {

@@ -73,6 +73,15 @@ func TestQuoteUsesPublishedMarketPricingAndPersistsVersion(t *testing.T) {
 	if len(fares) != 4 || fares[0].TotalFareInPaise != 600 || fares[0].PricingVersionID != pricing || fares[0].PricingMarketCode != market {
 		t.Fatalf("quoted fares=%+v", fares)
 	}
+	group := fares[0].PreviewID
+	if group == "" {
+		t.Fatal("missing preview identity")
+	}
+	for _, fare := range fares {
+		if fare.PreviewID != group || !fare.ExpiresAt.After(time.Now()) {
+			t.Fatalf("invalid grouped quote: %+v", fare)
+		}
+	}
 	var frozen string
 	if err = pool.QueryRow(ctx, `SELECT pricing_version_id::TEXT FROM ride_fares WHERE id=$1::UUID`, fares[0].ID).Scan(&frozen); err != nil || frozen != pricing {
 		t.Fatalf("frozen=%s err=%v", frozen, err)

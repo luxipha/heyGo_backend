@@ -61,10 +61,9 @@ func (c *TripConsumer) Handle(ctx context.Context, msg *pubsub.Message) error {
 		if err != nil {
 			return err
 		}
-		if riderID == "" {
-			return nil
-		}
-		return c.bus.Producer.SendMessage(ctx, contracts.DriverEventLocationUpdated, &contracts.EventMessage{EntityID: riderID, Data: envelope.Data})
+		_ = riderID
+		return nil // Gateway atomically persists scoped Rider location events.
+
 	default:
 		return nil
 	}
@@ -101,7 +100,7 @@ func (c *TripConsumer) match(ctx context.Context, raw []byte) error {
 		}
 	}
 	if errors.Is(err, repo.ErrNoAvailableDriver) {
-		return c.bus.Producer.SendMessage(ctx, contracts.TripEventNoDriversFound, &contracts.EventMessage{EntityID: payload.Trip.RiderID, Data: raw})
+		return nil // Repository committed the terminal outcome and durable outbox event.
 	}
 	if err != nil {
 		return err

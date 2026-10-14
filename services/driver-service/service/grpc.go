@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/luxipha/heyGo_backend/services/driver-service/repo"
+	"github.com/luxipha/heyGo_backend/shared/driverstate"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
 	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
 )
@@ -53,7 +54,7 @@ func (s *driverService) MatchAndReserve(ctx context.Context, trip *tripproto.Tri
 		return nil, fmt.Errorf("trip has no pickup location")
 	}
 	pickup := trip.Route.Geometry[0].Coordinates[0]
-	return s.repo.MatchAndReserve(ctx, trip.Id, trip.SelectedFare.PackageSlug, pickup.Latitude, pickup.Longitude, 15_000, 20*time.Second, payload)
+	return s.repo.MatchAndReserve(ctx, trip.Id, trip.SelectedFare.PackageSlug, pickup.Latitude, pickup.Longitude, driverstate.MatchingRadiusMeters, 20*time.Second, payload)
 }
 
 func (s *driverService) Decline(ctx context.Context, tripID, driverID string) (*repo.RetryTrip, error) {

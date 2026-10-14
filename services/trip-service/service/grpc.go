@@ -90,10 +90,19 @@ func (s *tripService) GetRoute(ctx context.Context, pickup, destination *sharedt
 	if err := json.Unmarshal(body, &routeResponse); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
-	if len(routeResponse.Routes) == 0 || len(routeResponse.Routes[0].Geometry.Coordinates) == 0 {
+	if len(routeResponse.Routes) == 0 || len(routeResponse.Routes[0].Geometry.Coordinates) < 2 {
 		return nil, fmt.Errorf("route service returned no usable route")
 	}
 
+	route := routeResponse.Routes[0]
+	if math.IsNaN(route.Distance) || math.IsInf(route.Distance, 0) || route.Distance <= 0 || math.IsNaN(route.Duration) || math.IsInf(route.Duration, 0) || route.Duration <= 0 {
+		return nil, fmt.Errorf("invalid route measurements")
+	}
+	for _, point := range route.Geometry.Coordinates {
+		if len(point) != 2 || math.IsNaN(point[0]) || math.IsNaN(point[1]) || math.IsInf(point[0], 0) || math.IsInf(point[1], 0) || math.Abs(point[0]) > 180 || math.Abs(point[1]) > 90 {
+			return nil, fmt.Errorf("invalid route geometry")
+		}
+	}
 	return &routeResponse, nil
 }
 
@@ -107,6 +116,7 @@ func (s *tripService) GenerateTripFares(ctx context.Context, riderID string, rou
 	if err != nil {
 		return nil, err
 	}
+	previewID := uuid.NewString()
 	fares := make([]*types.RideFareModel, len(pricing.Rates))
 	for i, rate := range pricing.Rates {
 		amount, valid := calculateFareKobo(route.Routes[0].Distance, route.Routes[0].Duration, rate)
@@ -114,6 +124,7 @@ func (s *tripService) GenerateTripFares(ctx context.Context, riderID string, rou
 			return nil, fmt.Errorf("fare outside approved bounds")
 		}
 		f := &types.RideFareModel{
+			PreviewID:         previewID,
 			RiderID:           riderID,
 			ID:                uuid.NewString(),
 			PackageSlug:       rate.PackageSlug,
@@ -144,13 +155,16 @@ func (s *tripService) GetAndValidateRideFare(ctx context.Context, fareID, riderI
 	}
 
 	if fare == nil {
-		return nil, fmt.Errorf("ride fare not found")
+		return nil, repo.ErrFareInvalid
 	}
 
 	if fare.RiderID != riderID {
-		return nil, fmt.Errorf("ride fare does not belong to rider")
+		return nil, repo.ErrFareForeign
 	}
 
+	if fare.ConsumedTripID == "" && !fare.ExpiresAt.IsZero() && !fare.ExpiresAt.After(time.Now()) {
+		return nil, repo.ErrFareExpired
+	}
 	return fare, nil
 }
 

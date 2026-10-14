@@ -85,6 +85,11 @@ func (s *EventStore) AppendTx(ctx context.Context, tx pgx.Tx, recipientID, sourc
 			}
 		}
 	}
+	if notification := riderNotificationForEvent(kind, data); notification != nil {
+		if err := s.createRiderNotificationTx(ctx, tx, recipientID, sourceEventID, *notification); err != nil {
+			return contracts.WSMessage{}, err
+		}
+	}
 	return event, nil
 }
 

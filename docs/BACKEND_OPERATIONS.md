@@ -56,21 +56,40 @@ test alone does not close an operational task.
   legal names remain decryptable. Monitor `needs_reconciliation` and retained
   reservations; do not retry a claimed provider send without status evidence.
 
-- [ ] **Choose an SMS provider and enable phone OTP.** Confirm its request and
-  delivery contract, configure `SMS_PROVIDER_URL`, `SMS_PROVIDER_TOKEN`, and
-  `SMS_SENDER_ID`, then verify a real OTP journey. Phone login is the intended
-  launch path; the current adapter has no selected provider.
+- [x] **Implement Admin-managed Kudi SMS and email routing in source.**
+  Phone OTP uses the encrypted Kudi settings, not generic `SMS_PROVIDER_*`
+  environment variables. Resend/SMTP routing is independently Admin-managed.
+- [ ] **Verify intended-environment authentication delivery.** Apply migrations
+  062–063; configure the approved Kudi sender, app/template codes and API key
+  through Admin, then observe real +234 OTP receipt and HeyGo verification.
+  Configure a verified email sender and observe inbox receipt/OTP verification.
+  Enable a channel only after its controlled delivery check. See
+  [KUDI_SMS_SETTINGS.md](KUDI_SMS_SETTINGS.md) and
+  [EMAIL_DELIVERY_SETTINGS.md](EMAIL_DELIVERY_SETTINGS.md).
 - [ ] **Configure the launch market and payments.** Publish Admin market
   boundaries and Operating Balance top-up bounds; supply Monnify credentials,
   redirect, and webhook configuration, then verify a signed webhook and
   server-side transaction check with a real checkout.
-- [ ] **Finish the payment event recovery audit.** A webhook commits a payment
-  update and an unpublished `payment_webhook_events` row before publishing to
-  Pub/Sub. Redelivery can retry it, but no recovery worker scans unpublished
-  rows if redelivery never arrives. The outbound envelope now reuses the
-  webhook event ID so retries deduplicate in `user_events`. Persist enough
-  information to recover publication; add a drain path and backlog alert
-  before relying on payment notifications.
+- [x] **Implement payment event recovery in source.** Migration 064 stores the
+  immutable topic, recipient and payload in the same transaction as the payment
+  update. A bounded, identity-protected payment drain and once-per-minute
+  Scheduler job recover unpublished rows with their original event IDs. Local
+  pull mode has a periodic recovery loop. Backlog metrics and alert rules cover
+  aging rows, missing legacy envelopes and failed backlog reads.
+- [ ] **Verify deployed payment event recovery.** Apply migration 064 before
+  deploying Payment Service. Inspect legacy unpublished rows that could not be
+  reconstructed; do not silently mark them delivered. Observe an interrupted
+  publication, scheduled recovery, duplicate deduplication and alert delivery in
+  cloud staging. See [PAYMENT_EVENT_RECOVERY.md](PAYMENT_EVENT_RECOVERY.md).
+- [x] **Wire Ride Agent into the release configuration.** Terraform defines its
+  protected Cloud Run service, dedicated identity, internal-token and Places-key
+  secrets, gateway URL/audience, and gateway-only runtime invocation. The image
+  release includes its candidate health check. It has no database/Pub/Sub grants.
+- [ ] **Verify Ride Agent in cloud staging.** Populate the restricted server-side
+  Places key, deploy all five service images and the migration image from one
+  reviewed SHA, verify gateway identity plus internal-token authentication and
+  real destination lookup/confirmation. LLM planning remains disabled pending
+  its separately reviewed provider configuration. Review attribution/retention.
 - [ ] **Finish best-effort location freshness handling.** The gateway persists
   the latest driver coordinate before publishing and includes its saved
   `recordedAt` time in rider updates. Update rider clients to discard older
@@ -221,14 +240,19 @@ Terraform provisions topics, subscriptions, ordering, retry policies, and
 matching `.dlq` topics; applications never create messaging infrastructure at
 startup. Local development may use `PUBSUB_EMULATOR_HOST`.
 
-Phone and email sign-in share `OTP_PEPPER`. Email OTP uses the existing
-Admin-managed Resend configuration and requires `HEYGO_ADMIN_SETTINGS_KEY`.
-Phone OTP is optional until an SMS provider is selected; when enabled it uses
-`SMS_PROVIDER_URL`, `SMS_PROVIDER_TOKEN`, and `SMS_SENDER_ID` on API Gateway.
-The configured SMS adapter accepts a JSON
-`POST` containing `to`, `code`, and `senderId`, with the provider token sent as
-an Authorization bearer token. Never put
-the provider token or OTP pepper in either mobile application.
+Phone and email sign-in share `OTP_PEPPER`. Both require
+`HEYGO_ADMIN_SETTINGS_KEY` for encrypted Admin-managed provider configuration.
+Email OTP uses the saved Resend/SMTP routing; phone OTP uses saved Kudi settings.
+Generic `SMS_PROVIDER_URL`, `SMS_PROVIDER_TOKEN`, and `SMS_SENDER_ID` are
+legacy compatibility settings and no longer select the production sender.
+Migration 063 defaults SMS to disabled until explicitly configured/enabled.
+Never put provider credentials or the OTP pepper in either mobile application.
+
+Ride Agent requires a server-side `RIDE_AGENT_PLACES_KEY` and a generated
+`RIDE_AGENT_INTERNAL_TOKEN`. Gateway uses `RIDE_AGENT_URL` plus
+`RIDE_AGENT_AUDIENCE` to authenticate through Cloud Run IAM while retaining
+application-level internal-token authentication. LLM planning is disabled in
+the checked-in deployment configuration.
 
 Generate a local ignored secret manifest without placing credentials on the command line:
 
@@ -237,8 +261,6 @@ export POSTGRES_URL='postgres://...'
 export INTERNAL_SERVICE_TOKEN='...'
 export OTP_PEPPER='...'
 export HEYGO_ADMIN_SETTINGS_KEY="$(openssl rand -hex 32)"
-# Optional until phone OTP is enabled:
-export SMS_PROVIDER_TOKEN='...'
 export MONNIFY_API_KEY='...'
 export MONNIFY_SECRET_KEY='...'
 export MONNIFY_CONTRACT_CODE='...'
@@ -246,10 +268,10 @@ export MONNIFY_CONTRACT_CODE='...'
 ```
 
 Do not commit `infra/kubernetes/dev/secrets.yaml`. Rotate the internal service
-token, OTP pepper, optional SMS/CasperID secrets, database credentials, and
-Monnify credentials through Secret Manager in Cloud Run production. Back
-up `HEYGO_ADMIN_SETTINGS_KEY`; changing it without re-saving the Admin Resend
-settings makes the encrypted Resend API key unreadable.
+token, Ride Agent token/Places key, OTP pepper, optional CasperID secrets,
+database credentials, and Monnify credentials through Secret Manager in Cloud Run production. Back
+up `HEYGO_ADMIN_SETTINGS_KEY`; changing it without a credential migration makes encrypted Resend, SMTP, Kudi,
+bank destinations and reviewed legal names unreadable.
 
 Driver Operating Balance checkout uses `PAYMENT_SERVICE_URL` on API Gateway
 (`http://localhost:9200` in local development, the payment-service cluster
@@ -338,3 +360,7 @@ Run `go test ./...`, `go vet ./...`, `staticcheck ./...`, and `govulncheck ./...
 With `TEST_DATABASE_URL` pointing at a disposable PostGIS database, tests execute
 migrations and verify required tables and the extension. Pub/Sub integration
 tests additionally require `TEST_GCP_PROJECT_ID` and `PUBSUB_EMULATOR_HOST`.
+
+### SMS configuration supersession — 2026-10-14
+
+The earlier generic SMS environment-variable examples in this document are historical. Production API Gateway now reads Kudi SMS configuration from Admin Settings after migration 063; `SMS_PROVIDER_URL`, `SMS_PROVIDER_TOKEN`, `SMS_SENDER_ID` do not select the production sender. Keep `OTP_PEPPER` and `HEYGO_ADMIN_SETTINGS_KEY` configured. SMS stays disabled until Admin saves the Kudi key and approved Corporate Sender ID/App Name Code/OTP Template Code and enables it. See [KUDI_SMS_SETTINGS.md](KUDI_SMS_SETTINGS.md) for live gates and safe public channel availability.

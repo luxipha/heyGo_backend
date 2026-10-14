@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/services/payment-service/types"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
 )
 
 type postgresPaymentRepository struct{ pool *pgxpool.Pool }
@@ -121,11 +123,12 @@ func (r *postgresPaymentRepository) ApplyWebhook(ctx context.Context, update Web
 		return nil, false, fmt.Errorf("lock webhook event: %w", err)
 	}
 	var published bool
+	var savedPayload []byte
 	err = tx.QueryRow(ctx, `
 		INSERT INTO payment_webhook_events (event_id, processed_at)
 		VALUES ($1, $2)
 		ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
-		RETURNING published`, update.EventID, time.Now().UTC()).Scan(&published)
+		RETURNING published, payload`, update.EventID, time.Now().UTC()).Scan(&published, &savedPayload)
 	if err != nil {
 		return nil, false, fmt.Errorf("claim webhook event: %w", err)
 	}
@@ -134,6 +137,19 @@ func (r *postgresPaymentRepository) ApplyWebhook(ctx context.Context, update Web
 			return nil, false, fmt.Errorf("commit duplicate webhook: %w", err)
 		}
 		return nil, false, nil
+	}
+	// Replay the immutable original event even if the payment changed later.
+	if len(savedPayload) > 0 {
+		var saved messaging.PaymentStatusUpdateData
+		if err := json.Unmarshal(savedPayload, &saved); err != nil {
+			return nil, false, fmt.Errorf("decode saved payment event: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, err
+		}
+		return &types.Payment{TripID: saved.TripID, RiderID: saved.RiderID, DriverID: saved.DriverID,
+			PaymentReference: saved.PaymentReference, TransactionReference: saved.TransactionReference,
+			Status: types.PaymentStatus(saved.Status)}, true, nil
 	}
 
 	metadata, err := json.Marshal(update.ProviderMetadata)
@@ -181,10 +197,39 @@ func (r *postgresPaymentRepository) ApplyWebhook(ctx context.Context, update Web
 	payment.Status = update.Status
 	payment.TransactionReference = update.TransactionReference
 	payment.ProviderMetadata = update.ProviderMetadata
+	topic, err := paymentEventTopic(update.Status)
+	if err != nil {
+		return nil, false, err
+	}
+	payload, err := json.Marshal(messaging.PaymentStatusUpdateData{
+		EventID: update.EventID, TripID: payment.TripID, RiderID: payment.RiderID, DriverID: payment.DriverID,
+		PaymentReference: payment.PaymentReference, TransactionReference: payment.TransactionReference,
+		Status: string(payment.Status),
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_webhook_events SET topic=$2, entity_id=$3, payload=$4::JSONB WHERE event_id=$1`,
+		update.EventID, topic, payment.RiderID, payload); err != nil {
+		return nil, false, fmt.Errorf("persist payment event envelope: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit webhook update: %w", err)
 	}
 	return payment, true, nil
+}
+
+func paymentEventTopic(status types.PaymentStatus) (string, error) {
+	switch status {
+	case types.PaymentStatusSuccess:
+		return contracts.PaymentEventSuccess, nil
+	case types.PaymentStatusFailed:
+		return contracts.PaymentEventFailed, nil
+	case types.PaymentStatusCancelled:
+		return contracts.PaymentEventCancelled, nil
+	default:
+		return "", fmt.Errorf("unsupported payment event status")
+	}
 }
 
 func (r *postgresPaymentRepository) MarkEventPublished(ctx context.Context, eventID string) error {

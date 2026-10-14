@@ -101,7 +101,7 @@ func main() {
 	} else {
 		logs.L().Info("CasperID trust delivery disabled; HeyGo email and phone accounts remain supported")
 	}
-	driverConsumer := events.NewDriverConsumer(bus, tripService)
+	driverConsumer := events.NewDriverConsumer(bus, tripService, pool)
 	var pushHandler http.Handler
 	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
 	case "pull":

@@ -28,6 +28,7 @@ type DriverLocationData struct {
 }
 
 type TripLifecycleCommand struct {
+	CommandID    string   `json:"commandId,omitempty"`
 	TripID       string   `json:"tripID"`
 	ActorID      string   `json:"actorID"`
 	Reason       string   `json:"reason,omitempty"`

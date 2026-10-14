@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 const resendEmailEndpoint = "https://api.resend.com/emails"
@@ -28,6 +29,11 @@ type resendSettings struct {
 }
 
 func registerAdminPrivacyRoutes(group *gin.RouterGroup, api *adminAPI) {
+	group.GET("/settings/sms", api.getSMSSettings)
+	group.PUT("/settings/sms", api.requireCSRF, api.putSMSSettings)
+	group.GET("/settings/email-delivery", api.getEmailDelivery)
+	group.PUT("/settings/email-delivery", api.requireCSRF, api.putEmailDelivery)
+	group.POST("/settings/email-delivery/test", api.requireCSRF, api.testEmailDelivery)
 	group.GET("/settings/resend", api.getResendSettings)
 	group.PUT("/settings/resend", api.requireCSRF, api.putResendSettings)
 	group.POST("/settings/resend/test", api.requireCSRF, api.testResendSettings)
@@ -192,6 +198,12 @@ func (a *adminAPI) testResendSettings(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadGateway, "resend_test_failed", "Resend could not send the test email")
 		return
 	}
+	_, err = a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_type,target_id,details,before_state,after_state)
+		VALUES($1,$2::UUID,'privacy.resend_settings.test','settings','resend','{}'::JSONB,'{}'::JSONB,'{}'::JSONB)`, uuid.New(), currentAdmin(ctx).ID)
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "resend_test_audit_unavailable", "Email was sent but its audit receipt is unavailable")
+		return
+	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"sent": true, "to": body.To}})
 }
 
@@ -228,6 +240,9 @@ func sendResendEmailTo(ctx context.Context, endpoint, idempotencyKey, apiKey, fr
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == 429 || response.StatusCode >= 500 {
+			return fmt.Errorf("%w: Resend rejected request (%d)", errEmailUnavailable, response.StatusCode)
+		}
 		return fmt.Errorf("Resend returned status %d", response.StatusCode)
 	}
 	return nil

@@ -34,6 +34,8 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.PATCH("/vehicle", api.updateVehicle)
 	driver.PUT("/vehicle-package", api.updatePackage)
 	driver.GET("/onboarding", api.onboarding)
+	driver.GET("/identity", api.identity)
+	driver.PUT("/identity", api.updateIdentity)
 	driver.GET("/documents", api.documents)
 	driver.POST("/documents/uploads", api.createDocumentUpload)
 	driver.POST("/documents", api.submitDocument)
@@ -45,6 +47,8 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.GET("/operating-balance/transactions", api.operatingBalanceTransactions)
 	driver.POST("/operating-balance/topups", api.createOperatingTopup)
 	driver.GET("/operating-balance/topups/:id", api.operatingTopup)
+	driver.GET("/refunds/:id", api.driverRefund)
+	driver.POST("/refunds/:id/destination", api.supplyRefundDestination)
 	driver.POST("/availability", api.availability)
 	driver.GET("/trips", api.tripHistory)
 	driver.GET("/reviews", api.driverReviews)
@@ -228,16 +232,13 @@ type documentData struct {
 
 func (a *driverAPI) documents(ctx *gin.Context) {
 	user, _ := gatewayauth.CurrentUser(ctx)
-	var nin bool
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT nin_verified FROM users WHERE id=$1::UUID`, user.ID).Scan(&nin); err != nil {
+	var manualStatus, manualReason string
+	var manualVerifiedAt *time.Time
+	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT manual_verification_status,manual_verification_reason,manual_verified_at FROM driver_profiles WHERE driver_id=$1::UUID`, user.ID).Scan(&manualStatus, &manualReason, &manualVerifiedAt); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "documents_unavailable", "Documents are unavailable")
 		return
 	}
-	ninStatus := "required"
-	if nin && user.Verified {
-		ninStatus = "approved"
-	}
-	result := []documentData{{Type: "nin", Status: ninStatus, Reason: ""}}
+	result := []documentData{{Type: "manual_identity", Status: manualStatus, Reason: manualReason, VerifiedAt: manualVerifiedAt}}
 	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT DISTINCT ON (type) id::TEXT,type,
 		CASE WHEN status='approved' AND expires_at IS NOT NULL AND expires_at<=NOW() THEN 'expired' ELSE status END,
 		rejection_reason,submitted_at,reviewed_at,expires_at
@@ -267,6 +268,11 @@ func (a *driverAPI) documents(ctx *gin.Context) {
 			result = append(result, doc)
 		} else {
 			result = append(result, documentData{Type: kind, Status: "required"})
+		}
+	}
+	for _, kind := range []string{"lasdri", "lasrra_lag_id", "driver_picture", "selfie_with_id", "id_document"} {
+		if doc, ok := documents[kind]; ok {
+			result = append(result, doc)
 		}
 	}
 	var inspectionID *string

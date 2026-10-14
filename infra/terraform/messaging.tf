@@ -37,6 +37,7 @@ locals {
     api-gateway-group = {
       service = "api-gateway"
       topics = toset([
+        "trip.event.created",
         "trip.event.no_drivers_found",
         "trip.event.driver_assigned",
         "driver.cmd.trip_request",
@@ -134,7 +135,7 @@ resource "google_pubsub_topic" "dead_letter" {
 }
 
 resource "google_project_iam_member" "runtime_pubsub_publisher" {
-  for_each = local.runtime_services
+  for_each = setsubtract(local.runtime_services, toset(["ride-agent-gateway"]))
 
   project = var.project_id
   role    = "roles/pubsub.publisher"

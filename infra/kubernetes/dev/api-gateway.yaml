@@ -43,36 +43,34 @@ spec:
             secretKeyRef:
               name: postgres
               key: internal-service-token
-        - name: CASPERID_APP_ID
+        - name: OTP_PEPPER
           valueFrom:
             secretKeyRef:
-              name: casperid
-              key: app-id
-        - name: CASPERID_API_SECRET
+              name: phone-auth
+              key: otp-pepper
+        - name: SMS_PROVIDER_TOKEN
           valueFrom:
             secretKeyRef:
-              name: casperid
-              key: api-secret
-        - name: CASPERID_TOKEN_URL
+              name: phone-auth
+              key: sms-provider-token
+              optional: true
+        - name: HEYGO_ADMIN_SETTINGS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: phone-auth
+              key: admin-settings-key
+        - name: HEYGO_MONNIFY_REFUNDS_READY
+          value: "false"
+        - name: SMS_PROVIDER_URL
           valueFrom:
             configMapKeyRef:
               name: heygo-config
-              key: casperid-token-url
-        - name: CASPERID_DRIVER_REDIRECT_URI
+              key: sms-provider-url
+        - name: SMS_SENDER_ID
           valueFrom:
             configMapKeyRef:
               name: heygo-config
-              key: casperid-driver-redirect-uri
-        - name: CASPERID_JWKS_URL
-          valueFrom:
-            configMapKeyRef:
-              name: heygo-config
-              key: casperid-jwks-url
-        - name: CASPERID_ISSUER
-          valueFrom:
-            configMapKeyRef:
-              name: heygo-config
-              key: casperid-issuer
+              key: sms-sender-id
         - name: ALLOWED_ORIGINS
           valueFrom:
             configMapKeyRef:

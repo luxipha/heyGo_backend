@@ -2,15 +2,17 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	triptypes "github.com/luxipha/heyGo_backend/services/trip-service/types"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
-	"github.com/google/uuid"
 )
 
 func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
@@ -33,8 +35,8 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 	creatorID, approverID, marketID, regionID := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
-		_, _ = pool.Exec(cleanupCtx, `DELETE FROM trips WHERE id=$1::UUID`, tripID)
-		_, _ = pool.Exec(cleanupCtx, `DELETE FROM ride_fares WHERE id=$1::UUID`, fareID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM trips WHERE rider_id=$1::UUID`, riderID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM ride_fares WHERE rider_id=$1::UUID`, riderID)
 		_, _ = pool.Exec(cleanupCtx, `UPDATE trip_geofences SET effective_until=NOW() WHERE id IN ($1::UUID,$2::UUID) AND effective_until IS NULL`, marketID, regionID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM users WHERE id=$1::UUID`, riderID)
 	})
@@ -83,11 +85,27 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 		t.Fatalf("loaded trip=%#v err=%v", loadedTrip, err)
 	}
 	var outboxTopic, outboxRecipient string
-	if err := pool.QueryRow(ctx, `SELECT topic,recipient_id::TEXT FROM trip_event_outbox WHERE trip_id=$1::UUID`, tripID).Scan(&outboxTopic, &outboxRecipient); err != nil {
+	var outboxPayload []byte
+	if err := pool.QueryRow(ctx, `SELECT topic,recipient_id::TEXT,payload FROM trip_event_outbox WHERE trip_id=$1::UUID`, tripID).Scan(&outboxTopic, &outboxRecipient, &outboxPayload); err != nil {
 		t.Fatalf("created trip must have a durable event: %v", err)
 	}
 	if outboxTopic != "trip.event.created" || outboxRecipient != riderID {
 		t.Fatalf("unexpected outbox event %s for %s", outboxTopic, outboxRecipient)
+	}
+	var money struct {
+		Trip struct {
+			SelectedFare struct {
+				FareKobo      int64  `json:"fareKobo"`
+				AmountDueKobo int64  `json:"amountDueKobo"`
+				Currency      string `json:"currency"`
+			} `json:"selectedFare"`
+		} `json:"trip"`
+	}
+	if err := json.Unmarshal(outboxPayload, &money); err != nil {
+		t.Fatalf("non-integer public money: %s: %v", outboxPayload, err)
+	}
+	if money.Trip.SelectedFare.FareKobo != 2500 || money.Trip.SelectedFare.AmountDueKobo != 2500 || money.Trip.SelectedFare.Currency != "NGN" {
+		t.Fatalf("public fare missing: %s", outboxPayload)
 	}
 	var market, origin, destination string
 	var tags []string
@@ -97,10 +115,68 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 	if market != classificationCode || origin != classificationCode || destination != classificationCode || len(tags) != 1 || tags[0] != "LOCAL" {
 		t.Fatalf("classification market=%s origin=%s destination=%s tags=%v", market, origin, destination, tags)
 	}
-	outside := *fare
+	if _, err := pool.Exec(ctx, `UPDATE ride_fares SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1::UUID`, fareID); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: fare})
+	if err != nil || retried.ID != tripID {
+		t.Fatalf("single-use recovery trip=%v err=%v", retried, err)
+	}
+	newFare := func() *triptypes.RideFareModel {
+		copy := *fare
+		copy.ID = uuid.NewString()
+		copy.PreviewID = ""
+		copy.ConsumedTripID = ""
+		if err := repository.SaveRideFare(ctx, &copy); err != nil {
+			t.Fatal(err)
+		}
+		return &copy
+	}
+	_, err = repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: newFare()})
+	if !errors.Is(err, ErrActiveRiderTrip) {
+		t.Fatalf("different fare active conflict: %v", err)
+	}
+	outside := *newFare()
 	outside.Pickup = &sharedtypes.Coordinate{Latitude: 7.0, Longitude: 4.0}
 	_, err = repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: &outside})
 	if !errors.Is(err, ErrTripClassificationUnavailable) {
-		t.Fatalf("expected fail-closed classification, got %v", err)
+		t.Fatalf("classification: %v", err)
+	}
+	expired := newFare()
+	if _, err := pool.Exec(ctx, `UPDATE ride_fares SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1::UUID`, expired.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: expired})
+	if !errors.Is(err, ErrFareExpired) {
+		t.Fatalf("expired fare: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE trips SET status='cancelled' WHERE id=$1::UUID`, tripID); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	concurrentFares := []*triptypes.RideFareModel{newFare(), newFare()}
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(fare *triptypes.RideFareModel) {
+			defer wg.Done()
+			_, err := repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: fare})
+			results <- err
+		}(concurrentFares[i])
+	}
+	wg.Wait()
+	close(results)
+	successes, conflicts := 0, 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrActiveRiderTrip) {
+			conflicts++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent requests: %d successes %d conflicts", successes, conflicts)
 	}
 }

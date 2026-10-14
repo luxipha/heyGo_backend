@@ -11,6 +11,49 @@ import (
 	"github.com/luxipha/heyGo_backend/services/payment-service/types"
 )
 
+func TestMonnifyRefundAndBankVerification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/login" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{"accessToken": "token"}})
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer token" {
+			t.Errorf("missing bearer token")
+		}
+		switch r.URL.Path {
+		case "/api/v2/disbursements/account/validate":
+			if r.URL.Query().Get("accountNumber") != "0123456789" || r.URL.Query().Get("bankCode") != "044" {
+				t.Errorf("incorrect bank lookup")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{"accountNumber": "0123456789", "bankCode": "044", "accountName": "Test Driver", "bankName": "Test Bank"}})
+		case "/api/v1/refunds/initiate-refund":
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request["refundAmount"] != float64(100) || request["destinationAccountNumber"] != "0123456789" || request["destinationAccountBankCode"] != "044" {
+				t.Errorf("incorrect refund payload: %#v", request)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{"transactionReference": "MNFY|1", "refundReference": "REF-1", "refundAmount": 100, "refundStatus": "PENDING"}})
+		case "/api/v1/refunds/REF-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{"transactionReference": "MNFY|1", "refundReference": "REF-1", "refundAmount": 100, "refundStatus": "COMPLETED"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := NewMonnifyClient(&types.PaymentConfig{BaseURL: server.URL, APIKey: "key", SecretKey: "secret"})
+	if bank, err := client.VerifyBankAccount(context.Background(), "0123456789", "044"); err != nil || bank.AccountName != "Test Driver" {
+		t.Fatalf("bank=%+v err=%v", bank, err)
+	}
+	if refund, err := client.InitiateRefund(context.Background(), "MNFY|1", "REF-1", 10000, "Duplicate topup", "0123456789", "044"); err != nil || refund.RefundStatus != "PENDING" {
+		t.Fatalf("refund=%+v err=%v", refund, err)
+	}
+	if refund, err := client.RefundStatus(context.Background(), "REF-1"); err != nil || refund.RefundStatus != "COMPLETED" {
+		t.Fatalf("status=%+v err=%v", refund, err)
+	}
+}
+
 func TestMonnifyCheckoutFlow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -110,7 +153,7 @@ func TestMonnifyVerifyTransactionUsesEncodedReference(t *testing.T) {
 	}
 }
 
-func TestMonnifyOperatingTopupUsesCasperIDEmail(t *testing.T) {
+func TestMonnifyOperatingTopupUsesAccountEmail(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/auth/login" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"requestSuccessful": true, "responseBody": map[string]any{"accessToken": "token"}})

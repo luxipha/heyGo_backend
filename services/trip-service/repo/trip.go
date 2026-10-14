@@ -20,6 +20,7 @@ type inMemoRepo struct {
 }
 
 type TripRepo interface {
+	PricingForQuote(ctx context.Context, pickupLatitude, pickupLongitude float64) (*QuotePricing, error)
 	Create(ctx context.Context, trip *types.TripModel) (*types.TripModel, error)
 	SaveRideFare(ctx context.Context, fare *types.RideFareModel) error
 	GetRideFareByID(ctx context.Context, fareID string) (*types.RideFareModel, error)
@@ -31,6 +32,20 @@ type TripRepo interface {
 	Cancel(ctx context.Context, tripID, actorID, reason string) (*types.TripModel, bool, error)
 	TrustParticipants(ctx context.Context, tripID string) ([]TrustSubject, error)
 	Rate(ctx context.Context, tripID, actorID string, rating int, feedbackTags []string, comment string) (TrustSubject, bool, error)
+}
+
+type PackageRate struct {
+	PackageSlug                        string
+	BaseKobo, PerKmKobo, PerMinuteKobo int64
+}
+
+type QuotePricing struct {
+	ID, MarketCode string
+	Rates          []PackageRate
+}
+
+func (r *inMemoRepo) PricingForQuote(context.Context, float64, float64) (*QuotePricing, error) {
+	return nil, fmt.Errorf("published market pricing unavailable in memory repository")
 }
 
 type TrustSubject struct {

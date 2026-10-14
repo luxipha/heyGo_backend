@@ -1,13 +1,18 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/gin-gonic/gin"
 )
 
 const userContextKey = "authenticated-user"
@@ -15,16 +20,26 @@ const userContextKey = "authenticated-user"
 type Middleware struct {
 	verifier sharedauth.Verifier
 	users    UserStore
+	pool     *pgxpool.Pool
+	store    *PostgresUserStore
 }
 
 func NewMiddleware(verifier sharedauth.Verifier, users UserStore) *Middleware {
 	return &Middleware{verifier: verifier, users: users}
 }
 
+func NewSessionMiddleware(pool *pgxpool.Pool, users *PostgresUserStore) *Middleware {
+	return &Middleware{pool: pool, store: users}
+}
+
 func (m *Middleware) Authenticate(ctx *gin.Context) {
 	rawToken := bearerToken(ctx.GetHeader("Authorization"))
 	if rawToken == "" && strings.EqualFold(ctx.GetHeader("Upgrade"), "websocket") {
 		rawToken = ctx.Query("access_token")
+	}
+	if m.pool != nil && m.store != nil {
+		m.authenticateSession(ctx, rawToken)
+		return
 	}
 	identity, err := m.verifier.Verify(ctx.Request.Context(), rawToken)
 	if err != nil {
@@ -43,6 +58,45 @@ func (m *Middleware) Authenticate(ctx *gin.Context) {
 	ctx.Set(userContextKey, user)
 	ctx.Next()
 }
+
+func (m *Middleware) authenticateSession(ctx *gin.Context, rawToken string) {
+	if rawToken == "" {
+		ctx.AbortWithStatusJSON(http.StatusUnauthorized, contracts.APIErrorResponse{Error: contracts.APIError{Code: "authentication_required", Message: "Valid HeyGo authentication is required"}})
+		return
+	}
+	hash := TokenHash(rawToken)
+	var userID string
+	err := m.pool.QueryRow(ctx.Request.Context(), `UPDATE user_sessions SET last_used_at=NOW()
+		WHERE access_token_hash=$1 AND revoked_at IS NULL AND access_expires_at>NOW()
+		RETURNING user_id::TEXT`, hash).Scan(&userID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, contracts.APIErrorResponse{Error: contracts.APIError{Code: "authentication_unavailable", Message: "Authentication is temporarily unavailable"}})
+			return
+		}
+		ctx.AbortWithStatusJSON(http.StatusUnauthorized, contracts.APIErrorResponse{Error: contracts.APIError{Code: "authentication_required", Message: "Valid HeyGo authentication is required"}})
+		return
+	}
+	user, err := m.store.ByID(ctx.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, ErrAccountDeactivated) {
+			ctx.AbortWithStatusJSON(http.StatusForbidden, contracts.APIErrorResponse{Error: contracts.APIError{Code: "account_deactivated", Message: "This HeyGo account is deactivated"}})
+			return
+		}
+		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, contracts.APIErrorResponse{Error: contracts.APIError{Code: "authentication_unavailable", Message: "Authentication is temporarily unavailable"}})
+		return
+	}
+	ctx.Set(userContextKey, user)
+	ctx.Next()
+}
+
+func TokenHash(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+const AccessTokenLifetime = 15 * time.Minute
+const RefreshTokenLifetime = 30 * 24 * time.Hour
 
 func RequireRole(role string) gin.HandlerFunc {
 	return func(ctx *gin.Context) {

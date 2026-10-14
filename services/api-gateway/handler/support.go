@@ -62,6 +62,7 @@ func registerSupportRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, f
 	authenticated.GET("/support/topics", a.userTopics)
 	authenticated.POST("/support/uploads", a.createUpload)
 	authenticated.POST("/trips/:tripID/issues", a.createTripIssue)
+	authenticated.POST("/trips/:tripID/sos", a.createSOS)
 	authenticated.POST("/support/tickets", a.createTicket)
 	authenticated.GET("/support/cases", a.userCases)
 	authenticated.GET("/support/cases/:caseID", a.userCase)
@@ -76,10 +77,16 @@ func registerAdminSupportRoutes(admin *gin.RouterGroup, pool *pgxpool.Pool, file
 	admin.POST("/support/topics", csrf, a.createTopic)
 	admin.PATCH("/support/topics/:code", csrf, a.updateTopic)
 	admin.GET("/support/cases", a.adminCases)
+	admin.POST("/support/cases", csrf, a.adminCreateCase)
 	admin.GET("/support/cases/:caseID", a.adminCase)
+	admin.GET("/support/cases/:caseID/contact", a.adminCaseContact)
 	admin.GET("/support/cases/:caseID/messages", a.adminMessages)
 	admin.POST("/support/cases/:caseID/messages", csrf, a.adminMessage)
 	admin.PATCH("/support/cases/:caseID", csrf, a.updateCase)
+	admin.POST("/support/cases/:caseID/escalations", csrf, a.adminEscalateCase)
+	admin.GET("/support/cases/:caseID/escalations", a.adminCaseEscalations)
+	admin.POST("/support/cases/:caseID/outcome", csrf, a.adminCaseOutcome)
+	admin.GET("/support/cases/:caseID/outcome", a.adminReadCaseOutcome)
 	admin.POST("/support/cases/:caseID/read", csrf, a.adminRead)
 }
 
@@ -292,6 +299,19 @@ func validateSupportMessage(body string, uploadIDs []string, clientID string) er
 }
 
 func (a *supportAPI) createCase(ctx *gin.Context, owner, audience string, body createSupportCaseBody, tripID, topicKind, priority string) (string, error) {
+	requestPayload, _ := json.Marshal(gin.H{"topicCode": body.TopicCode, "detailCode": body.DetailCode, "subject": body.Subject, "description": strings.TrimSpace(body.Description), "uploadIds": body.UploadIDs, "tripId": tripID, "audience": audience})
+	var existing string
+	var same bool
+	replayErr := a.pool.QueryRow(ctx.Request.Context(), `SELECT case_id::TEXT,payload=$3::JSONB FROM support_case_requests WHERE owner_id=$1::UUID AND client_request_id=$2::UUID`, owner, body.ClientID, requestPayload).Scan(&existing, &same)
+	if replayErr == nil {
+		if !same {
+			return "", errors.New("support request identity was reused")
+		}
+		return existing, nil
+	}
+	if !errors.Is(replayErr, pgx.ErrNoRows) {
+		return "", replayErr
+	}
 	var topicLabel string
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT label FROM support_topics WHERE code=$1 AND topic_kind=$2 AND enabled AND (audience='both' OR audience=$3)`, body.TopicCode, topicKind, audience).Scan(&topicLabel)
 	if err != nil {
@@ -314,6 +334,19 @@ func (a *supportAPI) createCase(ctx *gin.Context, owner, audience string, body c
 		return "", err
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	if _, err := tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(hashtext($1))`, "support-request:"+owner+":"+body.ClientID); err != nil {
+		return "", err
+	}
+	replayErr = tx.QueryRow(ctx.Request.Context(), `SELECT case_id::TEXT,payload=$3::JSONB FROM support_case_requests WHERE owner_id=$1::UUID AND client_request_id=$2::UUID`, owner, body.ClientID, requestPayload).Scan(&existing, &same)
+	if replayErr == nil {
+		if !same {
+			return "", errors.New("support request identity was reused")
+		}
+		return existing, nil
+	}
+	if !errors.Is(replayErr, pgx.ErrNoRows) {
+		return "", replayErr
+	}
 	caseID, messageID := uuid.NewString(), uuid.NewString()
 	var trip any
 	if tripID != "" {
@@ -331,6 +364,9 @@ func (a *supportAPI) createCase(ctx *gin.Context, owner, audience string, body c
 		return "", err
 	}
 	if _, err = messaging.AppendEventTx(ctx.Request.Context(), tx, owner, "support-case-created:"+caseID, "support.case.updated", json.RawMessage(`{"caseId":"`+caseID+`","status":"open"}`)); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO support_case_requests(owner_id,client_request_id,case_id,payload) VALUES($1::UUID,$2::UUID,$3::UUID,$4::JSONB)`, owner, body.ClientID, caseID, requestPayload); err != nil {
 		return "", err
 	}
 	if err = tx.Commit(ctx.Request.Context()); err != nil {
@@ -374,6 +410,10 @@ func consumeSupportUploads(ctx *gin.Context, tx pgx.Tx, owner, messageID string,
 }
 
 func supportFailure(ctx *gin.Context, err error) {
+	if strings.Contains(err.Error(), "support request identity was reused") {
+		driverError(ctx, 409, "support_request_id_reused", "Request identity belongs to another Support request")
+		return
+	}
 	if strings.Contains(err.Error(), "support topic is not available") || strings.Contains(err.Error(), "evidence upload") || strings.Contains(err.Error(), "message must contain") || strings.Contains(err.Error(), "client message ID was reused") || strings.Contains(err.Error(), "subject must be") {
 		driverError(ctx, http.StatusBadRequest, "invalid_support_case", err.Error())
 		return
@@ -460,7 +500,7 @@ func (a *supportAPI) listCases(ctx *gin.Context, owner string, staff bool) {
 		COALESCE((SELECT COUNT(*) FROM support_case_messages m LEFT JOIN support_case_reads r ON r.case_id=c.id AND r.reader_kind=$2 AND r.reader_id=$3::UUID
 			WHERE m.case_id=c.id AND m.sender_kind<>$2 AND m.created_at>COALESCE(r.read_at,'epoch'::TIMESTAMPTZ)),0)::INT
 		FROM support_cases c JOIN support_topics t ON t.code=c.topic_code JOIN users u ON u.id=c.opened_by
-		WHERE ($1::UUID IS NULL OR c.opened_by=$1::UUID) AND ($4='all' OR c.status=$4)
+		WHERE ($1::UUID IS NULL OR c.opened_by=$1::UUID) AND ($4='all' OR ($4='attention' AND c.status NOT IN ('resolved','closed')) OR c.status=$4)
 		AND ($5::TIMESTAMPTZ IS NULL OR (c.last_message_at,c.id)<($5,$6::UUID))
 		ORDER BY c.last_message_at DESC,c.id DESC LIMIT $7`, nullableSupportOwner(owner), supportReaderKind(staff), supportReaderID(ctx, staff, owner), status, supportCursorTime(cursor), supportCursorID(cursor), limit+1)
 	if err != nil {
@@ -472,7 +512,8 @@ func (a *supportAPI) listCases(ctx *gin.Context, owner string, staff bool) {
 	var lastAt time.Time
 	var lastID string
 	for rows.Next() {
-		var id, topic, label, subject, state, priority, assigned, requester, humanID string
+		var id, topic, label, subject, state, priority, requester, humanID string
+		var assigned *string
 		var trip *string
 		var number int64
 		var created, updated, last time.Time
@@ -481,7 +522,7 @@ func (a *supportAPI) listCases(ctx *gin.Context, owner string, staff bool) {
 			driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Support cases are unavailable")
 			return
 		}
-		item := gin.H{"id": id, "reference": fmt.Sprintf("HG-%08d", number), "topicCode": topic, "topicLabel": label, "tripId": trip, "subject": subject, "status": state, "priority": priority, "assignedAdminId": emptyAsNil(assigned), "createdAt": created, "updatedAt": updated, "lastMessageAt": last, "unreadCount": unread}
+		item := gin.H{"id": id, "reference": fmt.Sprintf("HG-%08d", number), "topicCode": topic, "topicLabel": label, "tripId": trip, "subject": subject, "status": state, "priority": priority, "assignedAdminId": assigned, "createdAt": created, "updatedAt": updated, "lastMessageAt": last, "unreadCount": unread}
 		if staff {
 			item["requesterId"] = requester
 			item["requesterHumanId"] = humanID
@@ -543,7 +584,7 @@ func emptyAsNil(value string) any {
 
 func validSupportFilter(value string) bool {
 	switch value {
-	case "all", "open", "in_progress", "waiting_on_user", "resolved", "closed":
+	case "all", "attention", "open", "in_progress", "waiting_on_user", "resolved", "closed":
 		return true
 	}
 	return false
@@ -578,6 +619,32 @@ func (a *supportAPI) adminCase(ctx *gin.Context) {
 	a.readCase(ctx, caseID, "", true)
 }
 
+func (a *supportAPI) adminCaseContact(ctx *gin.Context) {
+	caseID, ok := supportCaseID(ctx)
+	if !ok {
+		return
+	}
+	var requesterID string
+	var phone, email *string
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT u.id::TEXT,u.phone_e164,u.email FROM support_cases c JOIN users u ON u.id=c.opened_by WHERE c.id=$1::UUID`, caseID).Scan(&requesterID, &phone, &email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		driverError(ctx, http.StatusNotFound, "support_case_not_found", "Support case was not found")
+		return
+	}
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Case contact is unavailable")
+		return
+	}
+	_, err = a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_type,target_id,details,before_state,after_state)
+		VALUES($1,$2::UUID,'support.case.contact_viewed','support_case',$3,'{}'::JSONB,'{}'::JSONB,'{}'::JSONB)`, uuid.New(), currentAdmin(ctx).ID, caseID)
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Case contact is unavailable")
+		return
+	}
+	ctx.Header("Cache-Control", "no-store")
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"caseId": caseID, "requesterId": requesterID, "phone": phone, "email": email}})
+}
+
 func (a *supportAPI) readCase(ctx *gin.Context, caseID, owner string, staff bool) {
 	var item gin.H
 	var opener, requesterHumanID, topic, label, subject, state, priority, audience string
@@ -599,6 +666,13 @@ func (a *supportAPI) readCase(ctx *gin.Context, caseID, owner string, staff bool
 	item = gin.H{"id": caseID, "reference": fmt.Sprintf("HG-%08d", number), "openedBy": opener, "audience": audience, "topicCode": topic, "topicLabel": label, "tripId": trip, "subject": subject, "status": state, "priority": priority, "assignedAdminId": emptyAsNil(assigned), "createdAt": created, "updatedAt": updated}
 	if staff {
 		item["requesterHumanId"] = requesterHumanID
+		var createdBy, creationReason *string
+		if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT created_by_admin::TEXT,staff_creation_reason FROM support_cases WHERE id=$1::UUID`, caseID).Scan(&createdBy, &creationReason); err != nil {
+			driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Case origin is unavailable")
+			return
+		}
+		item["createdByAdminId"] = createdBy
+		item["staffCreationReason"] = creationReason
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: item})
 }
@@ -887,7 +961,13 @@ func (a *supportAPI) markRead(ctx *gin.Context, caseID, readerID, kind string) {
 		driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Support read state is unavailable")
 		return
 	}
-	tag, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO support_case_reads(case_id,reader_kind,reader_id,read_at)
+	tx, err := a.pool.Begin(ctx.Request.Context())
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Support read state could not be saved")
+		return
+	}
+	defer tx.Rollback(ctx.Request.Context())
+	tag, err := tx.Exec(ctx.Request.Context(), `INSERT INTO support_case_reads(case_id,reader_kind,reader_id,read_at)
 		SELECT $1::UUID,$2,$3::UUID,m.created_at FROM support_case_messages m WHERE m.case_id=$1::UUID AND m.id=$4::UUID
 		ON CONFLICT(case_id,reader_kind,reader_id) DO UPDATE SET read_at=GREATEST(support_case_reads.read_at,EXCLUDED.read_at)`, caseID, kind, readerID, through.String())
 	if err != nil {
@@ -896,6 +976,16 @@ func (a *supportAPI) markRead(ctx *gin.Context, caseID, readerID, kind string) {
 	}
 	if tag.RowsAffected() == 0 {
 		driverError(ctx, http.StatusNotFound, "message_not_found", "Support message was not found")
+		return
+	}
+	if kind == "staff" {
+		if err := adminAudit(ctx, tx, "support.case.read", "", gin.H{"caseId": caseID, "throughMessageId": through.String()}); err != nil {
+			driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Support read state could not be saved")
+			return
+		}
+	}
+	if tx.Commit(ctx.Request.Context()) != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Support read state could not be saved")
 		return
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"caseId": caseID, "throughMessageId": through.String()}})

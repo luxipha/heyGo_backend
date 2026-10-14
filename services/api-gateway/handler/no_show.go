@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 )
 
 func registerNoShowDriverRoutes(g *gin.RouterGroup, a *driverAPI) {
@@ -63,9 +63,10 @@ func (a *driverAPI) noShowEligibility(ctx *gin.Context) {
 		return
 	}
 	var riderID, status, market string
-	var arrivedAt *time.Time
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at
-		FROM trips WHERE id=$1::UUID AND assigned_driver_id=$2::UUID`, tripID, driverID(ctx)).Scan(&riderID, &status, &market, &arrivedAt)
+	var arrivedAt, cancelledAt *time.Time
+	var cancelledByRider bool
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at,cancelled_at,COALESCE(cancellation_actor_id=rider_id,FALSE)
+		FROM trips WHERE id=$1::UUID AND assigned_driver_id=$2::UUID`, tripID, driverID(ctx)).Scan(&riderID, &status, &market, &arrivedAt, &cancelledAt, &cancelledByRider)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "trip_not_found", "Trip was not found")
 		return
@@ -84,7 +85,7 @@ func (a *driverAPI) noShowEligibility(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show eligibility is unavailable")
 		return
 	}
-	if arrivedAt == nil || status != "arrived" {
+	if arrivedAt == nil || status != "arrived" && !(status == "cancelled" && cancelledByRider && cancelledAt != nil) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": tripID, "eligible": false, "reason": "driver_not_arrived"}})
 		return
 	}
@@ -92,9 +93,13 @@ func (a *driverAPI) noShowEligibility(ctx *gin.Context) {
 	var waitMinutes int
 	var fee int64
 	var dbNow time.Time
+	policyAt := time.Now().UTC()
+	if cancelledAt != nil {
+		policyAt = *cancelledAt
+	}
 	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,wait_minutes,fee_kobo FROM no_show_policies
-		WHERE market_code=$1 AND status='approved' AND effective_from<=NOW() AND (effective_until IS NULL OR effective_until>NOW())
-		ORDER BY version DESC LIMIT 1`, market).Scan(&policyID, &waitMinutes, &fee)
+		WHERE market_code=$1 AND status='approved' AND effective_from<=$2 AND (effective_until IS NULL OR effective_until>$2)
+		AND approved_at<=$2 ORDER BY version DESC LIMIT 1`, market, policyAt).Scan(&policyID, &waitMinutes, &fee)
 	if errors.Is(err, pgx.ErrNoRows) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": tripID, "eligible": false, "reason": "market_policy_not_configured"}})
 		return
@@ -108,6 +113,10 @@ func (a *driverAPI) noShowEligibility(ctx *gin.Context) {
 		return
 	}
 	eligibleAt := arrivedAt.Add(time.Duration(waitMinutes) * time.Minute)
+	if cancelledAt != nil && cancelledAt.Before(eligibleAt) {
+		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": tripID, "eligible": false, "reason": "rider_cancelled_before_wait_period", "eligibleAt": eligibleAt}})
+		return
+	}
 	if dbNow.Before(eligibleAt) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": tripID, "eligible": false, "reason": "wait_period_not_elapsed", "arrivedAt": arrivedAt, "eligibleAt": eligibleAt, "waitMinutes": waitMinutes, "feeKobo": fee, "currency": "NGN"}})
 		return
@@ -130,9 +139,10 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 	}
 	defer tx.Rollback(dbctx)
 	var rider, status, market string
-	var arrivedAt *time.Time
-	err = tx.QueryRow(dbctx, `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at FROM trips
-		WHERE id=$1::UUID AND assigned_driver_id=$2::UUID FOR UPDATE`, tripID, driver).Scan(&rider, &status, &market, &arrivedAt)
+	var arrivedAt, cancelledAt *time.Time
+	var cancelledByRider bool
+	err = tx.QueryRow(dbctx, `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at,cancelled_at,COALESCE(cancellation_actor_id=rider_id,FALSE) FROM trips
+		WHERE id=$1::UUID AND assigned_driver_id=$2::UUID FOR UPDATE`, tripID, driver).Scan(&rider, &status, &market, &arrivedAt, &cancelledAt, &cancelledByRider)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "trip_not_found", "Trip was not found")
 		return
@@ -141,17 +151,21 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
 		return
 	}
-	if status != "arrived" || arrivedAt == nil {
-		driverError(ctx, http.StatusConflict, "no_show_not_eligible", "Only an arrived, active trip can have a no-show claim")
+	if arrivedAt == nil || status != "arrived" && !(status == "cancelled" && cancelledByRider && cancelledAt != nil) {
+		driverError(ctx, http.StatusConflict, "no_show_not_eligible", "Only an arrived trip or eligible Rider cancellation can have a no-show claim")
 		return
 	}
 	var policyID string
 	var waitMinutes int
 	var fee int64
 	var dbNow time.Time
+	policyAt := time.Now().UTC()
+	if cancelledAt != nil {
+		policyAt = *cancelledAt
+	}
 	err = tx.QueryRow(dbctx, `SELECT id::TEXT,wait_minutes,fee_kobo FROM no_show_policies
-		WHERE market_code=$1 AND status='approved' AND effective_from<=NOW() AND (effective_until IS NULL OR effective_until>NOW())
-		ORDER BY version DESC LIMIT 1 FOR SHARE`, market).Scan(&policyID, &waitMinutes, &fee)
+		WHERE market_code=$1 AND status='approved' AND effective_from<=$2 AND (effective_until IS NULL OR effective_until>$2)
+		AND approved_at<=$2 ORDER BY version DESC LIMIT 1 FOR SHARE`, market, policyAt).Scan(&policyID, &waitMinutes, &fee)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusConflict, "no_show_policy_missing", "No-show claims are not enabled for this market")
 		return
@@ -165,6 +179,10 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 		return
 	}
 	eligibleAt := arrivedAt.Add(time.Duration(waitMinutes) * time.Minute)
+	if cancelledAt != nil && cancelledAt.Before(eligibleAt) {
+		driverError(ctx, http.StatusConflict, "rider_cancelled_before_wait_period", "Rider cancellation occurred before the configured wait period")
+		return
+	}
 	if dbNow.Before(eligibleAt) {
 		driverError(ctx, http.StatusConflict, "no_show_wait_not_elapsed", "The configured pickup wait period has not elapsed")
 		return
@@ -182,10 +200,12 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 	}
 	// Submitting a claim ends this trip as a no-show candidate. Admin approval
 	// creates a rider debt; it does not immediately move money.
-	if _, err = tx.Exec(dbctx, `UPDATE trips SET status='cancelled',cancellation_reason='no_show_claim_submitted',cancellation_actor_id=$2::UUID,cancelled_at=NOW(),updated_at=NOW(),version=version+1
-		WHERE id=$1::UUID AND status='arrived'`, tripID, driver); err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
-		return
+	if status == "arrived" {
+		if _, err = tx.Exec(dbctx, `UPDATE trips SET status='cancelled',cancellation_reason='no_show_claim_submitted',cancellation_actor_id=$2::UUID,cancelled_at=NOW(),updated_at=NOW(),version=version+1
+			WHERE id=$1::UUID AND status='arrived'`, tripID, driver); err != nil {
+			driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
+			return
+		}
 	}
 	if _, err = tx.Exec(dbctx, `UPDATE trip_no_show_debt_settlements SET status='released' WHERE trip_id=$1::UUID AND status='pending'`, tripID); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
@@ -203,12 +223,14 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 		return
 	}
 	payload := gin.H{"tripId": tripID, "claimId": claimID, "status": "pending", "feeKobo": fee, "currency": "NGN"}
-	if _, err = tx.Exec(dbctx, `INSERT INTO trip_event_outbox(trip_id,topic,recipient_id,payload,correlation_id,attempt)
+	if status == "arrived" {
+		if _, err = tx.Exec(dbctx, `INSERT INTO trip_event_outbox(trip_id,topic,recipient_id,payload,correlation_id,attempt)
 		VALUES($1::UUID,$2,$3::UUID,jsonb_build_object('trip',jsonb_build_object('id',$1::TEXT,'status','cancelled','reasonCode','no_show_claim_submitted')),$4,0),
 		($1::UUID,$2,$5::UUID,jsonb_build_object('trip',jsonb_build_object('id',$1::TEXT,'status','cancelled','reasonCode','no_show_claim_submitted')),$4,0)
 		ON CONFLICT DO NOTHING`, tripID, contracts.TripEventCancelled, rider, correlation.FromContext(dbctx), driver); err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
-		return
+			driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
+			return
+		}
 	}
 	if _, err = insertDriverEvent(ctx, tx, driver, contracts.TripEventNoShowClaimUpdated, payload); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
@@ -255,11 +277,13 @@ func (a *driverAPI) driverNoShowClaims(ctx *gin.Context) {
 
 func registerNoShowAdminRoutes(g *gin.RouterGroup, a *adminAPI) {
 	g.GET("/no-show/policies", a.listNoShowPolicies)
+	g.GET("/no-show/policies/:id", a.noShowPolicyDetail)
 	g.POST("/no-show/policies", a.requireCSRF, a.createNoShowPolicy)
 	g.POST("/no-show/policies/:id/approve", a.requireCSRF, a.approveNoShowPolicy)
 	g.POST("/no-show/policies/:id/retirement-requests", a.requireCSRF, a.requestNoShowPolicyRetirement)
 	g.POST("/no-show/policies/:id/retirement-requests/:requestID/approve", a.requireCSRF, a.approveNoShowPolicyRetirement)
 	g.GET("/no-show/claims", a.listNoShowClaims)
+	g.GET("/no-show/claims/:id", a.noShowClaimDetail)
 	g.POST("/no-show/claims/:id/review", a.requireCSRF, a.reviewNoShowClaim)
 }
 
@@ -305,6 +329,34 @@ func (a *adminAPI) listNoShowPolicies(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: items})
+}
+
+func (a *adminAPI) noShowPolicyDetail(ctx *gin.Context) {
+	id, ok := noShowAdminID(ctx)
+	if !ok {
+		return
+	}
+	var market, state, creator string
+	var approver *string
+	var version, waitMinutes int
+	var feeKobo int64
+	var effectiveFrom, createdAt time.Time
+	var effectiveUntil, approvedAt *time.Time
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT market_code,version,wait_minutes,fee_kobo,status,effective_from,effective_until,
+		created_by::TEXT,approved_by::TEXT,approved_at,created_at FROM no_show_policies WHERE id=$1::UUID`, id).Scan(
+		&market, &version, &waitMinutes, &feeKobo, &state, &effectiveFrom, &effectiveUntil, &creator, &approver, &approvedAt, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		driverError(ctx, http.StatusNotFound, "no_show_policy_not_found", "No-show policy was not found")
+		return
+	}
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show policy is unavailable")
+		return
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"id": id, "marketCode": market, "version": version,
+		"waitMinutes": waitMinutes, "feeKobo": feeKobo, "currency": "NGN", "status": state,
+		"effectiveFrom": effectiveFrom, "effectiveUntil": effectiveUntil, "createdBy": creator,
+		"approvedBy": approver, "approvedAt": approvedAt, "createdAt": createdAt}})
 }
 
 func (a *adminAPI) createNoShowPolicy(ctx *gin.Context) {
@@ -539,6 +591,29 @@ func (a *adminAPI) listNoShowClaims(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: items})
 }
 
+func (a *adminAPI) noShowClaimDetail(ctx *gin.Context) {
+	id, ok := noShowAdminID(ctx)
+	if !ok {
+		return
+	}
+	var claimID, tripID, driverID, riderID, market, status, policyID string
+	var fee int64
+	var arrived, eligible, submitted time.Time
+	var reviewed *time.Time
+	var note *string
+	var policyVersion, waitMinutes int
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT c.id::TEXT,c.trip_id::TEXT,c.driver_id::TEXT,c.rider_id::TEXT,c.market_code,c.fee_kobo,c.arrived_at,c.eligible_at,c.status,c.submitted_at,c.reviewed_at,c.review_note,c.policy_id::TEXT,p.version,p.wait_minutes FROM driver_no_show_claims c JOIN no_show_policies p ON p.id=c.policy_id WHERE c.id=$1::UUID`, id).Scan(&claimID, &tripID, &driverID, &riderID, &market, &fee, &arrived, &eligible, &status, &submitted, &reviewed, &note, &policyID, &policyVersion, &waitMinutes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		driverError(ctx, http.StatusNotFound, "no_show_claim_not_found", "No-show claim was not found")
+		return
+	}
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim is unavailable")
+		return
+	}
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"id": claimID, "tripId": tripID, "driverId": driverID, "riderId": riderID, "marketCode": market, "feeKobo": fee, "currency": "NGN", "arrivedAt": arrived, "eligibleAt": eligible, "status": status, "submittedAt": submitted, "reviewedAt": reviewed, "reviewNote": note, "policyId": policyID, "policyVersion": policyVersion, "policyWaitMinutes": waitMinutes}})
+}
+
 func (a *adminAPI) reviewNoShowClaim(ctx *gin.Context) {
 	id, ok := noShowAdminID(ctx)
 	if !ok {
@@ -582,6 +657,11 @@ func (a *adminAPI) reviewNoShowClaim(ctx *gin.Context) {
 	}
 	if err == nil && b.Outcome == "approved" {
 		_, err = tx.Exec(dbctx, `INSERT INTO rider_no_show_debts(id,claim_id,rider_id,beneficiary_driver_id,amount_kobo,status) VALUES($1::UUID,$2::UUID,$3::UUID,$4::UUID,$5,'due')`, uuid.NewString(), id, rider, driver, fee)
+	}
+	if err == nil && b.Outcome == "approved" {
+		_, err = tx.Exec(dbctx, `INSERT INTO casperid_trust_deliveries(external_event_id,casper_id_user_id,actor_role,event_type,interaction_reference,occurred_at)
+			SELECT 'trip_'||$1||'_rider_no_show_upheld',u.casper_id_user_id,'consumer','interaction.no_show_by_consumer',$1,NOW()
+			FROM users u WHERE u.id=$2::UUID AND u.casper_id_user_id<>'' ON CONFLICT(external_event_id) DO NOTHING`, trip, rider)
 	}
 	if err == nil {
 		err = adminAudit(ctx, tx, "no_show_claim_"+b.Outcome, driver, gin.H{"claimId": id, "tripId": trip, "riderId": rider, "feeKobo": fee, "note": strings.TrimSpace(b.Note)})

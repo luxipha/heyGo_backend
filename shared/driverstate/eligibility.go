@@ -25,18 +25,23 @@ type Eligibility struct {
 
 func Read(ctx context.Context, pool *pgxpool.Pool, driverID string) (Eligibility, error) {
 	result := Eligibility{Required: 7, AdminStatus: "pending"}
-	var nin, verified bool
+	var accountVerified bool
+	var manualVerification string
 	var inspection string
-	err := pool.QueryRow(ctx, `SELECT u.nin_verified,u.verified, COALESCE(p.admin_status,'pending'),
+	err := pool.QueryRow(ctx, `SELECT u.phone_verified_at IS NOT NULL OR u.email_verified,COALESCE(p.manual_verification_status,'pending'),COALESCE(p.admin_status,'pending'),
 		COALESCE((SELECT i.status FROM driver_inspections i WHERE i.driver_id=u.id ORDER BY i.created_at DESC, i.id DESC LIMIT 1),'required')
-		FROM users u LEFT JOIN driver_profiles p ON p.driver_id=u.id WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driverID).Scan(&nin, &verified, &result.AdminStatus, &inspection)
+		FROM users u LEFT JOIN driver_profiles p ON p.driver_id=u.id WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driverID).Scan(&accountVerified, &manualVerification, &result.AdminStatus, &inspection)
 	if err != nil {
 		return Eligibility{}, fmt.Errorf("read driver eligibility: %w", err)
 	}
-	if nin && verified {
-		result.Requirements = append(result.Requirements, Requirement{Type: "nin", Status: "approved", Complete: true})
+	if accountVerified && manualVerification == "approved" {
+		result.Requirements = append(result.Requirements, Requirement{Type: "manual_identity", Status: "approved", Complete: true})
 	} else {
-		result.Requirements = append(result.Requirements, Requirement{Type: "nin", Status: "required"})
+		status := manualVerification
+		if !accountVerified || status == "" {
+			status = "required"
+		}
+		result.Requirements = append(result.Requirements, Requirement{Type: "manual_identity", Status: status})
 	}
 	rows, err := pool.Query(ctx, `SELECT DISTINCT ON (type) type,
 		CASE WHEN status='approved' AND expires_at IS NOT NULL AND expires_at<=NOW() THEN 'expired' ELSE status END

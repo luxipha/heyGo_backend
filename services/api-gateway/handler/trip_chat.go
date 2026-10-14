@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/messaging"
 )
 
 const (
@@ -38,6 +38,7 @@ type tripChatMessage struct {
 	ID              string     `json:"id"`
 	TripID          string     `json:"tripId"`
 	SenderID        string     `json:"senderId"`
+	RecipientID     string     `json:"recipientId"`
 	ClientMessageID string     `json:"clientMessageId"`
 	Body            string     `json:"body"`
 	CreatedAt       time.Time  `json:"createdAt"`
@@ -109,7 +110,8 @@ func (a *tripChatAPI) access(ctx *gin.Context, tripID string) (*tripChatAccess, 
 
 func (a *tripChatAPI) list(ctx *gin.Context) {
 	tripID := ctx.Param("tripID")
-	if _, ok := a.access(ctx, tripID); !ok {
+	access, ok := a.access(ctx, tripID)
+	if !ok {
 		return
 	}
 	limit := tripChatDefaultLimit
@@ -139,9 +141,9 @@ func (a *tripChatAPI) list(ctx *gin.Context) {
 		messageIDText := messageID.String()
 		beforeTime, beforeID = &stamp, &messageIDText
 	}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT id::TEXT,trip_id::TEXT,sender_id::TEXT,client_message_id::TEXT,body,created_at,read_at
-		FROM trip_chat_messages WHERE trip_id=$1::UUID AND ($2::TIMESTAMPTZ IS NULL OR (created_at,id)<($2,$3::UUID))
-		ORDER BY created_at DESC,id DESC LIMIT $4`, tripID, beforeTime, beforeID, limit+1)
+	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT id::TEXT,trip_id::TEXT,sender_id::TEXT,recipient_id::TEXT,client_message_id::TEXT,body,created_at,read_at
+		FROM trip_chat_messages WHERE trip_id=$1::UUID AND ((sender_id=$5::UUID AND recipient_id=$6::UUID) OR (sender_id=$6::UUID AND recipient_id=$5::UUID)) AND ($2::TIMESTAMPTZ IS NULL OR (created_at,id)<($2,$3::UUID))
+		ORDER BY created_at DESC,id DESC LIMIT $4`, tripID, beforeTime, beforeID, limit+1, access.ParticipantID, access.OtherID)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "chat_unavailable", "Trip chat history is unavailable")
 		return
@@ -150,7 +152,7 @@ func (a *tripChatAPI) list(ctx *gin.Context) {
 	items := make([]tripChatMessage, 0, limit)
 	for rows.Next() {
 		var item tripChatMessage
-		if err := rows.Scan(&item.ID, &item.TripID, &item.SenderID, &item.ClientMessageID, &item.Body, &item.CreatedAt, &item.ReadAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.TripID, &item.SenderID, &item.RecipientID, &item.ClientMessageID, &item.Body, &item.CreatedAt, &item.ReadAt); err != nil {
 			driverError(ctx, http.StatusServiceUnavailable, "chat_unavailable", "Trip chat history is unavailable")
 			return
 		}
@@ -219,13 +221,17 @@ func (a *tripChatAPI) send(ctx *gin.Context) {
 	err = tx.QueryRow(ctx.Request.Context(), `INSERT INTO trip_chat_messages(id,trip_id,sender_id,recipient_id,client_message_id,body)
 		VALUES($1::UUID,$2::UUID,$3::UUID,$4::UUID,$5::UUID,$6)
 		ON CONFLICT(trip_id,sender_id,client_message_id) DO NOTHING
-		RETURNING id::TEXT,trip_id::TEXT,sender_id::TEXT,client_message_id::TEXT,body,created_at,read_at`, messageID, tripID, access.ParticipantID, access.OtherID, clientID.String(), text).
-		Scan(&item.ID, &item.TripID, &item.SenderID, &item.ClientMessageID, &item.Body, &item.CreatedAt, &item.ReadAt)
+		RETURNING id::TEXT,trip_id::TEXT,sender_id::TEXT,recipient_id::TEXT,client_message_id::TEXT,body,created_at,read_at`, messageID, tripID, access.ParticipantID, access.OtherID, clientID.String(), text).
+		Scan(&item.ID, &item.TripID, &item.SenderID, &item.RecipientID, &item.ClientMessageID, &item.Body, &item.CreatedAt, &item.ReadAt)
 	created := err == nil
 	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,trip_id::TEXT,sender_id::TEXT,client_message_id::TEXT,body,created_at,read_at
+		err = tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,trip_id::TEXT,sender_id::TEXT,recipient_id::TEXT,client_message_id::TEXT,body,created_at,read_at
 			FROM trip_chat_messages WHERE trip_id=$1::UUID AND sender_id=$2::UUID AND client_message_id=$3::UUID`, tripID, access.ParticipantID, clientID.String()).
-			Scan(&item.ID, &item.TripID, &item.SenderID, &item.ClientMessageID, &item.Body, &item.CreatedAt, &item.ReadAt)
+			Scan(&item.ID, &item.TripID, &item.SenderID, &item.RecipientID, &item.ClientMessageID, &item.Body, &item.CreatedAt, &item.ReadAt)
+		if err == nil && item.RecipientID != access.OtherID {
+			driverError(ctx, 409, "message_assignment_changed", "Driver assignment changed; start a new message")
+			return
+		}
 		if err == nil && item.Body != text {
 			driverError(ctx, http.StatusConflict, "message_id_reused", "Client message ID was already used for different message text")
 			return
@@ -275,7 +281,7 @@ func (a *tripChatAPI) markRead(ctx *gin.Context) {
 	}
 	defer tx.Rollback(ctx.Request.Context())
 	var throughTime time.Time
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT created_at FROM trip_chat_messages WHERE id=$1::UUID AND trip_id=$2::UUID AND recipient_id=$3::UUID`, throughID.String(), tripID, access.ParticipantID).Scan(&throughTime)
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT created_at FROM trip_chat_messages WHERE id=$1::UUID AND trip_id=$2::UUID AND recipient_id=$3::UUID AND sender_id=$4::UUID`, throughID.String(), tripID, access.ParticipantID, access.OtherID).Scan(&throughTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "message_not_found", "Unread message was not found")
 		return
@@ -286,9 +292,9 @@ func (a *tripChatAPI) markRead(ctx *gin.Context) {
 	}
 	var count int64
 	err = tx.QueryRow(ctx.Request.Context(), `WITH updated AS (
-		UPDATE trip_chat_messages SET read_at=NOW() WHERE trip_id=$1::UUID AND recipient_id=$2::UUID
+		UPDATE trip_chat_messages SET read_at=NOW() WHERE trip_id=$1::UUID AND recipient_id=$2::UUID AND sender_id=$5::UUID
 		AND read_at IS NULL AND (created_at,id)<=($3,$4::UUID) RETURNING 1
-	) SELECT COUNT(*) FROM updated`, tripID, access.ParticipantID, throughTime, throughID.String()).Scan(&count)
+	) SELECT COUNT(*) FROM updated`, tripID, access.ParticipantID, throughTime, throughID.String(), access.OtherID).Scan(&count)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "chat_unavailable", "Read state could not be updated")
 		return

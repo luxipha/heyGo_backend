@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26.8-bookworm AS builder
+FROM golang:1.26.9-bookworm AS builder
 # Set working directory
 WORKDIR /app
 # Copy go mod and sum files
@@ -8,6 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 # Copy the source code
 COPY services/api-gateway/ ./services/api-gateway/
+COPY services/ride-agent-gateway/agent/ ./services/ride-agent-gateway/agent/
 COPY shared/ ./shared/
 # Build the api-gateway binary
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o main ./services/api-gateway

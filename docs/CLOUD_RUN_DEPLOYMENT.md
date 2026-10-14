@@ -12,7 +12,7 @@ pushes the exact commit SHA. It never publishes a mutable `latest` tag.
 
 ## Runtime contract
 
-All four services prefer Cloud Run's injected `PORT` and listen on every
+All five services prefer Cloud Run's injected `PORT` and listen on every
 interface. When `PORT` is absent, their existing local and Kubernetes settings
 remain compatible:
 
@@ -21,6 +21,7 @@ remain compatible:
 | `api-gateway` | `HTTP_ADDR=:8080` | HTTP/WebSocket | Public |
 | `driver-service` | `GRPC_ADDR=:9100` | gRPC/h2c | Internal |
 | `trip-service` | `GRPC_ADDR=:9000` | gRPC/h2c | Internal |
+| `ride-agent-gateway` | `PORT=8085` | HTTP | IAM-protected; Gateway only |
 | `payment-service` | `PAYMENT_HTTP_ADDR=:9200` | HTTP | Public webhook plus authenticated internal routes |
 
 Containers run as numeric user `65532:65532`. Application logs go to stdout by
@@ -35,20 +36,33 @@ are missing. Do not deploy a revision until these are ready:
 - PostgreSQL/PostGIS and a `DATABASE_URL` secret;
 - Pub/Sub topics/subscriptions from `infra/terraform` and `GCP_PROJECT_ID=heygo-ng`;
 - shared `INTERNAL_SERVICE_TOKEN` secret;
-- CasperID application ID and API secret;
+- API Gateway `OTP_PEPPER`, `HEYGO_ADMIN_SETTINGS_KEY`, and configured Admin-managed
+  Resend/SMTP settings for email OTP and Kudi settings for phone OTP; apply 062–063;
 - Monnify API key, secret key, and contract code for `payment-service`;
-- service URLs for API Gateway to call Driver, Trip, and Payment services.
+- service URLs for API Gateway to call Driver, Trip, Payment, and Ride Agent;
+- `RIDE_AGENT_INTERNAL_TOKEN` shared only by Gateway and Ride Agent, server-only
+  `RIDE_AGENT_PLACES_KEY`, and gateway `RIDE_AGENT_AUDIENCE` for IAM authentication.
 
-Optional R2, FCM, Resend, OpenTelemetry, CORS, and administrator settings should
-be configured before enabling their corresponding product features.
+Optional CasperID trust delivery, R2, FCM, Resend, OpenTelemetry, CORS, and
+administrator settings should be configured before enabling their corresponding
+product features. Email/phone sign-in and manual Driver approval do not require
+CasperID credentials.
+
+Staff email invitations and recovery additionally require `ADMIN_FRONTEND_URL`
+to be the Admin HTTPS origin and configured Admin Resend settings. The backend
+sends single-use links with tokens in the URL fragment; the Admin client must
+submit the token and password to the matching `/admin/auth/` endpoint. Verify
+the frontend uses `Referrer-Policy: no-referrer` on these pages and clears the
+fragment after reading it. Existing CLI-created staff need a Super Admin to
+send an email-verification link before email recovery is available.
 
 ## Deployment boundary
 
-Terraform now defines Cloud SQL, Secret Manager, and all four Cloud Run
+Terraform now defines Cloud SQL, Secret Manager, and all five Cloud Run
 services, but `deploy_services` defaults to `false`. Follow the staged
 procedure in `infra/terraform/README.md`: apply the database and secret
-containers, populate external CasperID and Monnify secret versions, create and
-run the separate migration job, and only then enable Cloud Run with an immutable
+containers, populate external Places and Monnify secret versions, create and run
+the separate migration job, and only then enable Cloud Run with an immutable
 image SHA. Keep `retain_pull_subscriber_permissions=true` through the first
 Cloud Run rollout. After authenticated push delivery is verified, set it to
 `false` in a separate cleanup plan. The services use a read/write database role
@@ -60,6 +74,10 @@ pull IAM grants are a temporary rollback safeguard; they do not start pull
 consumers or prevent push delivery. API Gateway remains capped at one instance
 while WebSocket connections are held in memory.
 
+Ride Agent uses protected HTTP; Gateway adds a Google identity token alongside
+its separate application token. Its runtime has no database or broker access.
+LLM planning remains disabled.
+
 Driver and Trip use gRPC over Cloud Run HTTP/2 and remain IAM-protected. API
 Gateway uses its runtime identity to obtain Google-signed ID tokens for those
 calls. API Gateway and Payment Service accept unauthenticated Cloud Run ingress;
@@ -70,7 +88,14 @@ After the initial Terraform deployment, use the manually dispatched `Deploy
 Cloud Run` GitHub Actions workflow with a full published Git SHA and the exact
 confirmation value `deploy`. It creates tagged candidate revisions with no
 production traffic after the migration job succeeds, checks the public `/ready`
-endpoints, and only then moves traffic to those verified revisions. Configure GitHub's `production` environment
+endpoints and protected Ride Agent `/health`, and only then moves traffic to those verified revisions. Configure GitHub's `production` environment
 with required reviewers before the first rollout. Terraform intentionally
 ignores later container-image changes so releases do not create configuration
 drift.
+
+These candidate checks do not establish a complete downstream journey: Gateway
+readiness checks PostgreSQL and Pub/Sub, not candidate Trip/Driver behavior.
+Require cloud-staging auth/matching/trip/payment/recovery evidence before
+production promotion. Apply migration 064 before Payment Service and verify the
+authenticated payment-event recovery Scheduler job. See
+[PAYMENT_EVENT_RECOVERY.md](PAYMENT_EVENT_RECOVERY.md).

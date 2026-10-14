@@ -1,6 +1,21 @@
 groups:
   - name: heygo-backend
     rules:
+      - alert: HeyGoPaymentEventBacklog
+        expr: heygo_payment_events_pending > 0 and heygo_payment_events_oldest_age_seconds > 300
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Payment webhook publication backlog is aging; inspect recovery job and Pub/Sub"}
+      - alert: HeyGoPaymentEventEnvelopeMissing
+        expr: heygo_payment_events_unrecoverable > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Legacy payment events need operator investigation; do not mark published without delivery evidence"}
+      - alert: HeyGoPaymentEventBacklogReadFailed
+        expr: heygo_payment_events_backlog_read_success == 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Payment event backlog cannot be read"}
       - alert: HeyGoHighHTTPErrorRate
         expr: sum(rate(heygo_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(heygo_http_requests_total[5m])), 1) > 0.05
         for: 10m

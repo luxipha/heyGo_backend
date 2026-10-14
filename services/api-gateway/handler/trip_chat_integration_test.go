@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 type tripChatUsers struct{ id string }
@@ -117,6 +117,15 @@ func TestTripChatLifecycleAndParticipants(t *testing.T) {
 	}
 	if history := request(driverRouter, http.MethodGet, path, ""); history.Code != http.StatusOK || !strings.Contains(history.Body.String(), "Hello driver") {
 		t.Fatalf("history status=%d body=%s", history.Code, history.Body.String())
+	}
+	if _, err := pool.Exec(ctx, `UPDATE trips SET assigned_driver_id=$2::UUID WHERE id=$1::UUID`, tripID, outsiderID); err != nil {
+		t.Fatal(err)
+	}
+	if history := request(outsiderRouter, http.MethodGet, path, ""); history.Code != 200 || strings.Contains(history.Body.String(), "Hello driver") {
+		t.Fatalf("new driver saw former conversation: %s", history.Body.String())
+	}
+	if _, err := pool.Exec(ctx, `UPDATE trips SET assigned_driver_id=$2::UUID WHERE id=$1::UUID`, tripID, driverID); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE trips SET status='completed',completed_at=NOW(),updated_at=NOW() WHERE id=$1::UUID`, tripID); err != nil {
 		t.Fatal(err)

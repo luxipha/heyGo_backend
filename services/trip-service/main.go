@@ -94,11 +94,14 @@ func main() {
 
 	casperIDAppID := env.GetString("CASPERID_APP_ID", "")
 	casperIDSecret := env.GetString("CASPERID_API_SECRET", "")
-	if casperIDAppID == "" || casperIDSecret == "" {
-		logs.L().Fatal("CASPERID_APP_ID and CASPERID_API_SECRET are required")
+	if casperIDAppID != "" && casperIDSecret != "" {
+		reporter := trustclient.NewCasperIDReporter(env.GetString("CASPERID_BASE_URL", "https://casperid.com"), casperIDAppID, casperIDSecret)
+		go trustclient.NewWorker(pool, reporter).Run(ctx)
+		logs.L().Info("optional CasperID trust delivery enabled")
+	} else {
+		logs.L().Info("CasperID trust delivery disabled; HeyGo email and phone accounts remain supported")
 	}
-	reporter := trustclient.NewCasperIDReporter(env.GetString("CASPERID_BASE_URL", "https://casperid.com"), casperIDAppID, casperIDSecret)
-	driverConsumer := events.NewDriverConsumer(bus, tripService, reporter)
+	driverConsumer := events.NewDriverConsumer(bus, tripService, pool)
 	var pushHandler http.Handler
 	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
 	case "pull":

@@ -49,7 +49,6 @@ func TestRiderCommentsVisibleToDriverAndAdminReviewQueue(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO trip_ratings(trip_id,actor_id,subject_id,rating,comment,admin_review_status) VALUES($1::UUID,$2::UUID,$3::UUID,1,'Please review this trip','pending')`, tripID, riderID, driverID); err != nil {
 		t.Fatal(err)
 	}
-
 	gin.SetMode(gin.TestMode)
 	requestContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 	requestContext.Request = httptest.NewRequest("GET", "/driver/reviews", nil)
@@ -61,8 +60,35 @@ func TestRiderCommentsVisibleToDriverAndAdminReviewQueue(t *testing.T) {
 	if err != nil || len(otherReviews) != 0 {
 		t.Fatalf("other driver's review read leaked data: %+v, err=%v", otherReviews, err)
 	}
+	// A newer five-star item must not consume the first page of the one-star queue.
+	newerFareID, newerTripID := uuid.NewString(), uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO ride_fares(id,rider_id,package_slug,total_fare_minor,route) VALUES($1::UUID,$2::UUID,'sedan',500000,'{}'::JSONB)`, newerFareID, riderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO trips(id,rider_id,ride_fare_id,assigned_driver_id,status) VALUES($1::UUID,$2::UUID,$3::UUID,$4::UUID,'completed')`, newerTripID, riderID, newerFareID, driverID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO trip_ratings(trip_id,actor_id,subject_id,rating,comment,admin_review_status,created_at) VALUES($1::UUID,$2::UUID,$3::UUID,5,'All good','pending',$4)`, newerTripID, riderID, driverID, time.Date(2099, 1, 1, 0, 0, 1, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE trip_ratings SET created_at=$2 WHERE trip_id=$1::UUID AND actor_id=$3::UUID`, tripID, time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC), riderID); err != nil {
+		t.Fatal(err)
+	}
 
 	api := &adminAPI{pool: pool}
+	oneStarQueue := callAdminHandler(t, adminID, func(c *gin.Context) {
+		c.Request.URL.RawQuery = "status=pending&rating=1&limit=1"
+		api.listDriverRatings(c)
+	}, nil)
+	if oneStarQueue.Code != 200 {
+		t.Fatalf("one-star queue status=%d body=%s", oneStarQueue.Code, oneStarQueue.Body.String())
+	}
+	var filtered struct {
+		Data []adminDriverRating `json:"data"`
+	}
+	if err := json.Unmarshal(oneStarQueue.Body.Bytes(), &filtered); err != nil || len(filtered.Data) != 1 || filtered.Data[0].TripID != tripID {
+		t.Fatalf("one-star queue did not filter before pagination: %+v err=%v", filtered, err)
+	}
 	adminQueue := callAdminHandler(t, adminID, api.listDriverRatings, nil)
 	if adminQueue.Code != 200 {
 		t.Fatalf("admin queue status=%d body=%s", adminQueue.Code, adminQueue.Body.String())

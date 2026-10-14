@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/proto/trip"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
-	"github.com/google/uuid"
 )
 
 var routeHTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -26,8 +27,7 @@ type tripService struct {
 type TripService interface {
 	CreateTrip(ctx context.Context, fare *types.RideFareModel) (*types.TripModel, error)
 	GetRoute(ctx context.Context, pickup, destination *sharedtypes.Coordinate) (*types.OSRMApiResponse, error)
-	EstimatePackagesPriceWithRoute(route *types.OSRMApiResponse) []*types.RideFareModel
-	GenerateTripFares(ctx context.Context, fares []*types.RideFareModel, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate) ([]*types.RideFareModel, error)
+	GenerateTripFares(ctx context.Context, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate) ([]*types.RideFareModel, error)
 	GetAndValidateRideFare(ctx context.Context, fareID, riderID string) (*types.RideFareModel, error)
 	AcceptRide(ctx context.Context, tripID string, driver *trip.TripDriver) (*types.TripModel, error)
 	GetTripByID(ctx context.Context, tripID string) (*types.TripModel, error)
@@ -90,42 +90,58 @@ func (s *tripService) GetRoute(ctx context.Context, pickup, destination *sharedt
 	if err := json.Unmarshal(body, &routeResponse); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
-	if len(routeResponse.Routes) == 0 || len(routeResponse.Routes[0].Geometry.Coordinates) == 0 {
+	if len(routeResponse.Routes) == 0 || len(routeResponse.Routes[0].Geometry.Coordinates) < 2 {
 		return nil, fmt.Errorf("route service returned no usable route")
 	}
 
+	route := routeResponse.Routes[0]
+	if math.IsNaN(route.Distance) || math.IsInf(route.Distance, 0) || route.Distance <= 0 || math.IsNaN(route.Duration) || math.IsInf(route.Duration, 0) || route.Duration <= 0 {
+		return nil, fmt.Errorf("invalid route measurements")
+	}
+	for _, point := range route.Geometry.Coordinates {
+		if len(point) != 2 || math.IsNaN(point[0]) || math.IsNaN(point[1]) || math.IsInf(point[0], 0) || math.IsInf(point[1], 0) || math.Abs(point[0]) > 180 || math.Abs(point[1]) > 90 {
+			return nil, fmt.Errorf("invalid route geometry")
+		}
+	}
 	return &routeResponse, nil
 }
 
-// EstimatePackagesPriceWithRoute estimates prices for different car packages based on the provided route
-func (s *tripService) EstimatePackagesPriceWithRoute(route *types.OSRMApiResponse) []*types.RideFareModel {
-	baseFares := getBaseFares()
-	estimatedFares := make([]*types.RideFareModel, len(baseFares))
-
-	for i, fare := range baseFares {
-		estimatedFares[i] = estimateFareRoute(route, fare)
+// GenerateTripFares uses only published pickup-market rates and freezes the
+// selected pricing version on each short-lived fare quote.
+func (s *tripService) GenerateTripFares(ctx context.Context, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate) ([]*types.RideFareModel, error) {
+	if pickup == nil || route == nil || len(route.Routes) == 0 {
+		return nil, repo.ErrPricingUnavailable
 	}
-	return estimatedFares
-}
-
-// GenerateTripFares generates and saves ride fares for a rider based on the provided estimated fares and route
-func (s *tripService) GenerateTripFares(ctx context.Context, rideFares []*types.RideFareModel, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate) ([]*types.RideFareModel, error) {
-	fares := make([]*types.RideFareModel, len(rideFares))
-	for i, fare := range rideFares {
+	pricing, err := s.repo.PricingForQuote(ctx, pickup.Latitude, pickup.Longitude)
+	if err != nil {
+		return nil, err
+	}
+	previewID := uuid.NewString()
+	fares := make([]*types.RideFareModel, len(pricing.Rates))
+	for i, rate := range pricing.Rates {
+		amount, valid := calculateFareKobo(route.Routes[0].Distance, route.Routes[0].Duration, rate)
+		if !valid {
+			return nil, fmt.Errorf("fare outside approved bounds")
+		}
 		f := &types.RideFareModel{
-			RiderID:          riderID,
-			ID:               uuid.NewString(),
-			PackageSlug:      fare.PackageSlug,
-			TotalFareInPaise: fare.TotalFareInPaise,
-			Route:            route,
-			Pickup:           pickup,
-			Destination:      destination,
+			PreviewID:         previewID,
+			RiderID:           riderID,
+			ID:                uuid.NewString(),
+			PackageSlug:       rate.PackageSlug,
+			TotalFareInPaise:  amount,
+			PricingVersionID:  pricing.ID,
+			PricingMarketCode: pricing.MarketCode,
+			Route:             route,
+			Pickup:            pickup,
+			Destination:       destination,
 		}
 
-		if err := s.repo.SaveRideFare(ctx, f); err != nil {
+		fares[i] = f
+	}
+	for _, fare := range fares {
+		if err := s.repo.SaveRideFare(ctx, fare); err != nil {
 			return nil, err
 		}
-		fares[i] = f
 	}
 
 	return fares, nil
@@ -139,13 +155,16 @@ func (s *tripService) GetAndValidateRideFare(ctx context.Context, fareID, riderI
 	}
 
 	if fare == nil {
-		return nil, fmt.Errorf("ride fare not found")
+		return nil, repo.ErrFareInvalid
 	}
 
 	if fare.RiderID != riderID {
-		return nil, fmt.Errorf("ride fare does not belong to rider")
+		return nil, repo.ErrFareForeign
 	}
 
+	if fare.ConsumedTripID == "" && !fare.ExpiresAt.IsZero() && !fare.ExpiresAt.After(time.Now()) {
+		return nil, repo.ErrFareExpired
+	}
 	return fare, nil
 }
 
@@ -175,46 +194,10 @@ func (s *tripService) RateTrip(ctx context.Context, tripID, actorID string, rati
 	return s.repo.Rate(ctx, tripID, actorID, rating, feedbackTags, comment)
 }
 
-// estimateFareRoute estimates the total fare for a given route and base fare
-func estimateFareRoute(route *types.OSRMApiResponse, fare *types.RideFareModel) *types.RideFareModel {
-	if route == nil || len(route.Routes) == 0 || fare == nil {
-		return nil
+func calculateFareKobo(distanceMeters, durationSeconds float64, rate repo.PackageRate) (float64, bool) {
+	if distanceMeters < 0 || durationSeconds < 0 || math.IsNaN(distanceMeters) || math.IsNaN(durationSeconds) || math.IsInf(distanceMeters, 0) || math.IsInf(durationSeconds, 0) {
+		return 0, false
 	}
-	pricingCfg := types.DefaultPricingConfig()
-	carPackagePrice := fare.TotalFareInPaise
-
-	distanceInKm := route.Routes[0].Distance
-	durationInMinutes := route.Routes[0].Duration
-
-	distanceFare := distanceInKm * pricingCfg.PricePerUnitDistance
-	durationFare := durationInMinutes * pricingCfg.PricePerMinute
-
-	totalFare := carPackagePrice + distanceFare + durationFare
-
-	return &types.RideFareModel{
-		PackageSlug:      fare.PackageSlug,
-		TotalFareInPaise: totalFare,
-	}
-}
-
-// getBaseFares returns a list of base fares for different car packages
-func getBaseFares() []*types.RideFareModel {
-	return []*types.RideFareModel{
-		{
-			PackageSlug:      "bike",
-			TotalFareInPaise: 50.0,
-		},
-		{
-			PackageSlug:      "auto",
-			TotalFareInPaise: 70.0,
-		},
-		{
-			PackageSlug:      "sedan",
-			TotalFareInPaise: 100.0,
-		},
-		{
-			PackageSlug:      "suv",
-			TotalFareInPaise: 150.0,
-		},
-	}
+	amount := math.Round(float64(rate.BaseKobo) + distanceMeters*float64(rate.PerKmKobo)/1000 + durationSeconds*float64(rate.PerMinuteKobo)/60)
+	return amount, amount > 0 && amount <= 10000000 && !math.IsInf(amount, 0)
 }

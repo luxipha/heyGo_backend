@@ -23,6 +23,50 @@ import (
 var noShowPaymentHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
 func registerRiderNoShowPaymentRoutes(rider *gin.RouterGroup, pool *pgxpool.Pool) {
+	rider.GET("/no-show-debt-payments", func(c *gin.Context) {
+		var at any
+		var after any
+		if raw := c.Query("cursor"); raw != "" {
+			cursor, err := decodeDriverTripHistoryCursor(raw)
+			if err != nil {
+				driverError(c, 400, "invalid_cursor", "Payment cursor is invalid")
+				return
+			}
+			at, after = cursor.OccurredAt, cursor.ID
+		}
+		user, _ := gatewayauth.CurrentUser(c)
+		rows, err := pool.Query(c.Request.Context(), `SELECT id::TEXT,debt_id::TEXT,amount_kobo,status,checkout_url,created_at FROM rider_no_show_debt_payments WHERE rider_id=$1::UUID AND ($2::TIMESTAMPTZ IS NULL OR (created_at,id)<($2::TIMESTAMPTZ,$3::UUID)) ORDER BY created_at DESC,id DESC LIMIT 31`, user.ID, at, after)
+		if err != nil {
+			driverError(c, 503, "debt_payment_unavailable", "Debt payment history is unavailable")
+			return
+		}
+		defer rows.Close()
+		items := []gin.H{}
+		cursors := []driverTripHistoryCursor{}
+		for rows.Next() {
+			var id, debt, state string
+			var amount int64
+			var link *string
+			var created time.Time
+			if err = rows.Scan(&id, &debt, &amount, &state, &link, &created); err != nil {
+				driverError(c, 503, "debt_payment_unavailable", "Debt payment history is unavailable")
+				return
+			}
+			items = append(items, gin.H{"id": id, "debtId": debt, "amountKobo": amount, "currency": "NGN", "status": state, "checkoutUrl": link, "createdAt": created})
+			cursors = append(cursors, driverTripHistoryCursor{OccurredAt: created, ID: id})
+		}
+		if rows.Err() != nil {
+			driverError(c, 503, "debt_payment_unavailable", "Debt payment history is unavailable")
+			return
+		}
+		var next *string
+		if len(items) > 30 {
+			v := encodeDriverTripHistoryCursor(cursors[29])
+			next = &v
+			items = items[:30]
+		}
+		c.JSON(200, contracts.APIResponse{Data: gin.H{"items": items, "nextCursor": next}})
+	})
 	rider.POST("/no-show-debts/:id/pay", func(ctx *gin.Context) {
 		debtID := ctx.Param("id")
 		if _, err := uuid.Parse(debtID); err != nil {
@@ -35,9 +79,13 @@ func registerRiderNoShowPaymentRoutes(rider *gin.RouterGroup, pool *pgxpool.Pool
 			return
 		}
 		user, _ := gatewayauth.CurrentUser(ctx)
+		if !user.EmailVerified {
+			driverError(ctx, http.StatusConflict, "email_not_verified", "Verify your account email before paying this debt")
+			return
+		}
 		address, err := mail.ParseAddress(user.Email)
 		if err != nil || address.Address != user.Email || strings.ContainsAny(user.Email, "\r\n") {
-			driverError(ctx, http.StatusConflict, "casperid_email_required", "A verified CasperID email is required to pay this debt")
+			driverError(ctx, http.StatusConflict, "email_required", "A valid account email is required to pay this debt")
 			return
 		}
 		payload, _ := json.Marshal(gin.H{"debtId": debtID, "riderId": user.ID, "email": user.Email, "idempotencyKey": key})
@@ -73,6 +121,10 @@ func registerRiderNoShowPaymentRoutes(rider *gin.RouterGroup, pool *pgxpool.Pool
 		}
 		_ = json.Unmarshal(body, &failure)
 		switch failure.Code {
+		case "checkout_unresolved":
+			driverError(ctx, http.StatusServiceUnavailable, failure.Code, "Checkout creation is unresolved; recover payment status before retrying")
+		case "email_not_verified":
+			driverError(ctx, http.StatusConflict, failure.Code, "Verify your current account email before paying this debt")
 		case "debt_not_due":
 			driverError(ctx, http.StatusConflict, failure.Code, "This no-show debt is no longer due")
 		case "idempotency_conflict":

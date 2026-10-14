@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
-	"github.com/jackc/pgx/v5"
 )
 
 func enqueueTripEvent(ctx context.Context, tx pgx.Tx, trip *types.TripModel, topic string) error {
@@ -18,12 +18,28 @@ func enqueueTripEvent(ctx context.Context, tx pgx.Tx, trip *types.TripModel, top
 	if topic == contracts.TripEventDriverAssigned {
 		data, err = json.Marshal(trip.ToProto())
 	}
-	if err == nil && trip.RideFare != nil && trip.RideFare.NoShowDebtKobo > 0 {
+	if err == nil && trip.RideFare != nil {
 		data, err = withNoShowDebt(data, topic == contracts.TripEventDriverAssigned, trip.RideFare.NoShowDebtKobo, int64(math.Round(trip.RideFare.TotalFareInPaise)))
 	}
 	if err != nil {
 		return fmt.Errorf("encode trip outbox event: %w", err)
 	}
+	if topic == contracts.TripEventDriverAssigned {
+		var assignment []byte
+		if err := tx.QueryRow(ctx, `SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',jsonb_build_object('make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=$1::UUID AND a.status='accepted' ORDER BY a.attempt DESC LIMIT 1`, trip.ID).Scan(&assignment); err != nil {
+			return err
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(data, &root); err != nil {
+			return err
+		}
+		root["assignment"] = assignment
+		data, err = json.Marshal(root)
+		if err != nil {
+			return err
+		}
+	}
+
 	recipients := []string{trip.RiderID}
 	if trip.Driver != nil && trip.Driver.Id != "" && trip.Driver.Id != trip.RiderID && topic != contracts.TripEventCreated {
 		recipients = append(recipients, trip.Driver.Id)
@@ -69,6 +85,9 @@ func withNoShowDebt(data []byte, bareTrip bool, debtKobo, fareKobo int64) ([]byt
 	}
 	debt, _ := json.Marshal(debtKobo)
 	total, _ := json.Marshal(fareKobo + debtKobo)
+	canonicalFare, _ := json.Marshal(fareKobo)
+	fare["fareKobo"] = canonicalFare
+	fare["currency"] = json.RawMessage(`"NGN"`)
 	fare["noShowDebtKobo"] = debt
 	fare["amountDueKobo"] = total
 	updatedFare, err := json.Marshal(fare)
@@ -76,6 +95,8 @@ func withNoShowDebt(data []byte, bareTrip bool, debtKobo, fareKobo int64) ([]byt
 		return nil, err
 	}
 	trip["selectedFare"] = updatedFare
+	trip["fareKobo"] = canonicalFare
+	trip["currency"] = json.RawMessage(`"NGN"`)
 	trip["noShowDebtKobo"] = debt
 	trip["amountDueKobo"] = total
 	updatedTrip, err := json.Marshal(trip)

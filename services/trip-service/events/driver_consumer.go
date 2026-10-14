@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
 	"github.com/luxipha/heyGo_backend/services/trip-service/service"
-	trustclient "github.com/luxipha/heyGo_backend/services/trip-service/trust"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
@@ -19,14 +18,18 @@ import (
 )
 
 type DriverConsumer struct {
-	bus   *pubsub.Client
-	svc   service.TripService
-	trust trustclient.Reporter
+	bus  *pubsub.Client
+	svc  service.TripService
+	pool *pgxpool.Pool
 }
 
 // NewDriverConsumer creates a driver command consumer.
-func NewDriverConsumer(bus *pubsub.Client, svc service.TripService, reporter trustclient.Reporter) *DriverConsumer {
-	return &DriverConsumer{bus: bus, svc: svc, trust: reporter}
+func NewDriverConsumer(bus *pubsub.Client, svc service.TripService, pools ...*pgxpool.Pool) *DriverConsumer {
+	consumer := &DriverConsumer{bus: bus, svc: svc}
+	if len(pools) > 0 {
+		consumer.pool = pools[0]
+	}
+	return consumer
 }
 
 // Consume starts consuming messages from the specified topics and processes them.
@@ -57,6 +60,9 @@ func (dc *DriverConsumer) Handle(ctx context.Context, msg *pubsub.Message) error
 		if payload.ActorID != eventMsg.EntityID {
 			return fmt.Errorf("lifecycle actor mismatch")
 		}
+		if payload.CommandID != "" {
+			return dc.handleRiderCommand(ctx, msg.Topic, payload)
+		}
 		if err := dc.handleLifecycle(ctx, msg.Topic, payload); err != nil {
 			return err
 		}
@@ -70,7 +76,6 @@ func (dc *DriverConsumer) Handle(ctx context.Context, msg *pubsub.Message) error
 }
 
 func (dc *DriverConsumer) handleLifecycle(ctx context.Context, command string, p messaging.TripLifecycleCommand) error {
-	now := time.Now().UTC()
 	switch command {
 	case contracts.TripCmdArrive:
 		_, _, err := dc.svc.ArriveAtPickup(ctx, p.TripID, p.ActorID)
@@ -83,48 +88,19 @@ func (dc *DriverConsumer) handleLifecycle(ctx context.Context, command string, p
 		if err != nil {
 			return err
 		}
-		subjects, err := dc.svc.TrustParticipants(ctx, p.TripID)
-		if err != nil {
-			return err
-		}
-		for _, subject := range subjects {
-			if err := dc.trust.Submit(ctx, trustclient.Event{UserID: subject.CasperID, ActorRole: subject.Role, EventType: "interaction.completed", ExternalEventID: "heygo:" + p.TripID + ":completed:" + subject.Role, InteractionReference: p.TripID, OccurredAt: now}); err != nil {
-				return err
-			}
-		}
 		return nil
 	case contracts.TripCmdCancel:
-		trip, _, err := dc.svc.CancelTrip(ctx, p.TripID, p.ActorID, p.Reason)
+		_, _, err := dc.svc.CancelTrip(ctx, p.TripID, p.ActorID, p.Reason)
 		if err != nil {
-			return err
-		}
-		subjects, err := dc.svc.TrustParticipants(ctx, p.TripID)
-		if err != nil {
-			return err
-		}
-		var subject repo.TrustSubject
-		role := "consumer"
-		if trip.Driver != nil && trip.Driver.Id == p.ActorID {
-			role = "provider"
-		}
-		for _, candidate := range subjects {
-			if candidate.Role == role {
-				subject = candidate
-			}
-		}
-		if subject.CasperID == "" {
-			return fmt.Errorf("CasperID subject not found")
-		}
-		if err := dc.trust.Submit(ctx, trustclient.Event{UserID: subject.CasperID, ActorRole: role, EventType: "interaction.cancelled_by_" + role, ExternalEventID: "heygo:" + p.TripID + ":cancelled:" + role, InteractionReference: p.TripID, OccurredAt: now}); err != nil {
 			return err
 		}
 		return nil
 	case contracts.TripCmdRate:
-		subject, _, err := dc.svc.RateTrip(ctx, p.TripID, p.ActorID, p.Rating, p.FeedbackTags, p.Comment)
+		_, _, err := dc.svc.RateTrip(ctx, p.TripID, p.ActorID, p.Rating, p.FeedbackTags, p.Comment)
 		if err != nil {
 			return err
 		}
-		return dc.trust.Submit(ctx, trustclient.Event{UserID: subject.CasperID, ActorRole: subject.Role, EventType: "rating.submitted", ExternalEventID: "heygo:" + p.TripID + ":rating:" + p.ActorID, InteractionReference: p.TripID, Rating: &p.Rating, OccurredAt: now})
+		return nil
 	}
 	return nil
 }

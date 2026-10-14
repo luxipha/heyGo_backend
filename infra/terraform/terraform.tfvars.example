@@ -11,7 +11,7 @@ deploy_services                     = false
 retain_pull_subscriber_permissions = true
 cloud_sql_tier                      = "db-f1-micro"
 
-# Set this after the PR merges and all five images are published. It creates
+# Set this after the PR merges and all six images are published. It creates
 # the migration job while deploy_services remains false.
 # image_tag = "0123456789abcdef0123456789abcdef01234567"
 
@@ -19,7 +19,10 @@ cloud_sql_tier                      = "db-f1-micro"
 # values for the controlled Phase 2 Cloud Run deployment.
 # deploy_services = true
 # allowed_origins  = "https://app.example.com,https://admin.example.com"
+# admin_frontend_url = "https://admin.example.com"
 # app_url          = "https://app.example.com"
+# Configure Kudi and Resend/SMTP through Admin after migrations 062–063.
+# Populate the server-only Places key secret; LLM planning stays disabled.
 
 # After authenticated push delivery has been deployed and verified, set this
 # to false in a separate cleanup plan.

@@ -18,6 +18,7 @@ func TestFCMSenderOAuthAndDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	var apiStatus = http.StatusOK
+	riderEnvelope := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/token":
@@ -49,6 +50,9 @@ func TestFCMSenderOAuthAndDelivery(t *testing.T) {
 			if (payload.Message.Token != "device-token" && payload.Message.Token != "gone-token") || payload.Message.Notification.Title != "Trip complete" || payload.Message.Data["notification_id"] == "" {
 				t.Errorf("unexpected message: %+v", payload.Message)
 			}
+			if riderEnvelope && (payload.Message.Data["audience"] != "rider" || payload.Message.Data["schema_version"] != "1" || len(payload.Message.Data) != 3) {
+				t.Errorf("Rider payload must contain only inbox identity and schema")
+			}
 			w.WriteHeader(apiStatus)
 			if apiStatus == http.StatusNotFound {
 				_, _ = w.Write([]byte(`{"error":{"details":[{"errorCode":"UNREGISTERED"}]}}`))
@@ -62,6 +66,11 @@ func TestFCMSenderOAuthAndDelivery(t *testing.T) {
 	if err := sender.send(context.Background(), "device-token", "Trip complete", "Your trip has completed.", "42", "trip"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	riderEnvelope = true
+	if err := sender.sendWithData(context.Background(), "device-token", "Trip complete", "Open HeyGo to review the latest status.", map[string]string{"notification_id": "42", "audience": "rider", "schema_version": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	riderEnvelope = false
 	apiStatus = http.StatusNotFound
 	if err := sender.send(context.Background(), "gone-token", "Trip complete", "Your trip has completed.", "43", "trip"); err != errFCMUnregistered {
 		t.Fatalf("unregistered token error=%v", err)

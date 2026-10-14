@@ -33,21 +33,15 @@ terraform -chdir=infra/terraform apply runtime-foundation.tfplan
 ```
 
 Terraform generates and stores versions for `heygo-database-url`,
-`heygo-migration-database-url`, and `heygo-internal-service-token`. The
+`heygo-migration-database-url`, `heygo-internal-service-token`, and
+`heygo-otp-pepper`, plus a stable 64-character hexadecimal
+`heygo-admin-settings-key` used to encrypt Admin-managed Resend credentials. The
 long-running services use the database role with read/write privileges;
 the migration job alone receives the elevated database credential. Add values
 for the externally owned credentials
 without placing their plaintext in Terraform variables, GitHub, or the repo:
 
 ```sh
-read -rs 'SECRET_VALUE?CasperID app ID: '
-printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-casperid-app-id --data-file=- --project=heygo-ng
-unset SECRET_VALUE
-
-read -rs 'SECRET_VALUE?CasperID API secret: '
-printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-casperid-api-secret --data-file=- --project=heygo-ng
-unset SECRET_VALUE
-
 read -rs 'SECRET_VALUE?Monnify API key: '
 printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-api-key --data-file=- --project=heygo-ng
 unset SECRET_VALUE
@@ -61,9 +55,29 @@ printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-monnify-contract
 unset SECRET_VALUE
 ```
 
+Email and SMS provider controls are persisted through authenticated Admin.
+Apply migrations 062–063 and configure Resend/SMTP and Kudi there; the old SMS
+secret container is retained for compatibility but is not mounted into the
+gateway. Preserve `heygo-admin-settings-key` across releases.
+
+Terraform generates `heygo-ride-agent-internal-token`. Supply a server-only
+Google Places key restricted to the intended Places API before enabling services:
+
+```sh
+read -rs 'SECRET_VALUE?Ride Agent Places key: '
+printf '%s' "$SECRET_VALUE" | gcloud secrets versions add heygo-ride-agent-places-key --data-file=- --project=heygo-ng
+unset SECRET_VALUE
+```
+
+The Ride Agent has its own runtime identity and no database or Pub/Sub IAM
+grants. Only API Gateway has runtime invocation permission; the deployment
+identity may call health for release checks. Gateway sends a Google ID token
+in `X-Serverless-Authorization` and its distinct internal token in
+`Authorization`. LLM planning remains disabled until separately configured.
+
 ## Phase 2: Cloud Run
 
-Use a full Git commit SHA whose five images already exist in Artifact Registry.
+Use a full Git commit SHA whose six images (five services plus migration) already exist in Artifact Registry.
 First set `image_tag` while keeping `deploy_services = false`, plan, and apply
 to create the migration job. Run the schema migrations before any services
 start:
@@ -90,11 +104,14 @@ application-level internal token. API Gateway is public. Payment Service is
 also public because Monnify must reach its webhook. Public-service Pub/Sub and
 maintenance endpoints additionally validate the event-invoker OIDC identity.
 
-All four services use authenticated Pub/Sub push and request-based Cloud Run
+The original four services use authenticated Pub/Sub push and request-based Cloud Run
 billing with a minimum instance count of zero. Driver-offer expiry uses a
 dedicated Cloud Tasks queue. Cloud Scheduler invokes bounded gateway
 maintenance once per minute and performs a once-per-minute transactional
-outbox recovery pass. Each service is initially capped at one instance and the
+outbox recovery pass. A separate once-per-minute payment-event recovery job
+uses the pinned event-invoker identity and payment push audience. Apply
+migration 064 first; inspect missing legacy envelopes and enable the payment
+backlog alert rules. Ride Agent uses request billing without a broker. Each service is initially capped at one instance and the
 global database pool budget is 16 connections.
 
 API Gateway remains capped at one instance while it owns WebSocket connections

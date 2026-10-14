@@ -19,6 +19,7 @@ locals {
     "driver-service",
     "payment-service",
     "trip-service",
+    "ride-agent-gateway",
   ])
 }
 

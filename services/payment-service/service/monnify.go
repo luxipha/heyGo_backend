@@ -38,6 +38,99 @@ type VerifiedTransaction struct {
 	AmountPaid           json.Number `json:"amountPaid"`
 	TotalPayable         json.Number `json:"totalPayable"`
 	CheckoutURL          string      `json:"checkoutUrl"`
+	PaymentMethod        string      `json:"paymentMethod"`
+}
+
+type VerifiedBankAccount struct {
+	AccountNumber string `json:"accountNumber"`
+	AccountName   string `json:"accountName"`
+	BankCode      string `json:"bankCode"`
+	BankName      string `json:"bankName"`
+}
+
+func (m *monnifyClient) VerifyBankAccount(ctx context.Context, accountNumber, bankCode string) (*VerifiedBankAccount, error) {
+	if len(accountNumber) != 10 || len(bankCode) < 3 || len(bankCode) > 8 {
+		return nil, fmt.Errorf("valid bank account number and bank code are required")
+	}
+	for _, digit := range accountNumber + bankCode {
+		if digit < '0' || digit > '9' {
+			return nil, fmt.Errorf("bank account number and bank code must be numeric")
+		}
+	}
+	token, err := m.accessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		RequestSuccessful bool                `json:"requestSuccessful"`
+		ResponseBody      VerifiedBankAccount `json:"responseBody"`
+	}
+	path := "/api/v2/disbursements/account/validate?accountNumber=" + url.QueryEscape(accountNumber) + "&bankCode=" + url.QueryEscape(bankCode)
+	if err := m.doJSON(ctx, http.MethodGet, path, "Bearer "+token, nil, &response); err != nil {
+		return nil, fmt.Errorf("verify bank account: %w", err)
+	}
+	if !response.RequestSuccessful || response.ResponseBody.AccountNumber != accountNumber || response.ResponseBody.BankCode != bankCode || strings.TrimSpace(response.ResponseBody.AccountName) == "" {
+		return nil, fmt.Errorf("bank account could not be verified")
+	}
+	return &response.ResponseBody, nil
+}
+
+type RefundResult struct {
+	RefundReference      string      `json:"refundReference"`
+	TransactionReference string      `json:"transactionReference"`
+	RefundAmount         json.Number `json:"refundAmount"`
+	RefundStatus         string      `json:"refundStatus"`
+}
+
+func (m *monnifyClient) InitiateRefund(ctx context.Context, transactionReference, refundReference string, amountKobo int64, reason, accountNumber, bankCode string) (*RefundResult, error) {
+	if transactionReference == "" || refundReference == "" || amountKobo < 10000 || len(reason) < 1 || len(reason) > 64 || len(accountNumber) != 10 || bankCode == "" {
+		return nil, fmt.Errorf("valid refund reference, amount, reason, and bank destination are required")
+	}
+	token, err := m.accessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"transactionReference":       transactionReference,
+		"refundReference":            refundReference,
+		"refundAmount":               json.Number(fmt.Sprintf("%d.%02d", amountKobo/100, amountKobo%100)),
+		"refundReason":               reason,
+		"customerNote":               "HeyGo refund",
+		"destinationAccountNumber":   accountNumber,
+		"destinationAccountBankCode": bankCode,
+	}
+	var response struct {
+		RequestSuccessful bool         `json:"requestSuccessful"`
+		ResponseBody      RefundResult `json:"responseBody"`
+	}
+	if err := m.doJSON(ctx, http.MethodPost, "/api/v1/refunds/initiate-refund", "Bearer "+token, payload, &response); err != nil {
+		return nil, fmt.Errorf("initiate refund: %w", err)
+	}
+	if !response.RequestSuccessful || response.ResponseBody.RefundReference != refundReference || response.ResponseBody.TransactionReference != transactionReference {
+		return nil, fmt.Errorf("refund response did not match the request")
+	}
+	return &response.ResponseBody, nil
+}
+
+func (m *monnifyClient) RefundStatus(ctx context.Context, refundReference string) (*RefundResult, error) {
+	if refundReference == "" {
+		return nil, fmt.Errorf("refund reference is required")
+	}
+	token, err := m.accessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var response struct {
+		RequestSuccessful bool         `json:"requestSuccessful"`
+		ResponseBody      RefundResult `json:"responseBody"`
+	}
+	if err := m.doJSON(ctx, http.MethodGet, "/api/v1/refunds/"+url.PathEscape(refundReference), "Bearer "+token, nil, &response); err != nil {
+		return nil, fmt.Errorf("get refund status: %w", err)
+	}
+	if !response.RequestSuccessful || response.ResponseBody.RefundReference != refundReference {
+		return nil, fmt.Errorf("refund status response did not match the request")
+	}
+	return &response.ResponseBody, nil
 }
 
 func (m *monnifyClient) VerifyTransaction(ctx context.Context, transactionReference string) (*VerifiedTransaction, error) {
@@ -116,7 +209,7 @@ func (m *monnifyClient) RecoverPaymentSession(ctx context.Context, paymentRefere
 
 func (m *monnifyClient) CreateOperatingTopupSession(ctx context.Context, amountKobo int64, paymentReference, driverEmail, driverID string) (*types.ProviderSession, error) {
 	if amountKobo <= 0 || paymentReference == "" || driverEmail == "" || driverID == "" {
-		return nil, fmt.Errorf("valid top-up amount, reference, driver, and CasperID email are required")
+		return nil, fmt.Errorf("valid top-up amount, reference, driver, and account email are required")
 	}
 	return m.initializeTransaction(ctx, amountKobo, "NGN", paymentReference, driverEmail, "HeyGo driver", "HeyGo Operating Balance top-up", map[string]string{
 		"purpose": "operating_balance_topup", "driverID": driverID,
@@ -193,7 +286,8 @@ func (m *monnifyClient) accessToken(ctx context.Context) (string, error) {
 }
 
 func (m *monnifyClient) doJSON(ctx context.Context, method, path, authorization string, payload any, output any) error {
-	ctx, span := otel.Tracer("moniepoint-monnify").Start(ctx, "monnify "+method+" "+path)
+	pathLabel := strings.SplitN(path, "?", 2)[0]
+	ctx, span := otel.Tracer("moniepoint-monnify").Start(ctx, "monnify "+method+" "+pathLabel)
 	defer span.End()
 	span.SetAttributes(attribute.String("http.request.method", method), attribute.String("server.address", m.config.BaseURL))
 	var body bytes.Buffer
@@ -210,9 +304,10 @@ func (m *monnifyClient) doJSON(ctx context.Context, method, path, authorization 
 	req.Header.Set("Content-Type", "application/json")
 	res, err := m.httpClient.Do(req)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
+		// The URL may contain a bank account number. Do not surface it in
+		// traces, logs, or errors returned to callers.
+		span.SetStatus(codes.Error, "provider request failed")
+		return fmt.Errorf("provider request failed")
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {

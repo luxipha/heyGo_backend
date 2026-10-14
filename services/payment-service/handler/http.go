@@ -24,6 +24,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/metrics"
+	"github.com/luxipha/heyGo_backend/shared/refunds"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
@@ -44,6 +45,13 @@ type OperatingTopupHandler struct {
 	Verifier interface {
 		VerifyTransaction(context.Context, string) (*service.VerifiedTransaction, error)
 	}
+	BankVerifier interface {
+		VerifyBankAccount(context.Context, string, string) (*service.VerifiedBankAccount, error)
+	}
+	RefundExecutor interface {
+		InitiateRefund(context.Context, string, string, int64, string, string, string) (*service.RefundResult, error)
+		RefundStatus(context.Context, string) (*service.RefundResult, error)
+	}
 }
 
 type monnifyWebhook struct {
@@ -52,6 +60,9 @@ type monnifyWebhook struct {
 		PaymentReference     string         `json:"paymentReference"`
 		TransactionReference string         `json:"transactionReference"`
 		PaymentStatus        string         `json:"paymentStatus"`
+		RefundReference      string         `json:"refundReference"`
+		RefundAmount         json.Number    `json:"refundAmount"`
+		RefundStatus         string         `json:"refundStatus"`
 		Metadata             map[string]any `json:"metaData"`
 	} `json:"eventData"`
 }
@@ -81,6 +92,10 @@ func NewHTTPHandlerWithTopups(secret string, svc repo.Service, bus *pubsub.Clien
 	if topups != nil {
 		r.POST("/internal/operating-topups", h.createOperatingTopup)
 		r.POST("/internal/no-show-debt-payments", h.createNoShowDebtPayment)
+		r.POST("/internal/refund-bank-accounts/verify", h.verifyRefundBankAccount)
+		r.POST("/internal/refunds/verify-source", h.verifyRefundSource)
+		r.POST("/internal/refunds/initiate", h.initiateRefund)
+		r.POST("/internal/refunds/status", h.refundStatus)
 	}
 	return r
 }
@@ -99,6 +114,29 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 	var event monnifyWebhook
 	if err := json.Unmarshal(body, &event); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook payload"})
+		return
+	}
+	if event.EventType == "SUCCESSFUL_REFUND" || event.EventType == "FAILED_REFUND" {
+		if h.topups == nil || h.topups.Pool == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "refund reconciliation unavailable"})
+			return
+		}
+		amount, amountErr := monnifyAmountKobo(event.EventData.RefundAmount.String())
+		status := "COMPLETED"
+		if event.EventType == "FAILED_REFUND" {
+			status = "FAILED"
+		}
+		if amountErr != nil || event.EventData.RefundReference == "" || event.EventData.TransactionReference == "" ||
+			(event.EventData.RefundStatus != "" && !strings.EqualFold(event.EventData.RefundStatus, status)) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid refund evidence"})
+			return
+		}
+		if err := refunds.ApplyTerminal(c.Request.Context(), h.topups.Pool, event.EventData.RefundReference,
+			event.EventData.TransactionReference, status, amount, "signed Monnify webhook"); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "refund evidence could not be reconciled"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "processed"})
 		return
 	}
 	if event.EventData.PaymentReference == "" || event.EventData.TransactionReference == "" {
@@ -168,7 +206,7 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not encode payment event"})
 		return
 	}
-	if err := h.bus.Producer.SendMessageAndWait(c, topic, &contracts.EventMessage{EntityID: payment.RiderID, Data: payload}, 10*time.Second); err != nil {
+	if err := h.bus.Producer.SendMessageAndWait(c, topic, &contracts.EventMessage{EventID: eventID, EntityID: payment.RiderID, Data: payload}, 10*time.Second); err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "could not publish payment event"})
 		return
 	}

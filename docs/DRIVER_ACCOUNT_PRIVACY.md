@@ -31,14 +31,15 @@ configuring a real account.
 ## Driver data export
 
 - `POST /driver/data-export` records one pending export for the authenticated
-  Driver. It requires the signed CasperID business-token claims `email` and
-  `email_verified: true`, private R2 storage, and saved Resend settings.
+  Driver. It requires a separately verified account email, private R2 storage,
+  and saved Resend settings. Email OTP login verifies the email; merely saving
+  an email on a phone-only account does not.
 - `GET /driver/data-export/:exportId` returns only the owner-scoped request
   status. It does not expose the archive link through the API.
 - A gateway worker builds a ZIP containing a JSON account/trip/earnings/ledger
   manifest and available private Driver documents/inspection reports. It stores
   the archive in the private R2 bucket and emails a seven-day presigned download
-  link to the verified CasperID email.
+  link to the verified account email.
 - The worker retries using a stable delivery link and Resend idempotency key.
   After expiry it deletes the archive and clears the stored recipient/link.
   Failed archives are also queued for private-storage cleanup.
@@ -59,14 +60,14 @@ Export attachments are read server-side and are not made public.
   Staff mutations require CSRF protection and are recorded in `admin_audit`.
 - Approval is refused while the Driver has an assigned/accepted/arrived/started
   trip or an active offer. On approval HeyGo deactivates sign-in and online
-  eligibility; replaces CasperID identifiers with non-personal IDs; clears
+  eligibility; revokes HeyGo sessions; replaces any CasperID identifiers with non-personal IDs; clears
   profile, vehicle, safety-contact, device, location and onboarding document
   data; and queues private documents and report files for deletion from R2.
-  Hashed identity tombstones prevent the same CasperID identity from silently
-  recreating an account after deactivation.
+  Hashed phone and optional CasperID identity tombstones prevent the same
+  identity from silently recreating an account after deactivation.
 - Completed trip and financial ledger records remain unchanged and retain their
   stable internal user ID for joins and accounting. The storage cleanup worker
   retries failed R2 deletions; Admin queue responses show outstanding cleanup.
 
-The Driver and Admin frontends still need wiring to these APIs. Live CasperID,
-Resend and R2 verification also remains pending.
+The Driver and Admin frontends still need wiring to these APIs. Live Resend and
+R2 verification also remains pending.

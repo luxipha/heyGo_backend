@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Full Git commit SHA already published for all four services and the migration job
+        description: Full Git commit SHA already published for all five services and the migration job
         required: true
         type: string
       confirmation:
@@ -23,6 +23,7 @@ env:
   PROJECT_ID: heygo-ng
   REGION: europe-west1
   REGISTRY: europe-west1-docker.pkg.dev/heygo-ng/heygo
+  DEPLOYER: github-cloud-run-deployer@heygo-ng.iam.gserviceaccount.com
 
 jobs:
   deploy:
@@ -55,7 +56,7 @@ jobs:
             echo "image_tag must be a full lowercase Git SHA" >&2
             exit 1
           fi
-          for service in api-gateway driver-service payment-service trip-service; do
+          for service in api-gateway driver-service payment-service trip-service ride-agent-gateway; do
             gcloud artifacts docker images describe "$REGISTRY/$service:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
             gcloud run services describe "$service" --project="$PROJECT_ID" --region="$REGION" >/dev/null
           done
@@ -82,7 +83,7 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           CANDIDATE_TAG="candidate-${IMAGE_TAG:0:12}"
-          for service in driver-service trip-service payment-service api-gateway; do
+          for service in driver-service trip-service payment-service ride-agent-gateway api-gateway; do
             gcloud run services update "$service" \
               --project="$PROJECT_ID" \
               --region="$REGION" \
@@ -109,9 +110,21 @@ jobs:
               "$candidate_url/ready"
           done
 
+      - name: Check protected Ride Agent candidate health
+        run: |
+          service_json="$(gcloud run services describe ride-agent-gateway --project="$PROJECT_ID" --region="$REGION" --format=json)"
+          audience="$(jq -r '.status.url' <<< "$service_json")"
+          candidate_url="$(jq -r --arg tag "$CANDIDATE_TAG" '.status.traffic[] | select(.tag == $tag) | .url' <<< "$service_json")"
+          test -n "$audience" && test "$audience" != null
+          test -n "$candidate_url" && test "$candidate_url" != null
+          identity_token="$(gcloud auth print-identity-token --impersonate-service-account="$DEPLOYER" --audiences="$audience" --include-email)"
+          echo "::add-mask::$identity_token"
+          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 \
+            --header "Authorization: Bearer $identity_token" "$candidate_url/health"
+
       - name: Promote verified candidate revisions
         run: |
-          for service in driver-service trip-service payment-service api-gateway; do
+          for service in driver-service trip-service payment-service ride-agent-gateway api-gateway; do
             candidate_revision="$(
               gcloud run services describe "$service" \
                 --project="$PROJECT_ID" \

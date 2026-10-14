@@ -6,8 +6,12 @@ import (
 )
 
 type PreviewTripRequest struct {
-	Pickup      types.Coordinate `json:"pickup" binding:"required"`
-	Destination types.Coordinate `json:"destination" binding:"required"`
+	SourceTripID       string           `json:"sourceTripId"`
+	SchemaVersion      int              `json:"schemaVersion"`
+	PickupPlaceID      string           `json:"pickupPlaceId"`
+	DestinationPlaceID string           `json:"destinationPlaceId"`
+	Pickup             types.Coordinate `json:"pickup" binding:"required"`
+	Destination        types.Coordinate `json:"destination" binding:"required"`
 }
 
 // ToProto converts PreviewTripRequest to its protobuf representation
@@ -26,7 +30,8 @@ func (ptr *PreviewTripRequest) ToProto(riderID string) *pb.PreviewTripRequest {
 }
 
 type TripStartRequest struct {
-	FareID string `json:"rideFareID" binding:"required"`
+	FareID    string `json:"rideFareID" binding:"required"`
+	Confirmed bool   `json:"confirmed"`
 }
 
 // ToProto converts TripStartRequest to its protobuf representation

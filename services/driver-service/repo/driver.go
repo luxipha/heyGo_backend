@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/driverstate"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/driver"
@@ -18,6 +19,11 @@ import (
 var ErrNoAvailableDriver = errors.New("no available driver")
 var ErrTripAlreadyMatched = errors.New("trip is already matched")
 var ErrNoActiveOffer = errors.New("trip has no active driver offer")
+
+// trustDistanceAdvantageMeters is the maximum proximity advantage granted to
+// a higher-trust provider while dispatch has no driver-to-pickup ETA matrix.
+// A missing snapshot defaults to the neutral baseline of 100.
+const trustDistanceAdvantageMeters = 500
 
 type Candidate struct {
 	Driver    *pb.Driver
@@ -102,7 +108,7 @@ func (r *postgresDriverRepo) UpdateLocation(ctx context.Context, id string, lat,
 		return "", fmt.Errorf("update online driver market: %w", err)
 	}
 	var riderID string
-	err = r.pool.QueryRow(ctx, `SELECT rider_id::TEXT FROM trips WHERE assigned_driver_id=$1::UUID AND status IN ('accepted','started') ORDER BY updated_at DESC LIMIT 1`, id).Scan(&riderID)
+	err = r.pool.QueryRow(ctx, `SELECT rider_id::TEXT FROM trips WHERE assigned_driver_id=$1::UUID AND status IN ('accepted','arrived','started') ORDER BY updated_at DESC LIMIT 1`, id).Scan(&riderID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
@@ -122,33 +128,45 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 	}
 	defer tx.Rollback(ctx)
 	var tripStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM trips WHERE id=$1::UUID FOR UPDATE`, tripID).Scan(&tripStatus); err != nil {
+	var deadline time.Time
+	if err := tx.QueryRow(ctx, `SELECT status,COALESCE(matching_deadline,created_at+INTERVAL '2 minutes') FROM trips WHERE id=$1::UUID FOR UPDATE`, tripID).Scan(&tripStatus, &deadline); err != nil {
 		return nil, fmt.Errorf("lock trip for matching: %w", err)
 	}
 	if tripStatus != "pending" {
 		return nil, ErrTripAlreadyMatched
 	}
+	if !deadline.After(time.Now()) {
+		if err := finishMatching(ctx, tx, tripID, "timeout"); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return nil, ErrNoAvailableDriver
+	}
 	c := &Candidate{Driver: &pb.Driver{Location: &pb.Location{}}}
 	err = tx.QueryRow(ctx, `SELECT d.id::TEXT,d.name,d.profile_pic,d.car_plate,d.package_slug,ST_Y(d.location::geometry),ST_X(d.location::geometry),ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)
 	FROM drivers d JOIN users u ON u.id=d.id JOIN driver_eligibility e ON e.driver_id=d.id
 	JOIN driver_live_locations l ON l.driver_id=d.id JOIN trips t ON t.id=$5::UUID
-	WHERE d.package_slug=$1 AND d.status='available' AND d.available=TRUE AND d.online_requested=TRUE AND d.location IS NOT NULL AND e.eligible_to_drive=TRUE
-	AND EXISTS (SELECT 1 FROM driver_socket_sessions s WHERE s.driver_id=d.id AND s.expires_at>NOW())
-	AND d.online_market_code=t.market_code AND driver_market_at(d.location)=t.market_code
-	AND l.recorded_at>=NOW()-INTERVAL '30 minutes'
-	AND driver_balance_eligible(d.id,d.online_market_code)
-	AND ST_DWithin(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography,$4) AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
-	ORDER BY ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-COALESCE(u.trust_score,100)*2,d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
+	WHERE `+driverstate.AvailabilityPredicate("t.market_code", "$1", "ST_SetSRID(ST_MakePoint($3,$2),4326)::geography", "$4")+` AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
+	ORDER BY ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-LEAST(GREATEST(COALESCE(u.provider_trust_score,100)-100,0)*2,$6),d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID, trustDistanceAdvantageMeters).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if err := finishMatching(ctx, tx, tripID, "no_drivers"); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
 		return nil, ErrNoAvailableDriver
 	}
+
 	if err != nil {
 		return nil, fmt.Errorf("find nearby driver: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(attempt),0)+1 FROM driver_assignments WHERE trip_id=$1::UUID`, tripID).Scan(&c.Attempt); err != nil {
 		return nil, err
 	}
-	if err := tx.QueryRow(ctx, `INSERT INTO driver_assignments(trip_id,driver_id,attempt,status,expires_at,trip_payload) VALUES($1::UUID,$2::UUID,$3,'offered',NOW()+make_interval(secs=>$4),$5) RETURNING expires_at`, tripID, c.Driver.Id, c.Attempt, ttl.Seconds(), payload).Scan(&c.ExpiresAt); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO driver_assignments(trip_id,driver_id,attempt,status,expires_at,trip_payload) VALUES($1::UUID,$2::UUID,$3,'offered',LEAST(NOW()+make_interval(secs=>$4),(SELECT matching_deadline FROM trips WHERE id=$1::UUID)),$5) RETURNING expires_at`, tripID, c.Driver.Id, c.Attempt, ttl.Seconds(), payload).Scan(&c.ExpiresAt); err != nil {
 		return nil, fmt.Errorf("create driver offer: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE drivers SET status='offered',available=FALSE,updated_at=NOW() WHERE id=$1::UUID`, c.Driver.Id); err != nil {
@@ -262,6 +280,9 @@ func (r *postgresDriverRepo) DeclineAssignment(ctx context.Context, tripID, driv
 }
 
 func (r *postgresDriverRepo) ExpireOffers(ctx context.Context, limit int) ([]RetryTrip, error) {
+	if err := r.expireMatchingDeadlines(ctx, limit); err != nil {
+		return nil, err
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -315,4 +336,54 @@ func (r *postgresDriverRepo) get(ctx context.Context, id string) (*pb.Driver, er
 		return nil, fmt.Errorf("get driver: %w", err)
 	}
 	return d, nil
+}
+
+func finishMatching(ctx context.Context, tx pgx.Tx, tripID, outcome string) error {
+	var rider string
+	if err := tx.QueryRow(ctx, `UPDATE trips SET status='cancelled',matching_outcome=$2,cancellation_reason='matching_'||$2,cancelled_at=NOW(),updated_at=NOW(),version=version+1 WHERE id=$1::UUID AND status IN ('pending','assigned') RETURNING rider_id::TEXT`, tripID, outcome).Scan(&rider); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE driver_assignments SET status='timed_out',responded_at=NOW() WHERE trip_id=$1::UUID AND status='offered'`, tripID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE drivers SET status='offline',available=FALSE WHERE id=(SELECT assigned_driver_id FROM trips WHERE id=$1::UUID) AND status='offered'`, tripID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `SELECT refresh_driver_operating_market(assigned_driver_id) FROM trips WHERE id=$1::UUID AND assigned_driver_id IS NOT NULL`, tripID); err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]any{"trip": map[string]any{"id": tripID, "riderID": rider, "status": "cancelled"}, "matchingOutcome": outcome})
+	_, err := tx.Exec(ctx, `INSERT INTO trip_event_outbox(trip_id,topic,recipient_id,payload) VALUES($1::UUID,$2,$3::UUID,$4::JSONB) ON CONFLICT DO NOTHING`, tripID, contracts.TripEventNoDriversFound, rider, payload)
+	return err
+}
+func (r *postgresDriverRepo) expireMatchingDeadlines(ctx context.Context, limit int) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id::TEXT FROM trips WHERE status IN ('pending','assigned') AND matching_deadline<=NOW() ORDER BY matching_deadline FOR UPDATE SKIP LOCKED LIMIT $1`, limit)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := finishMatching(ctx, tx, id, "timeout"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }

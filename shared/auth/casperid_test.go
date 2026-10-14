@@ -32,7 +32,7 @@ func TestCasperIDVerifierVerifiesBusinessToken(t *testing.T) {
 	claims := jwt.MapClaims{
 		"iss": "casperid.com", "aud": "heygo-app", "sub": "casper-user-1",
 		"exp": time.Now().Add(time.Minute).Unix(), "token_type": "business", "app_id": "heygo-app",
-		"humanId": "human-1", "email": "driver@example.com", "email_verified": true, "verified": true, "tier": 2, "trust_score": 640, "scopes": []string{"read:kyc_level"},
+		"humanId": "human-1", "name": "Driver Example", "email": "driver@example.com", "email_verified": true, "verified": true, "tier": 2, "trust_capacity": map[string]any{"service_category": "mobility", "calculated_at": "2026-09-27T12:00:00.000Z", "provider": map[string]any{"score": 720, "status": "active", "identity_readiness": 100, "policy_version": "mobility-v1"}, "consumer": map[string]any{"score": 680, "status": "active", "identity_readiness": 100, "policy_version": "mobility-v1"}}, "scopes": []string{"read:trust_capacity"},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = "test-key"
@@ -48,11 +48,14 @@ func TestCasperIDVerifierVerifiesBusinessToken(t *testing.T) {
 	if identity.Subject != "casper-user-1" || identity.HumanID != "human-1" || !identity.Verified || identity.KYCTier != "2" {
 		t.Fatalf("unexpected identity: %+v", identity)
 	}
-	if identity.TrustScore == nil || *identity.TrustScore != 640 {
-		t.Fatalf("trust score was not read from CasperID token: %+v", identity)
+	if identity.TrustCapacity == nil || identity.TrustCapacity.Provider == nil || identity.TrustCapacity.Provider.Score != 720 || identity.TrustCapacity.Consumer == nil || identity.TrustCapacity.Consumer.Score != 680 {
+		t.Fatalf("trust capacity was not read from CasperID token: %+v", identity)
 	}
 	if identity.Email != "driver@example.com" || !identity.EmailVerified {
 		t.Fatalf("email was not read from CasperID token: %+v", identity)
+	}
+	if identity.Name != "Driver Example" {
+		t.Fatalf("name was not read from CasperID token: %+v", identity)
 	}
 }
 

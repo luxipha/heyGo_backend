@@ -2,10 +2,11 @@ locals {
   runtime_image_prefix = "${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_repository_id}"
 
   api_gateway_secrets = {
-    DATABASE_URL           = "database-url"
-    INTERNAL_SERVICE_TOKEN = "internal-service-token"
-    CASPERID_APP_ID        = "casperid-app-id"
-    CASPERID_API_SECRET    = "casperid-api-secret"
+    DATABASE_URL              = "database-url"
+    INTERNAL_SERVICE_TOKEN    = "internal-service-token"
+    OTP_PEPPER                = "otp-pepper"
+    HEYGO_ADMIN_SETTINGS_KEY  = "admin-settings-key"
+    RIDE_AGENT_INTERNAL_TOKEN = "ride-agent-internal-token"
   }
   driver_service_secrets = {
     DATABASE_URL           = "database-url"
@@ -21,8 +22,6 @@ locals {
   trip_service_secrets = {
     DATABASE_URL           = "database-url"
     INTERNAL_SERVICE_TOKEN = "internal-service-token"
-    CASPERID_APP_ID        = "casperid-app-id"
-    CASPERID_API_SECRET    = "casperid-api-secret"
   }
 }
 
@@ -97,6 +96,10 @@ resource "google_cloud_run_v2_service" "driver" {
       env {
         name  = "PUBSUB_DELIVERY_MODE"
         value = "push"
+      }
+      env {
+        name  = "HEYGO_MONNIFY_REFUNDS_READY"
+        value = "false"
       }
       env {
         name  = "GCP_REGION"
@@ -232,11 +235,6 @@ resource "google_cloud_run_v2_service" "trip" {
         name  = "DB_MIN_CONNS"
         value = "0"
       }
-      env {
-        name  = "CASPERID_BASE_URL"
-        value = var.casperid_base_url
-      }
-
       dynamic "env" {
         for_each = local.trip_service_secrets
         content {
@@ -496,6 +494,18 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         value = var.allowed_origins
       }
       env {
+        name  = "ADMIN_FRONTEND_URL"
+        value = var.admin_frontend_url
+      }
+      env {
+        name  = "RIDE_AGENT_URL"
+        value = google_cloud_run_v2_service.ride_agent[0].uri
+      }
+      env {
+        name  = "RIDE_AGENT_AUDIENCE"
+        value = google_cloud_run_v2_service.ride_agent[0].uri
+      }
+      env {
         name  = "DRIVER_SERVICE_URL"
         value = "${trimprefix(google_cloud_run_v2_service.driver[0].uri, "https://")}:443"
       }
@@ -519,23 +529,6 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         name  = "PAYMENT_SERVICE_AUDIENCE"
         value = google_cloud_run_v2_service.payment[0].uri
       }
-      env {
-        name  = "CASPERID_JWKS_URL"
-        value = var.casperid_jwks_url
-      }
-      env {
-        name  = "CASPERID_ISSUER"
-        value = var.casperid_issuer
-      }
-      env {
-        name  = "CASPERID_TOKEN_URL"
-        value = var.casperid_token_url
-      }
-      env {
-        name  = "CASPERID_DRIVER_REDIRECT_URI"
-        value = var.casperid_driver_redirect_uri
-      }
-
       dynamic "env" {
         for_each = local.api_gateway_secrets
         content {
@@ -589,13 +582,14 @@ resource "google_cloud_run_v2_service_iam_member" "public_payment_webhook" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "api_gateway_internal_invoker" {
-  for_each = var.deploy_services ? toset(["driver-service", "trip-service"]) : toset([])
+  for_each = var.deploy_services ? toset(["driver-service", "trip-service", "ride-agent-gateway"]) : toset([])
 
   project  = var.project_id
   location = var.region
   name = {
-    driver-service = google_cloud_run_v2_service.driver[0].name
-    trip-service   = google_cloud_run_v2_service.trip[0].name
+    driver-service     = google_cloud_run_v2_service.driver[0].name
+    trip-service       = google_cloud_run_v2_service.trip[0].name
+    ride-agent-gateway = google_cloud_run_v2_service.ride_agent[0].name
   }[each.value]
   role   = "roles/run.invoker"
   member = "serviceAccount:${google_service_account.runtime["api-gateway"].email}"

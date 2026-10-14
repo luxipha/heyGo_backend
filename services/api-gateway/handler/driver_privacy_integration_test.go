@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/storage"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 type privacyMemoryStore struct {
@@ -265,6 +265,26 @@ func TestDriverDeletionWaitsForStaffAndPreservesTripFinancialRecords(t *testing.
 		ctx.Set("admin", adminIdentity{ID: adminID, Username: "reviewer"})
 		api.reviewAccountDeletionRequest(ctx)
 	})
+	// An offered assignment must block deletion even if the Trip has not yet
+	// moved to a status caught by the active-Trip check.
+	offerFareID, offerTripID := uuid.NewString(), uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO ride_fares(id,rider_id,package_slug,total_fare_minor,route) VALUES($1::UUID,$2::UUID,'sedan',500000,'{}'::JSONB)`, offerFareID, riderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO trips(id,rider_id,ride_fare_id,status) VALUES($1::UUID,$2::UUID,$3::UUID,'pending')`, offerTripID, riderID, offerFareID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO driver_assignments(trip_id,driver_id,attempt,status,expires_at,trip_payload) VALUES($1::UUID,$2::UUID,1,'offered',NOW()+INTERVAL '1 minute','{}'::JSONB)`, offerTripID, driverID); err != nil {
+		t.Fatal(err)
+	}
+	blocked := httptest.NewRecorder()
+	router.ServeHTTP(blocked, httptest.NewRequest(http.MethodPost, "/review/"+requestID, strings.NewReader(`{"decision":"approve"}`)))
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("active offer should block deletion: %d %s", blocked.Code, blocked.Body.String())
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM driver_assignments WHERE trip_id=$1::UUID`, offerTripID); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/review/"+requestID, strings.NewReader(`{"decision":"approve"}`))
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)

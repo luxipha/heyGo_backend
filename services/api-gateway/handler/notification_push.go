@@ -141,11 +141,14 @@ func (s *fcmSender) accessToken(ctx context.Context) (string, error) {
 }
 
 func (s *fcmSender) send(ctx context.Context, token, title, body, notificationID, notificationType string) error {
+	return s.sendWithData(ctx, token, title, body, map[string]string{"notification_id": notificationID, "notification_type": notificationType})
+}
+func (s *fcmSender) sendWithData(ctx context.Context, token, title, body string, data map[string]string) error {
 	accessToken, err := s.accessToken(ctx)
 	if err != nil {
 		return err
 	}
-	message := fcmMessage{Token: token, Data: map[string]string{"notification_id": notificationID, "notification_type": notificationType}}
+	message := fcmMessage{Token: token, Data: data}
 	message.Notification.Title, message.Notification.Body = title, body
 	payload, err := json.Marshal(map[string]any{"message": message})
 	if err != nil {
@@ -174,6 +177,7 @@ func (s *fcmSender) send(ctx context.Context, token, title, body, notificationID
 }
 
 type pendingPushDelivery struct {
+	Audience       string
 	ID             int64
 	NotificationID string
 	DeviceID       string
@@ -209,15 +213,15 @@ func RunNotificationPushJobsOnce(ctx context.Context, pool *pgxpool.Pool, limit 
 	if err != nil {
 		return fmt.Errorf("initialize FCM sender: %w", err)
 	}
-	for range limit {
-		job, err := claimPushDelivery(ctx, pool)
+	for i := range min(limit, 100) {
+		job, err := claimAnyPushDelivery(ctx, pool, i%2 == 0)
 		if err != nil {
 			return fmt.Errorf("claim FCM delivery: %w", err)
 		}
 		if job == nil {
 			return nil
 		}
-		sendErr := sender.send(ctx, job.Token, job.Title, job.Body, job.NotificationID, job.Type)
+		sendErr := sendClaimedPush(ctx, pool, sender, *job)
 		finishPushDelivery(ctx, pool, *job, sendErr)
 	}
 	return nil
@@ -226,9 +230,11 @@ func RunNotificationPushJobsOnce(ctx context.Context, pool *pgxpool.Pool, limit 
 func runNotificationPushWorker(ctx context.Context, pool *pgxpool.Pool, sender *fcmSender) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	riderFirst := true
 	for {
 		for {
-			job, err := claimPushDelivery(ctx, pool)
+			job, err := claimAnyPushDelivery(ctx, pool, riderFirst)
+			riderFirst = !riderFirst
 			if err != nil {
 				logs.L().Warnw("failed to claim FCM delivery job", "error", err)
 				break
@@ -236,7 +242,7 @@ func runNotificationPushWorker(ctx context.Context, pool *pgxpool.Pool, sender *
 			if job == nil {
 				break
 			}
-			err = sender.send(ctx, job.Token, job.Title, job.Body, job.NotificationID, job.Type)
+			err = sendClaimedPush(ctx, pool, sender, *job)
 			if err != nil {
 				logs.L().Warnw("FCM notification delivery failed", "deliveryID", job.ID, "attempt", job.Attempts, "error", err)
 			}
@@ -293,6 +299,13 @@ func nullableNotificationDriverID(driverID string) any {
 }
 
 func finishPushDelivery(ctx context.Context, pool *pgxpool.Pool, job pendingPushDelivery, sendErr error) {
+	if job.Audience == "rider" {
+		if !riderPushStillAllowed(ctx, pool, job) {
+			return
+		}
+		finishRiderPushDelivery(ctx, pool, job, sendErr)
+		return
+	}
 	if sendErr == nil {
 		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='sent',sent_at=NOW(),lease_until=NULL,last_error='' WHERE id=$1`, job.ID)
 		return

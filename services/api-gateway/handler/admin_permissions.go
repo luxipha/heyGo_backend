@@ -9,27 +9,31 @@ import (
 )
 
 const (
-	permissionDriverRead     = "drivers.read"
-	permissionDriverContact  = "drivers.contact.read"
-	permissionDriverWrite    = "drivers.review"
-	permissionGeofenceRead   = "geofences.read"
-	permissionGeofenceWrite  = "geofences.manage"
-	permissionFinanceRead    = "finance.read"
-	permissionFinanceWrite   = "finance.manage"
-	permissionSupportRead    = "support.read"
-	permissionSupportContact = "support.case.contact.read"
-	permissionSupportWrite   = "support.manage"
-	permissionSafetyRead     = "safety.read"
-	permissionSafetyWrite    = "safety.review"
-	permissionTripRead       = "trips.read"
-	permissionRiderRead      = "riders.read"
-	permissionRiderRestrict  = "riders.restrict"
-	permissionRiderFlags     = "riders.flags.write"
-	permissionSettings       = "settings.manage"
-	permissionStaff          = "staff.manage"
-	permissionAudit          = "audit.read"
-	permissionLive           = "live.read"
-	permissionLedgerRead     = "finance.ledger.read"
+	permissionDriverRead         = "drivers.read"
+	permissionDriverContact      = "drivers.contact.read"
+	permissionDriverWrite        = "drivers.review"
+	permissionGeofenceRead       = "geofences.read"
+	permissionGeofenceWrite      = "geofences.manage"
+	permissionFinanceRead        = "finance.read"
+	permissionFinanceWrite       = "finance.manage"
+	permissionSupportRead        = "support.read"
+	permissionSupportContact     = "support.case.contact.read"
+	permissionSupportWrite       = "support.manage"
+	permissionSafetyRead         = "safety.read"
+	permissionSafetyWrite        = "safety.review"
+	permissionTripRead           = "trips.read"
+	permissionRiderRead          = "riders.read"
+	permissionRiderRestrict      = "riders.restrict"
+	permissionRiderFlags         = "riders.flags.write"
+	permissionSettings           = "settings.manage"
+	permissionStaff              = "staff.manage"
+	permissionAudit              = "audit.read"
+	permissionLive               = "live.read"
+	permissionLedgerRead         = "finance.ledger.read"
+	permissionPromotionRead      = "promotions.read"
+	permissionPromotionWrite     = "promotions.manage"
+	permissionCommunicationRead  = "communications.read"
+	permissionCommunicationWrite = "communications.manage"
 )
 
 var rolePermissions = map[string][]string{
@@ -38,7 +42,7 @@ var rolePermissions = map[string][]string{
 	"support":     {permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionTripRead, permissionRiderRead, permissionRiderFlags},
 	"finance":     {permissionFinanceRead, permissionFinanceWrite, permissionLedgerRead, permissionTripRead, permissionRiderRead},
 	"safety":      {permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionLive},
-	"super_admin": {permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionLedgerRead, permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionFinanceWrite, permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionSettings, permissionStaff, permissionAudit, permissionLive},
+	"super_admin": {permissionPromotionRead, permissionPromotionWrite, permissionCommunicationRead, permissionCommunicationWrite, permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionLedgerRead, permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionFinanceWrite, permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionSettings, permissionStaff, permissionAudit, permissionLive},
 }
 
 func roleValue(role *string) string {
@@ -101,8 +105,26 @@ func adminRoutePermission(method, path string) string {
 			return permissionSupportRead
 		}
 		return permissionSupportWrite
+	case path == "/admin/settings/security":
+		if read {
+			return permissionSettings
+		}
 	case strings.HasPrefix(path, "/admin/settings/resend"), strings.HasPrefix(path, "/admin/settings/email-delivery"), strings.HasPrefix(path, "/admin/settings/sms"):
 		return permissionSettings
+	case strings.HasPrefix(path, "/admin/promotions/"):
+		if read {
+			return permissionPromotionRead
+		}
+		return permissionPromotionWrite
+	case strings.HasPrefix(path, "/admin/communications/"):
+		if read {
+			return permissionCommunicationRead
+		}
+		return permissionCommunicationWrite
+	case path == "/admin/analytics/summary":
+		if read {
+			return permissionTripRead
+		}
 	case path == "/admin/trips" || strings.HasPrefix(path, "/admin/trips/"):
 		if read {
 			return permissionTripRead
@@ -133,7 +155,7 @@ func adminRoutePermission(method, path string) string {
 		if read {
 			return permissionLive
 		}
-	case path == "/admin/safety/incidents" || path == "/admin/safety/sos-alerts" || strings.HasPrefix(path, "/admin/safety/incidents/"):
+	case path == "/admin/safety/summary" || path == "/admin/safety/incidents" || path == "/admin/safety/sos-alerts" || strings.HasPrefix(path, "/admin/safety/incidents/"):
 		if read {
 			return permissionSafetyRead
 		}

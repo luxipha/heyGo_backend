@@ -36,6 +36,7 @@ func scanStaffIncident(row pgx.Row) (staffIncident, error) {
 }
 
 func registerAdminSafetyRoutes(group *gin.RouterGroup, a *adminAPI) {
+	group.GET("/safety/summary", a.safetySummary)
 	group.GET("/safety/incidents", a.listSafetyIncidents)
 	group.GET("/safety/sos-alerts", a.listSOSAlerts)
 	group.GET("/safety/incidents/:incidentID", a.safetyIncident)

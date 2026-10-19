@@ -73,6 +73,7 @@ func registerSupportRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, f
 
 func registerAdminSupportRoutes(admin *gin.RouterGroup, pool *pgxpool.Pool, files storage.ObjectStore, csrf gin.HandlerFunc) {
 	a := &supportAPI{pool: pool, files: files}
+	admin.GET("/support/summary", a.adminSummary)
 	admin.GET("/support/topics", a.adminTopics)
 	admin.POST("/support/topics", csrf, a.createTopic)
 	admin.PATCH("/support/topics/:code", csrf, a.updateTopic)

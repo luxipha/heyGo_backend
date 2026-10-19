@@ -155,6 +155,7 @@ func main() {
 		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
 			Initializer: paymentProcessor, Verifier: paymentProcessor, BankVerifier: paymentProcessor, RefundExecutor: paymentProcessor}, readiness)
 	root := http.NewServeMux()
+	root.HandleFunc("/payment/return", handler.PaymentReturn)
 	root.Handle("/internal/tasks/payment-events/drain", handler.PaymentEventDrainHandler(databasePool, bus.Producer,
 		sharedauth.NewPubSubPushAuthorizer(env.GetString("PUBSUB_PUSH_AUDIENCE", ""), env.GetString("PUBSUB_PUSH_SERVICE_ACCOUNT", ""))))
 	if pushHandler != nil {

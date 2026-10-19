@@ -1,5 +1,5 @@
 resource "google_cloud_run_v2_service" "ride_agent" {
-  count = var.deploy_services ? 1 : 0
+  count = var.deploy_services && var.deploy_ride_agent ? 1 : 0
 
   project             = var.project_id
   name                = "ride-agent-gateway"
@@ -69,7 +69,7 @@ resource "google_cloud_run_v2_service" "ride_agent" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "github_ride_agent_invoker" {
-  count    = var.deploy_services ? 1 : 0
+  count    = var.deploy_services && var.deploy_ride_agent ? 1 : 0
   project  = var.project_id
   location = var.region
   name     = google_cloud_run_v2_service.ride_agent[0].name

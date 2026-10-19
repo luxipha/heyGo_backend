@@ -12,6 +12,8 @@ import (
 )
 
 const (
+	MinPasswordBytes        = 12
+	MaxPasswordBytes        = 256
 	argonMemory      uint32 = 19 * 1024
 	argonIterations  uint32 = 2
 	argonParallelism uint8  = 1
@@ -20,7 +22,7 @@ const (
 var ErrWeakPassword = errors.New("admin password must be 12 to 256 bytes")
 
 func HashPassword(password string) (string, error) {
-	if len(password) < 12 || len(password) > 256 {
+	if len(password) < MinPasswordBytes || len(password) > MaxPasswordBytes {
 		return "", ErrWeakPassword
 	}
 	salt := make([]byte, 16)

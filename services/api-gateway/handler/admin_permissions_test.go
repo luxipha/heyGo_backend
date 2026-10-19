@@ -9,6 +9,10 @@ import (
 
 func TestAdminRoutePermissionsDenyUnmappedAndSeparateOwners(t *testing.T) {
 	cases := []struct{ method, path, want string }{
+		{http.MethodGet, "/admin/support/bug-reports", permissionSupportRead},
+		{http.MethodGet, "/admin/support/bug-reports/:reportID", permissionSupportRead},
+		{http.MethodPost, "/admin/support/bug-reports/:reportID/comments", permissionSupportWrite},
+		{http.MethodPatch, "/admin/support/bug-reports/:reportID", permissionSupportWrite},
 		{http.MethodGet, "/admin/drivers/:driverID/documents/:documentID/files/:side", permissionDriverRead},
 		{http.MethodGet, "/admin/drivers/:driverID/verification-timeline", permissionDriverRead},
 		{http.MethodPost, "/admin/drivers/:driverID/approval", permissionDriverWrite},
@@ -32,7 +36,15 @@ func TestAdminRoutePermissionsDenyUnmappedAndSeparateOwners(t *testing.T) {
 		{http.MethodPost, "/admin/riders/:riderID/restrictions/:restrictionID/lift", permissionRiderRestrict},
 		{http.MethodPost, "/admin/riders/:riderID/flags", permissionRiderFlags},
 		{http.MethodPost, "/admin/riders/:riderID/flags/:flagID/resolve", permissionRiderFlags},
+		{http.MethodGet, "/admin/safety/summary", permissionSafetyRead},
 		{http.MethodGet, "/admin/overview", permissionLive},
+		{http.MethodGet, "/admin/support/summary", permissionSupportRead},
+		{http.MethodGet, "/admin/analytics/summary", permissionTripRead},
+		{http.MethodGet, "/admin/promotions/campaigns", permissionPromotionRead},
+		{http.MethodPost, "/admin/promotions/campaigns", permissionPromotionWrite},
+		{http.MethodPatch, "/admin/communications/campaigns/:campaignID", permissionCommunicationWrite},
+		{http.MethodGet, "/admin/communications/campaigns", permissionCommunicationRead},
+		{http.MethodPost, "/admin/analytics/summary", ""},
 		{http.MethodGet, "/admin/live/drivers", permissionLive},
 		{http.MethodGet, "/admin/live/markers", permissionLive},
 		{http.MethodPatch, "/admin/safety/incidents/:incidentID", permissionSafetyWrite},

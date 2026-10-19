@@ -50,6 +50,6 @@ output "cloud_run_service_urls" {
     driver_service     = google_cloud_run_v2_service.driver[0].uri
     payment_service    = google_cloud_run_v2_service.payment[0].uri
     trip_service       = google_cloud_run_v2_service.trip[0].uri
-    ride_agent_gateway = google_cloud_run_v2_service.ride_agent[0].uri
+    ride_agent_gateway = try(google_cloud_run_v2_service.ride_agent[0].uri, null)
   } : null
 }

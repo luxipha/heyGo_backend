@@ -498,12 +498,20 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         value = var.admin_frontend_url
       }
       env {
+        name  = "ADMIN_COOKIE_SECURE"
+        value = "true"
+      }
+      env {
+        name  = "ADMIN_COOKIE_SAME_SITE"
+        value = "none"
+      }
+      env {
         name  = "RIDE_AGENT_URL"
-        value = google_cloud_run_v2_service.ride_agent[0].uri
+        value = var.deploy_ride_agent ? google_cloud_run_v2_service.ride_agent[0].uri : ""
       }
       env {
         name  = "RIDE_AGENT_AUDIENCE"
-        value = google_cloud_run_v2_service.ride_agent[0].uri
+        value = var.deploy_ride_agent ? google_cloud_run_v2_service.ride_agent[0].uri : ""
       }
       env {
         name  = "DRIVER_SERVICE_URL"
@@ -582,14 +590,14 @@ resource "google_cloud_run_v2_service_iam_member" "public_payment_webhook" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "api_gateway_internal_invoker" {
-  for_each = var.deploy_services ? toset(["driver-service", "trip-service", "ride-agent-gateway"]) : toset([])
+  for_each = var.deploy_services ? toset(concat(["driver-service", "trip-service"], var.deploy_ride_agent ? ["ride-agent-gateway"] : [])) : toset([])
 
   project  = var.project_id
   location = var.region
   name = {
     driver-service     = google_cloud_run_v2_service.driver[0].name
     trip-service       = google_cloud_run_v2_service.trip[0].name
-    ride-agent-gateway = google_cloud_run_v2_service.ride_agent[0].name
+    ride-agent-gateway = try(google_cloud_run_v2_service.ride_agent[0].name, "")
   }[each.value]
   role   = "roles/run.invoker"
   member = "serviceAccount:${google_service_account.runtime["api-gateway"].email}"

@@ -192,3 +192,9 @@ variable "monnify_base_url" {
   type        = string
   default     = "https://sandbox.monnify.com"
 }
+
+variable "deploy_ride_agent" {
+  description = "Deploy Places-backed destination lookup. Keep false while location product decisions are pending."
+  type        = bool
+  default     = true
+}

@@ -75,6 +75,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	registerDeviceRoutes(authenticated, pool)
 	registerDriverRoutes(authenticated, pool, files)
 	registerSupportRoutes(authenticated, pool, files)
+	registerBugReportRoutes(authenticated, pool)
 	registerNoShowRiderRoutes(authenticated, pool)
 	registerRiderHomeRoutes(authenticated, pool)
 	registerRideAgentRoutes(authenticated)

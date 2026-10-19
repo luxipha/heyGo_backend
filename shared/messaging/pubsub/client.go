@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/iam/apiv1/iampb"
 	gpubsub "cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"github.com/google/uuid"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
@@ -35,6 +37,7 @@ type Client struct {
 	client    *gpubsub.Client
 	projectID string
 	groupID   string
+	emulator  bool
 
 	mu         sync.Mutex
 	publishers map[string]*gpubsub.Publisher
@@ -51,7 +54,7 @@ func NewClient(ctx context.Context, projectID, groupID string) (*Client, error) 
 	if err != nil {
 		return nil, fmt.Errorf("create Pub/Sub client: %w", err)
 	}
-	c := &Client{client: raw, projectID: projectID, groupID: groupID, publishers: make(map[string]*gpubsub.Publisher)}
+	c := &Client{client: raw, projectID: projectID, groupID: groupID, emulator: os.Getenv("PUBSUB_EMULATOR_HOST") != "", publishers: make(map[string]*gpubsub.Publisher)}
 	c.Producer = &Producer{client: c}
 	c.Consumer = &Consumer{client: c}
 	return c, nil
@@ -73,6 +76,14 @@ func (c *Client) Ping(ctx context.Context) error {
 	topics := contracts.AllTopics()
 	if len(topics) == 0 {
 		return errors.New("no Pub/Sub topics configured")
+	}
+	if c.emulator {
+		// The official emulator does not implement IAM. Verify a provisioned
+		// topic is reachable rather than treating unsupported IAM as readiness.
+		_, err := c.client.TopicAdminClient.GetTopic(ctx, &pubsubpb.GetTopicRequest{
+			Topic: fmt.Sprintf("projects/%s/topics/%s", c.projectID, topics[0]),
+		})
+		return err
 	}
 	permission := "pubsub.topics.publish"
 	result, err := c.client.TopicAdminClient.TestIamPermissions(ctx, &iampb.TestIamPermissionsRequest{
@@ -98,12 +109,11 @@ func (c *Client) Close() {
 	_ = c.client.Close()
 }
 
-// SubscriptionID is shared by the application and Terraform so every service
-// consumes through its own subscription, the Pub/Sub equivalent of a Kafka
-// consumer group.
+// SubscriptionID matches infra/terraform/messaging.tf: preserve the group ID
+// and topic underscores, replacing only topic dots. Existing subscriptions and
+// their retained messages must remain addressable by pull consumers.
 func SubscriptionID(groupID, topic string) string {
-	replacer := strings.NewReplacer(".", "-", "_", "-", "/", "-")
-	return replacer.Replace(groupID + "-" + topic)
+	return groupID + "-" + strings.ReplaceAll(topic, ".", "-")
 }
 
 type Producer struct {

@@ -4,6 +4,7 @@ secrets.yaml
 # Environment variables
 .env
 .env.local
+/keys.md
 
 # Local dev artifacts (scripts/dev.sh, air)
 .dev/

@@ -1,13 +1,13 @@
 locals {
   runtime_image_prefix = "${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_repository_id}"
 
-  api_gateway_secrets = {
+  api_gateway_secrets = merge({
     DATABASE_URL              = "database-url"
     INTERNAL_SERVICE_TOKEN    = "internal-service-token"
     OTP_PEPPER                = "otp-pepper"
     HEYGO_ADMIN_SETTINGS_KEY  = "admin-settings-key"
     RIDE_AGENT_INTERNAL_TOKEN = "ride-agent-internal-token"
-  }
+  }, var.bug_report_provider == "mantis" ? { MANTIS_API_TOKEN = "mantis-api-token" } : {})
   driver_service_secrets = {
     DATABASE_URL           = "database-url"
     INTERNAL_SERVICE_TOKEN = "internal-service-token"
@@ -496,6 +496,22 @@ resource "google_cloud_run_v2_service" "api_gateway" {
       env {
         name  = "ADMIN_FRONTEND_URL"
         value = var.admin_frontend_url
+      }
+      env {
+        name  = "BUG_REPORT_PROVIDER"
+        value = var.bug_report_provider
+      }
+      dynamic "env" {
+        for_each = var.bug_report_provider == "mantis" ? {
+          MANTIS_URL                      = "https://issues.heygo.ng"
+          MANTIS_RIDER_PROJECT_ID         = "2"
+          MANTIS_RIDER_CATEGORY_ID        = "2"
+          MANTIS_RIDER_CUSTOM_FIELDS_JSON = jsonencode({ "1" = "Rider", "2" = "Rider App", "4" = "Unknown" })
+        } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
       env {
         name  = "ADMIN_COOKIE_SECURE"

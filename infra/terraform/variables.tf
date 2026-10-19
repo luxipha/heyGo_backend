@@ -198,3 +198,13 @@ variable "deploy_ride_agent" {
   type        = bool
   default     = true
 }
+
+variable "bug_report_provider" {
+  description = "Optional bug tracker adapter. Disable to unplug reporting without changing client APIs."
+  type        = string
+  default     = "disabled"
+  validation {
+    condition     = contains(["disabled", "mantis"], var.bug_report_provider)
+    error_message = "bug_report_provider must be disabled or mantis."
+  }
+}

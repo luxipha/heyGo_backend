@@ -13,6 +13,7 @@ BUG_REPORT_PROVIDER=mantis
 MANTIS_URL=https://issues.heygo.ng
 MANTIS_RIDER_PROJECT_ID=2
 MANTIS_RIDER_CATEGORY_ID=2
+MANTIS_RIDER_CUSTOM_FIELDS_JSON={"1":"Rider","2":"Rider App","4":"Unknown"}
 MANTIS_API_TOKEN=<runtime-secret>
 ```
 
@@ -42,3 +43,7 @@ Comments have no automatic retry. If delivery is uncertain, Admin requires a ref
 Set `BUG_REPORT_PROVIDER=disabled` (or unset it) and restart the gateway. Routes remain stable and return an honest unavailable response. Credentials can then be removed through the normal secret-management process. Existing Mantis reports and HeyGo reference rows are preserved. Re-enabling the same instance/project restores access.
 
 Implement `Provider` and select it in `newBugReportAPI` to add another tracker. No Rider or Admin API/UI changes are required. Provider keys include the tracker instance/project so references cannot accidentally resolve against another configured instance. Replacing a provider does not migrate historical reports; migration of content and reference rows is a separate operation.
+
+## Required fields on the production tracker
+
+The Rider project requires Reporter Type (field 1), Source (field 2), and Platform (field 4). Configure the values above on the server; field 1 must allow `Rider` as well as the existing `Driver`. `Unknown` is the tracker's existing platform option and is truthful until client platform metadata is explicitly wired. The API does not infer Android/iOS from user input. App Version remains optional. All custom-field mapping stays inside the Mantis adapter; Rider and Admin contracts remain provider-neutral.

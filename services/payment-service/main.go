@@ -152,7 +152,7 @@ func main() {
 		return paymentProcessor.Ping(checkCtx)
 	}
 	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, bus,
-		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken,
+		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken, MonnifyBaseURL: paymentCfg.BaseURL,
 			Initializer: paymentProcessor, Verifier: paymentProcessor, BankVerifier: paymentProcessor, RefundExecutor: paymentProcessor}, readiness)
 	root := http.NewServeMux()
 	root.HandleFunc("/payment/return", handler.PaymentReturn)

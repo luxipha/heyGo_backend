@@ -115,3 +115,41 @@ func TestConfigurationAndRedirects(t *testing.T) {
 		t.Fatal("unknown status accepted")
 	}
 }
+
+func TestCustomFieldsAreValidatedCopiedAndSent(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			CustomFields []struct {
+				Field struct {
+					ID int `json:"id"`
+				} `json:"field"`
+				Value string `json:"value"`
+			} `json:"custom_fields"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			t.Fatal(err)
+		}
+		if len(b.CustomFields) != 3 || b.CustomFields[0].Field.ID != 1 || b.CustomFields[0].Value != "Rider" || b.CustomFields[1].Value != "Rider App" || b.CustomFields[2].Value != "Unknown" {
+			t.Errorf("wrong provider field mapping: %+v", b)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(201)
+		w.Write([]byte(`{"issue":{"id":15}}`))
+	}))
+	defer server.Close()
+	fields := map[int]string{1: "Rider", 2: "Rider App", 4: "Unknown"}
+	a, err := New(Config{URL: server.URL, Token: "test", ProjectID: 2, CategoryID: 2, CustomFields: fields})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.client = server.Client()
+	fields[1] = "Driver"
+	if _, err = a.Create(context.Background(), bugreports.Input{Title: "Test", Description: "Controlled test", Reference: "ref"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, fields := range []map[int]string{{0: "Rider"}, {-1: "Rider"}, {1: strings.Repeat("x", 256)}} {
+		if _, err = New(Config{URL: server.URL, Token: "test", ProjectID: 2, CategoryID: 2, CustomFields: fields}); err == nil {
+			t.Fatal("accepted invalid mapping")
+		}
+	}
+}

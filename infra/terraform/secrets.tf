@@ -13,6 +13,7 @@ locals {
     "monnify-contract-code",
     "ride-agent-internal-token",
     "ride-agent-places-key",
+    "mantis-api-token",
   ])
 
   service_secret_access = {
@@ -22,6 +23,7 @@ locals {
       "otp-pepper",
       "admin-settings-key",
       "ride-agent-internal-token",
+      "mantis-api-token",
     ])
     ride-agent-gateway = toset([
       "ride-agent-internal-token",

@@ -34,7 +34,13 @@ func newBugReportAPI(pool *pgxpool.Pool) *bugReportAPI {
 	if os.Getenv("BUG_REPORT_PROVIDER") == "mantis" {
 		project, _ := strconv.Atoi(os.Getenv("MANTIS_RIDER_PROJECT_ID"))
 		category, _ := strconv.Atoi(os.Getenv("MANTIS_RIDER_CATEGORY_ID"))
-		p, err := mantis.New(mantis.Config{URL: os.Getenv("MANTIS_URL"), Token: os.Getenv("MANTIS_API_TOKEN"), ProjectID: project, CategoryID: category})
+		var fields map[int]string
+		if raw := os.Getenv("MANTIS_RIDER_CUSTOM_FIELDS_JSON"); raw != "" {
+			if json.Unmarshal([]byte(raw), &fields) != nil {
+				return a
+			}
+		}
+		p, err := mantis.New(mantis.Config{URL: os.Getenv("MANTIS_URL"), Token: os.Getenv("MANTIS_API_TOKEN"), ProjectID: project, CategoryID: category, CustomFields: fields})
 		if err == nil {
 			a.provider = p
 		}

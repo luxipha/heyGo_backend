@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 type Config struct {
 	URL, Token            string
 	ProjectID, CategoryID int
+	CustomFields          map[int]string
 }
 type Adapter struct {
 	config Config
@@ -32,6 +34,17 @@ func New(c Config) (*Adapter, error) {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || c.Token == "" || c.ProjectID <= 0 || c.CategoryID <= 0 {
 		return nil, errors.New("invalid Mantis configuration")
 	}
+	if len(c.CustomFields) > 20 {
+		return nil, errors.New("too many Mantis custom fields")
+	}
+	fields := make(map[int]string, len(c.CustomFields))
+	for id, value := range c.CustomFields {
+		if id <= 0 || len(value) > 255 {
+			return nil, errors.New("invalid Mantis custom field")
+		}
+		fields[id] = value
+	}
+	c.CustomFields = fields
 	c.URL = strings.TrimRight(c.URL, "/")
 	return &Adapter{c, &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
@@ -77,6 +90,18 @@ func (a *Adapter) Create(ctx context.Context, in bugreports.Input) (string, erro
 		} `json:"issue"`
 	}
 	body := map[string]any{"summary": in.Title, "description": in.Description, "additional_information": "HeyGo reference: " + in.Reference, "project": map[string]int{"id": a.config.ProjectID}, "category": map[string]int{"id": a.config.CategoryID}, "view_state": map[string]int{"id": 50}}
+	keys := make([]int, 0, len(a.config.CustomFields))
+	for id := range a.config.CustomFields {
+		keys = append(keys, id)
+	}
+	sort.Ints(keys)
+	fields := make([]map[string]any, 0, len(keys))
+	for _, id := range keys {
+		fields = append(fields, map[string]any{"field": map[string]int{"id": id}, "value": a.config.CustomFields[id]})
+	}
+	if len(fields) > 0 {
+		body["custom_fields"] = fields
+	}
 	if err := a.request(ctx, "POST", "/issues", body, &out); err != nil {
 		return "", err
 	}

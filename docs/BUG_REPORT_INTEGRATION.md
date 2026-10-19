@@ -47,3 +47,5 @@ Implement `Provider` and select it in `newBugReportAPI` to add another tracker. 
 ## Required fields on the production tracker
 
 The Rider project requires Reporter Type (field 1), Source (field 2), and Platform (field 4). Configure the values above on the server; field 1 must allow `Rider` as well as the existing `Driver`. `Unknown` is the tracker's existing platform option and is truthful until client platform metadata is explicitly wired. The API does not infer Android/iOS from user input. App Version remains optional. All custom-field mapping stays inside the Mantis adapter; Rider and Admin contracts remain provider-neutral.
+
+The production hosting firewall rejects Go's generic HTTP user-agent with 403. The adapter explicitly identifies itself as `HeyGo-BugReports/1.0`, retaining the same token authentication and verified HTTPS. Upstream rejection logs include method/status only, never token values, report text or internal issue IDs.

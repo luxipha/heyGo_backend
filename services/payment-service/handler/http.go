@@ -36,9 +36,11 @@ type WebhookHandler struct {
 }
 
 type OperatingTopupHandler struct {
-	Pool          *pgxpool.Pool
-	InternalToken string
-	Initializer   interface {
+	// Exact provider origin gates unsigned sandbox callbacks; live always requires HMAC.
+	MonnifyBaseURL string
+	Pool           *pgxpool.Pool
+	InternalToken  string
+	Initializer    interface {
 		CreateOperatingTopupSession(context.Context, int64, string, string, string) (*types.ProviderSession, error)
 		CreateNoShowDebtPaymentSession(context.Context, int64, string, string, string, string) (*types.ProviderSession, error)
 	}
@@ -106,7 +108,9 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	if !ValidMonnifySignature(body, c.GetHeader("monnify-signature"), h.secret) {
+	signature := c.GetHeader("monnify-signature")
+	unsignedSandbox := signature == "" && h.topups != nil && h.topups.MonnifyBaseURL == "https://sandbox.monnify.com"
+	if !unsignedSandbox && !ValidMonnifySignature(body, signature, h.secret) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook signature"})
 		return
 	}
@@ -114,6 +118,9 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 	var event monnifyWebhook
 	if err := json.Unmarshal(body, &event); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook payload"})
+		return
+	}
+	if unsignedSandbox && !h.verifySandboxNotification(c, &event) {
 		return
 	}
 	if event.EventType == "SUCCESSFUL_REFUND" || event.EventType == "FAILED_REFUND" {

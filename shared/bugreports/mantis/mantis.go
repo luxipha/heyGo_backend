@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
@@ -68,12 +69,17 @@ func (a *Adapter) request(ctx context.Context, method, path string, body, out an
 	req.Header.Set("Authorization", a.config.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	// Identify this authorized integration; shared-hosting bot filters reject
+	// the generic Go HTTP client user-agent.
+	req.Header.Set("User-Agent", "HeyGo-BugReports/1.0")
 	res, err := a.client.Do(req)
 	if err != nil {
 		return bugreports.ErrUnavailable
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// Status only: never log credentials, report content or internal issue IDs.
+		log.Printf("Mantis integration request rejected: method=%s status=%d", method, res.StatusCode)
 		return fmt.Errorf("bug tracker HTTP %d", res.StatusCode)
 	}
 	if out != nil {

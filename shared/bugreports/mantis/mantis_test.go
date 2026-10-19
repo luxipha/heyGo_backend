@@ -14,6 +14,9 @@ import (
 func TestAdapterContractAndPrivacy(t *testing.T) {
 	var calls []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.UserAgent() != "HeyGo-BugReports/1.0" {
+			t.Error("missing integration user-agent")
+		}
 		if r.Header.Get("Authorization") != "test-token" {
 			t.Error("missing server credential")
 		}

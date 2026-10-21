@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"io"
 	"net/http"
 	"os"
@@ -64,9 +66,17 @@ func callRideAgent(ctx context.Context, body agent.Request) (agent.Response, err
 	}
 	return reply, nil
 }
-func registerRideAgentRoutes(authenticated *gin.RouterGroup) {
+func registerRideAgentRoutes(authenticated *gin.RouterGroup, pools ...*pgxpool.Pool) {
 	rider := authenticated.Group("/rider", gatewayauth.RequireRole("rider"))
 	rider.POST("/agent/resolve", func(ctx *gin.Context) {
+		if len(pools) > 0 {
+			status, err := geo.ReadSettings(ctx.Request.Context(), pools[0])
+			if err != nil || status.Settings.PlaceProvider != "google" {
+				driverError(ctx, 503, "places_unavailable", "Destination lookup is unavailable")
+				return
+			}
+		}
+
 		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, 4096)
 		var body agent.Request
 		if err := ctx.ShouldBindJSON(&body); err != nil || body.SchemaVersion != 1 || len(body.Message) > 500 || len(body.PlaceID) > 256 {

@@ -195,27 +195,53 @@ func (a *phoneAuthAPI) requestOTP(ctx *gin.Context) {
 }
 
 func (a *phoneAuthAPI) requestEmailOTP(ctx *gin.Context) {
-	ready, readinessErr := a.channelReady(ctx.Request.Context(), "email")
-	if len(a.pepper) < 32 || readinessErr != nil || !ready {
-		driverError(ctx, http.StatusServiceUnavailable, "email_unavailable", "Email sign-in is not configured")
-		return
-	}
 	var body struct {
 		Email string `json:"email"`
 	}
 	if ctx.ShouldBindJSON(&body) != nil {
-		driverError(ctx, http.StatusBadRequest, "invalid_email", "A valid email address is required")
+		driverError(ctx, 400, "invalid_email", "A valid email address is required")
 		return
 	}
 	email, ok := normalizeEmail(body.Email)
 	if !ok {
-		driverError(ctx, http.StatusBadRequest, "invalid_email", "A valid email address is required")
+		driverError(ctx, 400, "invalid_email", "A valid email address is required")
+		return
+	}
+	if len(a.pepper) < 32 {
+		driverError(ctx, 503, "email_unavailable", "Email sign-in is not configured")
+		return
+	}
+	if a.pool != nil && len(a.deliveryKey) == 32 {
+		review, err := readReviewOTP(ctx.Request.Context(), a.pool)
+		if err != nil {
+			driverError(ctx, 503, "email_unavailable", "Email sign-in is unavailable")
+			return
+		}
+		if review.active() && review.Email == email {
+			code, err := openAdminValue(a.deliveryKey, review.Ciphertext, "heygo-review-otp-v1")
+			if err != nil {
+				driverError(ctx, 503, "email_unavailable", "Email sign-in is unavailable")
+				return
+			}
+			a.requestChallenge(ctx, "email", email, func(context.Context, string, string) error { return nil }, &reviewChallenge{Code: code, Version: review.Version, ExpiresAt: review.ExpiresAt})
+			return
+		}
+	}
+	ready, err := a.channelReady(ctx.Request.Context(), "email")
+	if err != nil || !ready {
+		driverError(ctx, 503, "email_unavailable", "Email sign-in is not configured")
 		return
 	}
 	a.requestChallenge(ctx, "email", email, a.emailSender.SendOTP)
 }
 
-func (a *phoneAuthAPI) requestChallenge(ctx *gin.Context, channel, destination string, send func(context.Context, string, string) error) {
+type reviewChallenge struct {
+	Code      string
+	Version   int64
+	ExpiresAt time.Time
+}
+
+func (a *phoneAuthAPI) requestChallenge(ctx *gin.Context, channel, destination string, send func(context.Context, string, string) error, reviews ...*reviewChallenge) {
 	tx, err := a.pool.Begin(ctx.Request.Context())
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
@@ -245,7 +271,16 @@ func (a *phoneAuthAPI) requestChallenge(ctx *gin.Context, channel, destination s
 	}
 	id := uuid.NewString()
 	expires := time.Now().UTC().Add(otpLifetime)
-	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO auth_otp_challenges(id,channel,destination,code_hash,expires_at) VALUES($1::UUID,$2,$3,$4,$5)`, id, channel, destination, otpHash(a.pepper, id, channel+":"+destination, code), expires); err != nil {
+	var reviewVersion *int64
+	if len(reviews) > 0 && reviews[0] != nil {
+		r := reviews[0]
+		code = r.Code
+		reviewVersion = &r.Version
+		if r.ExpiresAt.Before(expires) {
+			expires = r.ExpiresAt
+		}
+	}
+	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO auth_otp_challenges(id,channel,destination,code_hash,expires_at,review_otp_version) VALUES($1::UUID,$2,$3,$4,$5,$6)`, id, channel, destination, otpHash(a.pepper, id, channel+":"+destination, code), expires, reviewVersion); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
 		return
 	}
@@ -258,7 +293,11 @@ func (a *phoneAuthAPI) requestChallenge(ctx *gin.Context, channel, destination s
 		driverError(ctx, http.StatusBadGateway, channel+"_delivery_failed", "The sign-in code could not be sent")
 		return
 	}
-	ctx.JSON(http.StatusAccepted, contracts.APIResponse{Data: gin.H{"challengeId": id, "expiresAt": expires}})
+	delivery := "provider"
+	if reviewVersion != nil {
+		delivery = "review"
+	}
+	ctx.JSON(http.StatusAccepted, contracts.APIResponse{Data: gin.H{"challengeId": id, "expiresAt": expires, "delivery": delivery}})
 }
 
 func (a *phoneAuthAPI) verifyOTP(ctx *gin.Context) {
@@ -323,10 +362,24 @@ func (a *phoneAuthAPI) verifyChallenge(ctx *gin.Context, channel, destination, r
 	var attempts int
 	var expires time.Time
 	var consumed *time.Time
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT channel,destination,code_hash,attempts,expires_at,consumed_at FROM auth_otp_challenges WHERE id=$1::UUID FOR UPDATE`, challengeID).Scan(&storedChannel, &storedDestination, &storedHash, &attempts, &expires, &consumed)
+	var reviewVersion *int64
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT channel,destination,code_hash,attempts,expires_at,consumed_at,review_otp_version FROM auth_otp_challenges WHERE id=$1::UUID FOR UPDATE`, challengeID).Scan(&storedChannel, &storedDestination, &storedHash, &attempts, &expires, &consumed, &reviewVersion)
 	if err != nil || consumed != nil || time.Now().After(expires) || attempts >= otpMaxAttempts || storedChannel != channel || storedDestination != destination {
 		driverError(ctx, http.StatusUnauthorized, "invalid_otp", "The sign-in code is invalid or expired")
 		return
+	}
+	var reviewExpiry time.Time
+	if reviewVersion != nil {
+		if _, err := tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(680001)`); err != nil {
+			driverError(ctx, 503, "authentication_unavailable", "Sign-in is unavailable")
+			return
+		}
+		r, err := readReviewOTP(ctx.Request.Context(), tx)
+		if err != nil || !r.active() || r.Version != *reviewVersion || channel != "email" || r.Email != destination {
+			driverError(ctx, 401, "invalid_otp", "The sign-in code is invalid or expired")
+			return
+		}
+		reviewExpiry = r.ExpiresAt
 	}
 	expected := otpHash(a.pepper, rawChallengeID, channel+":"+destination, code)
 	if subtle.ConstantTimeCompare([]byte(expected), []byte(storedHash)) != 1 {
@@ -380,6 +433,18 @@ func (a *phoneAuthAPI) verifyChallenge(ctx *gin.Context, channel, destination, r
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
 		return
 	}
+	if reviewVersion != nil {
+		if reviewExpiry.Add(-time.Second).Before(tokens.accessExpires) {
+			tokens.accessExpires = reviewExpiry.Add(-time.Second)
+		}
+		if reviewExpiry.Before(tokens.refreshExpires) {
+			tokens.refreshExpires = reviewExpiry
+		}
+		if _, err := tx.Exec(ctx.Request.Context(), `UPDATE user_sessions SET review_otp_version=$2,access_expires_at=$3,refresh_expires_at=$4 WHERE access_token_hash=$1`, gatewayauth.TokenHash(tokens.access), reviewVersion, tokens.accessExpires, tokens.refreshExpires); err != nil {
+			driverError(ctx, 503, "authentication_unavailable", "Sign-in is unavailable")
+			return
+		}
+	}
 	if _, err := tx.Exec(ctx.Request.Context(), `UPDATE auth_otp_challenges SET consumed_at=NOW() WHERE id=$1::UUID`, challengeID); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
 		return
@@ -410,9 +475,15 @@ func (a *phoneAuthAPI) refresh(ctx *gin.Context) {
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	if _, err := tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(680001)`); err != nil {
+		driverError(ctx, 503, "authentication_unavailable", "Session refresh is unavailable")
+		return
+	}
 	var sessionID, userID, deviceName string
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,user_id::TEXT,device_name FROM user_sessions
-		WHERE refresh_token_hash=$1 AND revoked_at IS NULL AND refresh_expires_at>NOW() FOR UPDATE`, gatewayauth.TokenHash(body.RefreshToken)).Scan(&sessionID, &userID, &deviceName)
+	var reviewVersion *int64
+	var refreshExpiry time.Time
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,user_id::TEXT,device_name,review_otp_version,refresh_expires_at FROM user_sessions
+		WHERE refresh_token_hash=$1 AND revoked_at IS NULL AND refresh_expires_at>NOW() FOR UPDATE`, gatewayauth.TokenHash(body.RefreshToken)).Scan(&sessionID, &userID, &deviceName, &reviewVersion, &refreshExpiry)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			driverError(ctx, http.StatusUnauthorized, "invalid_refresh_token", "A valid refresh token is required")
@@ -425,6 +496,19 @@ func (a *phoneAuthAPI) refresh(ctx *gin.Context) {
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Session refresh is temporarily unavailable")
 		return
+	}
+	if reviewVersion != nil {
+		r, e := readReviewOTP(ctx.Request.Context(), tx)
+		if e != nil || !r.active() || r.Version != *reviewVersion {
+			driverError(ctx, 401, "invalid_refresh_token", "A valid refresh token is required")
+			return
+		}
+		if refreshExpiry.Add(-time.Second).Before(tokens.accessExpires) {
+			tokens.accessExpires = refreshExpiry.Add(-time.Second)
+		}
+		if refreshExpiry.Before(tokens.refreshExpires) {
+			tokens.refreshExpires = refreshExpiry
+		}
 	}
 	_, err = tx.Exec(ctx.Request.Context(), `UPDATE user_sessions SET access_token_hash=$2,refresh_token_hash=$3,access_expires_at=$4,refresh_expires_at=$5,last_used_at=NOW()
 		WHERE id=$1::UUID`, sessionID, gatewayauth.TokenHash(tokens.access), gatewayauth.TokenHash(tokens.refresh), tokens.accessExpires, tokens.refreshExpires)

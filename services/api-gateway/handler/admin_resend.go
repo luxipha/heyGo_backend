@@ -29,6 +29,8 @@ type resendSettings struct {
 }
 
 func registerAdminPrivacyRoutes(group *gin.RouterGroup, api *adminAPI) {
+	group.GET("/settings/review-otp", api.getReviewOTP)
+	group.PUT("/settings/review-otp", api.requireCSRF, api.putReviewOTP)
 	group.GET("/settings/sms", api.getSMSSettings)
 	group.PUT("/settings/sms", api.requireCSRF, api.putSMSSettings)
 	group.GET("/settings/email-delivery", api.getEmailDelivery)

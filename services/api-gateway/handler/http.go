@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	"math"
 	"net/http"
@@ -52,6 +53,24 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	r.Use(corsMiddleware(allowedOrigins))
 
 	r.GET("/health", healthHandler)
+	r.GET("/support/contact", func(c *gin.Context) {
+		var phone string
+		if err := pool.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT phone FROM admin_support_contact WHERE id=1),'')`).Scan(&phone); err != nil {
+			driverError(c, 503, "support_contact_unavailable", "Support contact unavailable")
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		c.JSON(200, contracts.APIResponse{Data: gin.H{"phone": phone}})
+	})
+	r.GET("/geo/config", func(c *gin.Context) {
+		status, err := geo.ReadSettings(c.Request.Context(), pool)
+		if err != nil {
+			driverError(c, 503, "geo_settings_unavailable", "Geo configuration unavailable")
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		c.JSON(200, contracts.APIResponse{Data: gin.H{"mapProvider": status.Settings.MapProvider, "placeProvider": status.Settings.PlaceProvider, "navigationProvider": status.Settings.NavigationProvider, "version": status.Version}})
+	})
 	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 	r.GET("/ready", func(ctx *gin.Context) {
 		if err := readiness(ctx.Request.Context()); err != nil {
@@ -78,7 +97,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	registerBugReportRoutes(authenticated, pool)
 	registerNoShowRiderRoutes(authenticated, pool)
 	registerRiderHomeRoutes(authenticated, pool)
-	registerRideAgentRoutes(authenticated)
+	registerRideAgentRoutes(authenticated, pool)
 	registerRiderCommandRoutes(authenticated, pool, bus)
 	registerRiderTripReadRoutes(authenticated, pool)
 	registerRiderAccountRoutes(authenticated, pool, files)

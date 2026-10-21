@@ -39,6 +39,14 @@ func (a *phoneAuthAPI) authChannels(c *gin.Context) {
 		email = false
 		sms = false
 	}
+	if !email && a.pool != nil && len(a.deliveryKey) == 32 {
+		review, e := readReviewOTP(c.Request.Context(), a.pool)
+		if e != nil {
+			driverError(c, 503, "auth_channels_unavailable", "Sign-in methods are temporarily unavailable")
+			return
+		}
+		email = review.active()
+	}
 	preferred := ""
 	if email {
 		preferred = "email"

@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS driver_document_pins (
+ driver_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ pin_hash TEXT NOT NULL DEFAULT '',
+ failed_attempts INTEGER NOT NULL DEFAULT 0,
+ locked_until TIMESTAMPTZ,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

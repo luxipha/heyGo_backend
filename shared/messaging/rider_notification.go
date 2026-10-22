@@ -109,3 +109,33 @@ func (s *EventStore) createRiderNotificationTx(ctx context.Context, tx pgx.Tx, r
 	_, err = tx.Exec(ctx, `INSERT INTO rider_notification_push_deliveries(notification_id,device_id) SELECT $1::BIGINT,d.id FROM rider_devices d JOIN user_sessions session ON session.id=d.session_id LEFT JOIN rider_notification_preferences p ON p.rider_id=d.rider_id WHERE d.rider_id=$2::UUID AND d.enabled AND session.revoked_at IS NULL AND session.refresh_expires_at>NOW() AND CASE $3 WHEN 'ride_updates' THEN COALESCE(p.ride_updates,TRUE) WHEN 'account_alerts' THEN COALESCE(p.account_alerts,TRUE) ELSE COALESCE(p.promotions,FALSE) END ON CONFLICT DO NOTHING`, id, recipient, n.Type)
 	return err
 }
+
+// AppendRiderBroadcastTx accepts only a pending, Admin-snapshotted recipient.
+// Existing trip/support notification ownership checks remain unchanged.
+func AppendRiderBroadcastTx(ctx context.Context, tx pgx.Tx, recipient, broadcast string, n InboxNotification) error {
+	var owned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM admin_push_recipients r JOIN users u ON u.id=r.user_id WHERE r.broadcast_id=$1::UUID AND r.user_id=$2::UUID AND r.audience='rider' AND r.status='pending' AND u.active AND u.roles @> ARRAY['rider'])`, broadcast, recipient).Scan(&owned); err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("broadcast recipient not owned")
+	}
+	if n.Type != "account_alerts" && n.Type != "promotions" {
+		return fmt.Errorf("unsupported broadcast notification type")
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::UUID::TEXT,0))`, recipient); err != nil {
+		return err
+	}
+	source := "broadcast:" + broadcast
+	var id string
+	err := tx.QueryRow(ctx, `INSERT INTO rider_notifications(rider_id,source_event_id,type,title,message,data) VALUES($1::UUID,$2,$3,$4,$5,$6::JSONB) ON CONFLICT(rider_id,source_event_id) DO UPDATE SET source_event_id=EXCLUDED.source_event_id RETURNING id::TEXT`, recipient, source, n.Type, n.Title, n.Message, n.Data).Scan(&id)
+	if err != nil {
+		return err
+	}
+	eventData, _ := json.Marshal(map[string]any{"notificationId": id})
+	if _, err = appendUserEventTx(ctx, tx, recipient, source+":rider.notification.created", "rider.notification.created", eventData); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO rider_notification_push_deliveries(notification_id,device_id) SELECT $1::BIGINT,d.id FROM rider_devices d JOIN user_sessions session ON session.id=d.session_id LEFT JOIN rider_notification_preferences p ON p.rider_id=d.rider_id WHERE d.rider_id=$2::UUID AND d.enabled AND session.revoked_at IS NULL AND session.refresh_expires_at>NOW() AND CASE $3 WHEN 'ride_updates' THEN COALESCE(p.ride_updates,TRUE) WHEN 'account_alerts' THEN COALESCE(p.account_alerts,TRUE) ELSE COALESCE(p.promotions,FALSE) END ON CONFLICT DO NOTHING`, id, recipient, n.Type)
+	return err
+}

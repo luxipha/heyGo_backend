@@ -78,10 +78,10 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	if !ok {
 		return
 	}
-	var name, phone, email, adminStatus, adminReason, manualStatus, manualReason string
+	var name, phone, email, adminStatus, adminReason, manualStatus, manualReason, applicationNumber string
 	var manualVerifiedAt *time.Time
 	var vehicle json.RawMessage
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT p.display_name,COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
 		return
@@ -132,7 +132,7 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	data := gin.H{"driverId": id, "displayName": name, "adminStatus": adminStatus, "adminReason": adminReason, "manualVerification": gin.H{"status": manualStatus, "reason": manualReason, "reviewedAt": manualVerifiedAt}, "identity": identity, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}
+	data := gin.H{"driverId": id, "displayName": name, "applicationNumber": applicationNumber, "adminStatus": adminStatus, "adminReason": adminReason, "manualVerification": gin.H{"status": manualStatus, "reason": manualReason, "reviewedAt": manualVerifiedAt}, "identity": identity, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}
 	context, err := a.partnerContext(ctx, id)
 	if err != nil {
 		reviewFailure(ctx)
@@ -249,6 +249,12 @@ func (a *adminAPI) reviewManualIdentity(ctx *gin.Context) {
 	defer tx.Rollback(ctx.Request.Context())
 	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET manual_verification_status=$2,manual_verification_reason=$3,manual_verified_by=$4::UUID,manual_verified_at=NOW(),admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driver, body.Status, strings.TrimSpace(body.Reason), currentAdmin(ctx).ID)
 	if err != nil || tag.RowsAffected() != 1 {
+		reviewFailure(ctx)
+		return
+	}
+	// Identity evidence shares the manual NIN review decision; it is not an extra Home gate.
+	_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_documents d SET status=$2,rejection_reason=$3,reviewed_at=NOW() WHERE d.driver_id=$1::UUID AND d.type IN ('driver_picture','selfie_with_id','id_document') AND d.id=(SELECT latest.id FROM driver_documents latest WHERE latest.driver_id=d.driver_id AND latest.type=d.type ORDER BY latest.submitted_at DESC,latest.id DESC LIMIT 1) AND d.status='under_review'`, driver, body.Status, strings.TrimSpace(body.Reason))
+	if err != nil {
 		reviewFailure(ctx)
 		return
 	}

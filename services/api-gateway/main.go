@@ -132,6 +132,8 @@ func main() {
 		handler.StartSOSLocationPurge(ctx, pool)
 		handler.StartRefundJobs(ctx, pool)
 		handler.StartNotificationPushJobs(ctx, pool)
+		handler.StartDriverDocumentReminderJobs(ctx, pool)
+		handler.StartPushBroadcastJobs(ctx, pool)
 		go func() {
 			if err := topicConsumer.Consume(ctx); err != nil && ctx.Err() == nil {
 				logs.L().Warnw("Error consuming topics", "error", err)
@@ -152,6 +154,16 @@ func main() {
 			}
 			if err := handler.RunRefundJobsOnce(r.Context(), pool); err != nil {
 				logs.L().Warnw("Refund maintenance failed", "error", err)
+				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err := handler.RunDriverDocumentRemindersOnce(r.Context(), pool, 100); err != nil {
+				logs.L().Warnw("Document reminders failed", "error", err)
+				http.Error(w, "maintenance failed", http.StatusServiceUnavailable)
+				return
+			}
+			if err := handler.RunPushBroadcastJobsOnce(r.Context(), pool, 100); err != nil {
+				logs.L().Warnw("Push broadcast queue failed", "error", err)
 				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
 				return
 			}

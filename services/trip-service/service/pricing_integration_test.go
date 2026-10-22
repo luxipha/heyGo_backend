@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"os"
 	"strconv"
 	"strings"
@@ -59,13 +60,7 @@ func TestQuoteUsesPublishedMarketPricingAndPersistsVersion(t *testing.T) {
 	}
 	service := NewService(repo.NewPostgresRepository(pool))
 	route := &triptypes.OSRMApiResponse{}
-	route.Routes = append(route.Routes, struct {
-		Distance float64 `json:"distance"`
-		Duration float64 `json:"duration"`
-		Geometry struct {
-			Coordinates [][]float64 `json:"coordinates"`
-		} `json:"geometry"`
-	}{Distance: 1000, Duration: 300})
+	route.Routes = append(route.Routes, geo.Route{Distance: 1000, Duration: 300})
 	fares, err := service.GenerateTripFares(ctx, rider, route, &sharedtypes.Coordinate{Latitude: y + 0.0005, Longitude: x + 0.0005}, &sharedtypes.Coordinate{Latitude: y + 0.0006, Longitude: x + 0.0006})
 	if err != nil {
 		t.Fatal(err)

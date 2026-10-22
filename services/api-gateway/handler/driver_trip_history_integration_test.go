@@ -3,14 +3,16 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
 
-	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	shareddb "github.com/luxipha/heyGo_backend/shared/db"
 )
 
 func TestDriverTripHistoryPaginationAndReceipt(t *testing.T) {
@@ -91,6 +93,35 @@ func TestDriverTripHistoryPaginationAndReceipt(t *testing.T) {
 	if _, err := json.Marshal(receipt); err != nil {
 		t.Fatal(err)
 	}
+	router := gin.New()
+	auth := gatewayauth.NewMiddleware(contractTestVerifier{}, safetyContactTestUsers{id: driver})
+	registerDriverRoutes(router.Group("/", auth.Authenticate), pool, nil)
+	checkTotals := func(query string, wantCompleted, wantOther float64) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/driver/trips?limit=1"+query, nil)
+		req.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("history status %d %s", w.Code, w.Body.String())
+		}
+		var body struct {
+			Data []driverTripHistoryItem `json:"data"`
+			Meta struct {
+				Counts map[string]float64 `json:"counts"`
+			} `json:"meta"`
+		}
+		if err = json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Data) > 1 || body.Meta.Counts["completed"] != wantCompleted || body.Meta.Counts["other"] != wantOther {
+			t.Fatalf("totals did not cover full filtered result: %s", w.Body.String())
+		}
+	}
+	checkTotals("", 1, 1)
+	checkTotals("&cursor="+url.QueryEscape(encoded), 1, 1)
+	checkTotals("&from="+url.QueryEscape(now.Add(-time.Minute).Format(time.RFC3339)), 0, 0)
+	checkTotals("&status=completed", 1, 0)
 	otherPage, err := readDriverTripHistory(gctx, pool, other, 1, nil, nil, nil, "all")
 	if err != nil {
 		t.Fatal(err)

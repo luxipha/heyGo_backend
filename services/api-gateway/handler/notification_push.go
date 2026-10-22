@@ -269,9 +269,11 @@ func claimPushDeliveryForDriver(ctx context.Context, pool *pgxpool.Pool, driverI
 	var job pendingPushDelivery
 	err = tx.QueryRow(ctx, `WITH candidate AS (
 		SELECT p.id FROM driver_notification_push_deliveries p
+ JOIN driver_notifications notification ON notification.id=p.notification_id
 		WHERE ($1::UUID IS NULL OR EXISTS(SELECT 1 FROM driver_devices owner_device WHERE owner_device.id=p.device_id AND owner_device.driver_id=$1::UUID))
+		AND driver_notification_allowed(notification.driver_id,notification.type) AND (notification.type<>'document_expiry' OR driver_document_reminder_current(notification.data))
 		AND ((p.status='pending' AND p.next_attempt_at<=NOW()) OR (p.status='processing' AND p.lease_until<NOW()))
-		ORDER BY p.id LIMIT 1 FOR UPDATE SKIP LOCKED
+		ORDER BY p.id LIMIT 1 FOR UPDATE OF p SKIP LOCKED
 	), claimed AS (
 		UPDATE driver_notification_push_deliveries p SET status='processing',attempts=p.attempts+1,lease_until=NOW()+INTERVAL '1 minute'
 		FROM candidate c WHERE p.id=c.id RETURNING p.id,p.notification_id,p.device_id,p.attempts
@@ -306,19 +308,28 @@ func finishPushDelivery(ctx context.Context, pool *pgxpool.Pool, job pendingPush
 		finishRiderPushDelivery(ctx, pool, job, sendErr)
 		return
 	}
+	if !driverPushStillAllowed(ctx, pool, job) {
+		return
+	}
 	if sendErr == nil {
-		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='sent',sent_at=NOW(),lease_until=NULL,last_error='' WHERE id=$1`, job.ID)
+		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='sent',sent_at=NOW(),lease_until=NULL,last_error='' WHERE id=$1 AND status='processing' AND attempts=$2`, job.ID, job.Attempts)
 		return
 	}
 	if errors.Is(sendErr, errFCMUnregistered) {
 		_, _ = pool.Exec(ctx, `DELETE FROM driver_devices WHERE id=$1::UUID`, job.DeviceID)
-		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='dead',lease_until=NULL,last_error='unregistered_device' WHERE id=$1`, job.ID)
+		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='dead',lease_until=NULL,last_error='unregistered_device' WHERE id=$1 AND status='processing' AND attempts=$2`, job.ID, job.Attempts)
 		return
 	}
 	if job.Attempts >= 8 {
-		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='dead',lease_until=NULL,last_error='provider_delivery_failed' WHERE id=$1`, job.ID)
+		_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='dead',lease_until=NULL,last_error='provider_delivery_failed' WHERE id=$1 AND status='processing' AND attempts=$2`, job.ID, job.Attempts)
 		return
 	}
 	delay := time.Second * time.Duration(1<<min(job.Attempts, 10))
-	_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='pending',lease_until=NULL,next_attempt_at=NOW()+$2::INTERVAL,last_error='provider_delivery_failed' WHERE id=$1`, job.ID, delay.String())
+	_, _ = pool.Exec(ctx, `UPDATE driver_notification_push_deliveries SET status='pending',lease_until=NULL,next_attempt_at=NOW()+$2::INTERVAL,last_error='provider_delivery_failed' WHERE id=$1 AND status='processing' AND attempts=$3`, job.ID, delay.String(), job.Attempts)
+}
+
+func driverPushStillAllowed(ctx context.Context, pool *pgxpool.Pool, job pendingPushDelivery) bool {
+	var allowed bool
+	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_notification_push_deliveries p JOIN driver_notifications n ON n.id=p.notification_id JOIN driver_devices d ON d.id=p.device_id WHERE p.id=$1 AND p.status='processing' AND p.attempts=$2 AND d.push_token=$3 AND driver_notification_allowed(n.driver_id,n.type) AND (n.type<>'document_expiry' OR driver_document_reminder_current(n.data)))`, job.ID, job.Attempts, job.Token).Scan(&allowed)
+	return err == nil && allowed
 }

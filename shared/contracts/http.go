@@ -11,7 +11,8 @@ type APIError struct {
 }
 
 type APIMeta struct {
-	NextCursor *string `json:"nextCursor"`
+	Counts     map[string]int64 `json:"counts,omitempty"`
+	NextCursor *string          `json:"nextCursor"`
 }
 
 type APIErrorResponse struct {

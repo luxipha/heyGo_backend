@@ -108,9 +108,9 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 			return
 		}
 		var currentStatus string
-		err := a.pool.QueryRow(ctx.Request.Context(), `SELECT status FROM driver_documents WHERE id=$1::UUID AND driver_id=$2::UUID AND type=$3 AND id=(SELECT id FROM driver_documents WHERE driver_id=$2::UUID AND type=$3 ORDER BY submitted_at DESC,id DESC LIMIT 1)`, oldID, driverID(ctx), body.Type).Scan(&currentStatus)
-		if errors.Is(err, pgx.ErrNoRows) || currentStatus != "rejected" {
-			driverError(ctx, http.StatusConflict, "document_not_rejected", "Only the current rejected document can be resubmitted")
+		err := a.pool.QueryRow(ctx.Request.Context(), `SELECT CASE WHEN status='approved' AND expires_at<=NOW() THEN 'expired' ELSE status END FROM driver_documents WHERE id=$1::UUID AND driver_id=$2::UUID AND type=$3 AND id=(SELECT id FROM driver_documents WHERE driver_id=$2::UUID AND type=$3 ORDER BY submitted_at DESC,id DESC LIMIT 1)`, oldID, driverID(ctx), body.Type).Scan(&currentStatus)
+		if errors.Is(err, pgx.ErrNoRows) || (currentStatus != "rejected" && currentStatus != "expired") {
+			driverError(ctx, http.StatusConflict, "document_not_rejected", "Only the current rejected or expired document can be resubmitted")
 			return
 		}
 		if err != nil {
@@ -171,6 +171,20 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	if _, err = tx.Exec(ctx.Request.Context(), `SELECT id FROM users WHERE id=$1::UUID FOR UPDATE`, driverID(ctx)); err != nil {
+		driverError(ctx, 503, "document_unavailable", "Document could not be submitted")
+		return
+	}
+	var current string
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT CASE WHEN status='approved' AND expires_at<=NOW() THEN 'expired' ELSE status END FROM driver_documents WHERE driver_id=$1::UUID AND type=$2 ORDER BY submitted_at DESC,id DESC LIMIT 1`, driverID(ctx), body.Type).Scan(&current)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		driverError(ctx, 503, "document_unavailable", "Document could not be checked")
+		return
+	}
+	if current == "approved" || current == "under_review" {
+		driverError(ctx, 409, "document_locked", "This document is locked for changes")
+		return
+	}
 	for _, item := range uploads {
 		result, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_document_uploads SET consumed_at=NOW() WHERE id=$1 AND driver_id=$2::UUID AND consumed_at IS NULL AND expires_at>NOW()`, item.id, driverID(ctx))
 		if err != nil || result.RowsAffected() != 1 {

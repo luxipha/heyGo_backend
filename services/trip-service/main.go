@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"log"
 	"net/http"
 	"os"
@@ -90,7 +91,7 @@ func main() {
 		}
 	}
 	tripRepo := repo.NewPostgresRepository(pool)
-	tripService := service.NewService(tripRepo)
+	tripService := service.NewService(tripRepo, geo.DatabaseRoutes{Pool: pool})
 
 	casperIDAppID := env.GetString("CASPERID_APP_ID", "")
 	casperIDSecret := env.GetString("CASPERID_API_SECRET", "")

@@ -2,26 +2,21 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"math"
-	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
-	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/proto/trip"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 )
 
-var routeHTTPClient = &http.Client{Timeout: 10 * time.Second}
-
 type tripService struct {
-	repo repo.TripRepo
+	repo   repo.TripRepo
+	router geo.RouteService
 }
 
 type TripService interface {
@@ -40,8 +35,12 @@ type TripService interface {
 }
 
 // NewService creates a new instance of GrpcTripService
-func NewService(repo repo.TripRepo) *tripService {
-	return &tripService{repo: repo}
+func NewService(repo repo.TripRepo, routes ...geo.RouteService) *tripService {
+	s := &tripService{repo: repo}
+	if len(routes) > 0 {
+		s.router = routes[0]
+	}
+	return s
 }
 
 func (s *tripService) GetTripByID(ctx context.Context, tripID string) (*types.TripModel, error) {
@@ -60,50 +59,24 @@ func (s *tripService) CreateTrip(ctx context.Context, fare *types.RideFareModel)
 	return s.repo.Create(ctx, trip)
 }
 
-// GetRoute fetches the route from OSRM API between pickup and destination coordinates
+// GetRoute delegates to the configured provider; pricing never depends on provider wire JSON.
 func (s *tripService) GetRoute(ctx context.Context, pickup, destination *sharedtypes.Coordinate) (*types.OSRMApiResponse, error) {
-	url := fmt.Sprintf("%s/%f,%f;%f,%f?overview=full&geometries=geojson",
-		strings.TrimSuffix(env.GetString("OSRM_API", "http://router.project-osrm.org/route/v1/driving"), "/"),
-		pickup.Longitude, pickup.Latitude,
-		destination.Longitude, destination.Latitude,
-	)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build route request: %w", err)
+	if pickup == nil || destination == nil {
+		return nil, fmt.Errorf("route coordinates required")
 	}
-	res, err := routeHTTPClient.Do(req)
+	router := s.router
+	if router == nil {
+		var err error
+		router, err = geo.ConfiguredRoutes()
+		if err != nil {
+			return nil, err
+		}
+	}
+	result, err := router.Route(ctx, geo.Coordinate{Latitude: pickup.Latitude, Longitude: pickup.Longitude}, geo.Coordinate{Latitude: destination.Latitude, Longitude: destination.Longitude})
 	if err != nil {
 		return nil, err
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("route service returned %s", res.Status)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(res.Body, 2<<20))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	var routeResponse types.OSRMApiResponse
-	if err := json.Unmarshal(body, &routeResponse); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-	if len(routeResponse.Routes) == 0 || len(routeResponse.Routes[0].Geometry.Coordinates) < 2 {
-		return nil, fmt.Errorf("route service returned no usable route")
-	}
-
-	route := routeResponse.Routes[0]
-	if math.IsNaN(route.Distance) || math.IsInf(route.Distance, 0) || route.Distance <= 0 || math.IsNaN(route.Duration) || math.IsInf(route.Duration, 0) || route.Duration <= 0 {
-		return nil, fmt.Errorf("invalid route measurements")
-	}
-	for _, point := range route.Geometry.Coordinates {
-		if len(point) != 2 || math.IsNaN(point[0]) || math.IsNaN(point[1]) || math.IsInf(point[0], 0) || math.IsInf(point[1], 0) || math.Abs(point[0]) > 180 || math.Abs(point[1]) > 90 {
-			return nil, fmt.Errorf("invalid route geometry")
-		}
-	}
-	return &routeResponse, nil
+	return (*types.OSRMApiResponse)(result), nil
 }
 
 // GenerateTripFares uses only published pickup-market rates and freezes the

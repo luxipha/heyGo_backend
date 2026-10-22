@@ -84,6 +84,8 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	admin.Use(api.authenticate)
 	admin.Use(api.authorize)
 	admin.GET("/settings/security", api.securityPolicy)
+	admin.GET("/settings/emergency-contacts", api.getEmergencyDirectory)
+	admin.PUT("/settings/emergency-contacts", api.requireCSRF, api.putEmergencyDirectory)
 	admin.GET("/settings/support-contact", api.getSupportContact)
 	admin.PUT("/settings/support-contact", api.requireCSRF, api.putSupportContact)
 	admin.GET("/settings/geo", api.getGeoSettings)

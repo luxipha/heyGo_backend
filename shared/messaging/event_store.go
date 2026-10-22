@@ -128,7 +128,7 @@ func (s *EventStore) createNotificationTx(ctx context.Context, tx pgx.Tx, recipi
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO driver_notification_push_deliveries(notification_id,device_id)
-		SELECT $1::BIGINT,id FROM driver_devices WHERE driver_id=$2::UUID ON CONFLICT(notification_id,device_id) DO NOTHING`, id, recipientID); err != nil {
+		SELECT $1::BIGINT,id FROM driver_devices WHERE driver_id=$2::UUID AND driver_notification_allowed($2::UUID,$3) ON CONFLICT(notification_id,device_id) DO NOTHING`, id, recipientID, notification.Type); err != nil {
 		return fmt.Errorf("queue driver notification push: %w", err)
 	}
 	return nil

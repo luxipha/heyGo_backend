@@ -79,6 +79,9 @@ func claimAnyPushDelivery(ctx context.Context, pool *pgxpool.Pool, riderFirst bo
 }
 func sendClaimedPush(ctx context.Context, pool *pgxpool.Pool, s *fcmSender, j pendingPushDelivery) error {
 	if j.Audience != "rider" {
+		if !driverPushStillAllowed(ctx, pool, j) {
+			return nil
+		}
 		return s.send(ctx, j.Token, j.Title, j.Body, j.NotificationID, j.Type)
 	}
 	if !riderPushStillAllowed(ctx, pool, j) {

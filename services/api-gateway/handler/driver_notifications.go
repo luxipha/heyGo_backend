@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 const driverNotificationPageSize = 30
@@ -25,6 +25,8 @@ type driverNotification struct {
 }
 
 func registerDriverNotificationRoutes(group *gin.RouterGroup, api *driverAPI) {
+	group.GET("/notification-preferences", api.driverNotificationPreferences)
+	group.PATCH("/notification-preferences", api.patchDriverNotificationPreferences)
 	group.GET("/notifications", api.driverNotifications)
 	group.PATCH("/notifications/:id", api.markDriverNotificationRead)
 	group.POST("/notifications/read-all", api.markAllDriverNotificationsRead)

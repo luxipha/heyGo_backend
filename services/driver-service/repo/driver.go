@@ -148,7 +148,7 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 	err = tx.QueryRow(ctx, `SELECT d.id::TEXT,d.name,d.profile_pic,d.car_plate,d.package_slug,ST_Y(d.location::geometry),ST_X(d.location::geometry),ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)
 	FROM drivers d JOIN users u ON u.id=d.id JOIN driver_eligibility e ON e.driver_id=d.id
 	JOIN driver_live_locations l ON l.driver_id=d.id JOIN trips t ON t.id=$5::UUID
-	WHERE `+driverstate.AvailabilityPredicate("t.market_code", "$1", "ST_SetSRID(ST_MakePoint($3,$2),4326)::geography", "$4")+` AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
+	WHERE `+driverstate.AvailabilityPredicate("t.market_code", "$1", "ST_SetSRID(ST_MakePoint($3,$2),4326)::geography", "$4")+` AND driver_ride_preference_matches(d.id,t.id) AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
 	ORDER BY ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-LEAST(GREATEST(COALESCE(u.provider_trust_score,100)-100,0)*2,$6),d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID, trustDistanceAdvantageMeters).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := finishMatching(ctx, tx, tripID, "no_drivers"); err != nil {

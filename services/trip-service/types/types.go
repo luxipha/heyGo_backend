@@ -1,6 +1,7 @@
 package types
 
 import (
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
 	"time"
@@ -53,15 +54,8 @@ func (r *RideFareModel) ToProto() *pb.RideFare {
 	}
 }
 
-type OSRMApiResponse struct {
-	Routes []struct {
-		Distance float64 `json:"distance"`
-		Duration float64 `json:"duration"`
-		Geometry struct {
-			Coordinates [][]float64 `json:"coordinates"`
-		} `json:"geometry"`
-	} `json:"routes"`
-}
+// OSRMApiResponse is retained as a compatibility name; routes use a provider-neutral contract.
+type OSRMApiResponse geo.RouteResponse
 
 // ToProto converts OSRMApiResponse to its protobuf representation
 func (o *OSRMApiResponse) ToProto() *pb.Route {

@@ -13,7 +13,11 @@ func main() {
 	if len(token) < 32 {
 		log.Fatal("RIDE_AGENT_INTERNAL_TOKEN must be configured with at least 32 characters")
 	}
-	gateway := &agent.Gateway{InternalToken: token, Places: agent.GooglePlaces{Key: os.Getenv("RIDE_AGENT_PLACES_KEY")}, LLMEnabled: os.Getenv("RIDE_AGENT_LLM_ENABLED") == "true", Planner: agent.HTTPPlanner{URL: os.Getenv("RIDE_AGENT_PLANNER_URL"), Token: os.Getenv("RIDE_AGENT_PLANNER_TOKEN")}}
+	places, err := agent.ConfiguredPlaces()
+	if err != nil {
+		log.Fatal(err)
+	}
+	gateway := &agent.Gateway{InternalToken: token, Places: places, LLMEnabled: os.Getenv("RIDE_AGENT_LLM_ENABLED") == "true", Planner: agent.HTTPPlanner{URL: os.Getenv("RIDE_AGENT_PLANNER_URL"), Token: os.Getenv("RIDE_AGENT_PLANNER_TOKEN")}}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8085"

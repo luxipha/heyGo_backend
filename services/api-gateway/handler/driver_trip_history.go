@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 const (
@@ -187,13 +187,23 @@ func (a *driverAPI) tripHistory(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "trip_history_unavailable", "Trip history is unavailable")
 		return
 	}
+	var completed, other int64
+	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT COUNT(DISTINCT t.id) FILTER(WHERE t.status='completed'),COUNT(DISTINCT t.id) FILTER(WHERE t.status<>'completed') FROM trips t LEFT JOIN driver_no_show_claims c ON c.trip_id=t.id AND c.driver_id=$1::UUID
+ WHERE t.assigned_driver_id=$1::UUID AND t.status IN ('completed','cancelled')
+ AND ($2::TEXT='all' OR ($2='no_show_claim' AND c.id IS NOT NULL) OR ($2 IN ('completed','cancelled') AND t.status=$2 AND NOT ($2='cancelled' AND c.id IS NOT NULL)))
+ AND ($3::TIMESTAMPTZ IS NULL OR COALESCE(t.completed_at,t.cancelled_at,t.updated_at,t.created_at)>=$3)
+ AND ($4::TIMESTAMPTZ IS NULL OR COALESCE(t.completed_at,t.cancelled_at,t.updated_at,t.created_at)<$4)`, driverID(ctx), status, from, to).Scan(&completed, &other)
+	if err != nil {
+		driverError(ctx, 503, "trip_history_unavailable", "Trip totals are unavailable")
+		return
+	}
 	var next *string
 	if len(items) > limit {
 		items = items[:limit]
 		value := encodeDriverTripHistoryCursor(driverTripHistoryCursor{OccurredAt: items[len(items)-1].OccurredAt, ID: items[len(items)-1].ID})
 		next = &value
 	}
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: items, Meta: contracts.APIMeta{NextCursor: next}})
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: items, Meta: contracts.APIMeta{NextCursor: next, Counts: map[string]int64{"completed": completed, "other": other, "total": completed + other}}})
 }
 
 type driverTripReceipt struct {

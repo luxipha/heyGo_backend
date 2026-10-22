@@ -206,8 +206,15 @@ func (p GooglePlaces) call(ctx context.Context, method, path string, body any) (
 	if base == "" {
 		base = "https://places.googleapis.com/v1"
 	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(raw))
+	var payload io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		payload = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, base+path, payload)
 	if err != nil {
 		return nil, err
 	}

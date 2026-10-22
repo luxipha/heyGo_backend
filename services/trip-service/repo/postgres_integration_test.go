@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"os"
 	"sync"
 	"testing"
@@ -58,13 +59,7 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 	}
 	repository := NewPostgresRepository(pool)
 	route := &triptypes.OSRMApiResponse{}
-	route.Routes = append(route.Routes, struct {
-		Distance float64 `json:"distance"`
-		Duration float64 `json:"duration"`
-		Geometry struct {
-			Coordinates [][]float64 `json:"coordinates"`
-		} `json:"geometry"`
-	}{Distance: 1000, Duration: 300})
+	route.Routes = append(route.Routes, geo.Route{Distance: 1000, Duration: 300})
 	fare := &triptypes.RideFareModel{ID: fareID, RiderID: riderID, PackageSlug: "sedan", TotalFareInPaise: 2500, Route: route,
 		Pickup: &sharedtypes.Coordinate{Latitude: 6.45, Longitude: 3.39}, Destination: &sharedtypes.Coordinate{Latitude: 6.50, Longitude: 3.40}}
 	if err := repository.SaveRideFare(ctx, fare); err != nil {

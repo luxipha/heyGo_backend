@@ -65,16 +65,17 @@ func (a *adminAPI) submitDocument(ctx *gin.Context) {
 		return
 	}
 	var body struct {
-		Type      string            `json:"type"`
-		UploadIDs []string          `json:"uploadIds"`
-		ExpiresAt *time.Time        `json:"expiresAt"`
-		Fields    map[string]string `json:"fields"`
+		Type             string            `json:"type"`
+		SourceDocumentID string            `json:"sourceDocumentId"`
+		UploadIDs        []string          `json:"uploadIds"`
+		ExpiresAt        *time.Time        `json:"expiresAt"`
+		Fields           map[string]string `json:"fields"`
 	}
-	if ctx.ShouldBindJSON(&body) != nil || !validOperationalDocument(body.Type) || len(body.UploadIDs) == 0 || len(body.UploadIDs) > 2 || (body.ExpiresAt != nil && !body.ExpiresAt.After(time.Now())) {
+	if ctx.ShouldBindJSON(&body) != nil || !validOperationalDocument(body.Type) || (len(body.UploadIDs) == 0 && body.SourceDocumentID == "") || len(body.UploadIDs) > 2 || (body.ExpiresAt != nil && !body.ExpiresAt.After(time.Now())) {
 		driverError(ctx, http.StatusBadRequest, "invalid_document", "Document submission is invalid")
 		return
 	}
-	if (body.Type == "driver_license" && len(body.UploadIDs) != 2) || (body.Type != "driver_license" && len(body.UploadIDs) != 1) {
+	if body.SourceDocumentID == "" && ((body.Type == "driver_license" && len(body.UploadIDs) != 2) || (body.Type != "driver_license" && len(body.UploadIDs) != 1)) {
 		driverError(ctx, http.StatusBadRequest, "invalid_document_sides", "Required document sides are missing")
 		return
 	}
@@ -122,25 +123,57 @@ func (a *adminAPI) submitDocument(ctx *gin.Context) {
 		}
 		uploads = append(uploads, item)
 	}
-	if body.Type == "driver_license" && (!sides["front"] || !sides["back"]) {
-		driverError(ctx, http.StatusBadRequest, "invalid_document_sides", "Front and back of the driver license are required")
-		return
-	}
-	files := make([]gin.H, 0, len(uploads))
-	for _, item := range uploads {
-		files = append(files, gin.H{"side": item.side, "storageKey": item.key, "contentType": item.contentType, "sizeBytes": item.size})
-	}
-	metadata, err := json.Marshal(gin.H{"files": files, "fields": body.Fields})
-	if err != nil {
-		reviewFailure(ctx)
-		return
-	}
 	tx, err := a.pool.Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	files := []documentEvidenceFile{}
+	if body.SourceDocumentID != "" {
+		if _, err := uuid.Parse(body.SourceDocumentID); err != nil {
+			driverError(ctx, 400, "invalid_document", "Source document ID is invalid")
+			return
+		}
+		// Lock the owning profile and reject a stale or foreign source document.
+		var owner string
+		if err := tx.QueryRow(ctx.Request.Context(), `SELECT driver_id::TEXT FROM driver_profiles WHERE driver_id=$1::UUID FOR UPDATE`, driver).Scan(&owner); err != nil {
+			reviewFailure(ctx)
+			return
+		}
+		var latest string
+		var metadata []byte
+		err := tx.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,metadata FROM driver_documents WHERE driver_id=$1::UUID AND type=$2 ORDER BY submitted_at DESC,id DESC LIMIT 1 FOR UPDATE`, driver, body.Type).Scan(&latest, &metadata)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && latest != body.SourceDocumentID) {
+			driverError(ctx, 409, "document_changed", "The document changed. Reload before saving.")
+			return
+		}
+		if err != nil {
+			reviewFailure(ctx)
+			return
+		}
+		var source struct {
+			Files []documentEvidenceFile `json:"files"`
+		}
+		if json.Unmarshal(metadata, &source) != nil {
+			reviewFailure(ctx)
+			return
+		}
+		files = source.Files
+	}
+	for _, item := range uploads {
+		files = append(files, documentEvidenceFile{Side: item.side, StorageKey: item.key, ContentType: item.contentType, SizeBytes: item.size})
+	}
+	files, err = completeDocumentEvidence(body.Type, files)
+	if err != nil {
+		driverError(ctx, 400, "invalid_document_sides", err.Error())
+		return
+	}
+	metadata, err := json.Marshal(gin.H{"files": files, "fields": body.Fields})
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
 	for _, item := range uploads {
 		tag, err := tx.Exec(ctx.Request.Context(), `UPDATE admin_document_uploads SET consumed_at=NOW() WHERE id=$1 AND admin_id=$2::UUID AND consumed_at IS NULL AND expires_at>NOW()`, item.id, currentAdmin(ctx).ID)
 		if err != nil || tag.RowsAffected() != 1 {
@@ -149,12 +182,12 @@ func (a *adminAPI) submitDocument(ctx *gin.Context) {
 		}
 	}
 	documentID := uuid.New()
-	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_documents(id,driver_id,type,status,storage_key,metadata,expires_at) VALUES($1,$2::UUID,$3,'under_review',$4,$5::JSONB,$6)`, documentID, driver, body.Type, uploads[0].key, metadata, body.ExpiresAt)
+	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_documents(id,driver_id,type,status,storage_key,metadata,expires_at) VALUES($1,$2::UUID,$3,'under_review',$4,$5::JSONB,$6)`, documentID, driver, body.Type, files[0].StorageKey, metadata, body.ExpiresAt)
 	if err == nil {
 		err = invalidateAdminApproval(ctx, tx, driver)
 	}
 	if err == nil {
-		err = adminAudit(ctx, tx, "document.submitted_by_admin", driver, gin.H{"documentId": documentID.String(), "type": body.Type, "fieldNames": mapsKeys(body.Fields)})
+		err = adminAudit(ctx, tx, "document.submitted_by_admin", driver, gin.H{"documentId": documentID.String(), "sourceDocumentId": body.SourceDocumentID, "type": body.Type, "fieldNames": mapsKeys(body.Fields)})
 	}
 	if err == nil {
 		_, err = insertDriverEvent(ctx, tx, driver, "driver.document.updated", gin.H{"id": documentID.String(), "type": body.Type, "status": "under_review"})
@@ -172,4 +205,35 @@ func mapsKeys(values map[string]string) []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// Files are sourced only from owned reservations or the driver's current document.
+type documentEvidenceFile struct {
+	Side        string `json:"side"`
+	StorageKey  string `json:"storageKey"`
+	ContentType string `json:"contentType"`
+	SizeBytes   int64  `json:"sizeBytes"`
+}
+
+func completeDocumentEvidence(kind string, files []documentEvidenceFile) ([]documentEvidenceFile, error) {
+	bySide := map[string]documentEvidenceFile{}
+	for _, file := range files {
+		if !validDocumentSide(kind, file.Side) || file.StorageKey == "" {
+			return nil, errors.New("Document evidence is invalid")
+		}
+		bySide[file.Side] = file
+	}
+	sides := []string{"document"}
+	if kind == "driver_license" {
+		sides = []string{"front", "back"}
+	}
+	result := make([]documentEvidenceFile, 0, len(sides))
+	for _, side := range sides {
+		file, ok := bySide[side]
+		if !ok {
+			return nil, errors.New("Required document sides are missing")
+		}
+		result = append(result, file)
+	}
+	return result, nil
 }

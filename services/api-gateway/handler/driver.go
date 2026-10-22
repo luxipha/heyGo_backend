@@ -28,6 +28,8 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	api := &driverAPI{pool: pool, files: files}
 	authenticated.POST("/routes/driver", gatewayauth.RequireRole("driver"), api.route)
 	driver := authenticated.Group("/driver", gatewayauth.RequireRole("driver"))
+	driver.GET("/ride-preferences", api.ridePreferences)
+	driver.PUT("/ride-preferences", api.putRidePreferences)
 	driver.GET("/profile", api.profile)
 	driver.PATCH("/profile", api.updateProfile)
 	driver.GET("/vehicle", api.vehicle)
@@ -36,6 +38,9 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.GET("/onboarding", api.onboarding)
 	driver.GET("/identity", api.identity)
 	driver.PUT("/identity", api.updateIdentity)
+	driver.GET("/document-pin", api.documentPINStatus)
+	driver.PUT("/document-pin", api.setDocumentPIN)
+	driver.POST("/documents/:id/view", api.viewApprovedDocument)
 	driver.GET("/documents", api.documents)
 	driver.POST("/documents/uploads", api.createDocumentUpload)
 	driver.POST("/documents", api.submitDocument)
@@ -88,12 +93,19 @@ func (a *driverAPI) profile(ctx *gin.Context) {
 	if !a.ensureProfile(ctx) {
 		return
 	}
-	var name, photo, adminStatus, adminReason string
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT display_name,photo_url,admin_status,admin_reason FROM driver_profiles WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&name, &photo, &adminStatus, &adminReason)
+	var name, photo, portraitKey, adminStatus, adminReason string
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)),''),p.display_name),p.photo_url,COALESCE((SELECT d.storage_key FROM driver_documents d WHERE d.driver_id=p.driver_id AND d.type='driver_picture' AND d.status='approved' AND p.manual_verification_status='approved' ORDER BY d.submitted_at DESC,d.id DESC LIMIT 1),''),p.admin_status,p.admin_reason FROM driver_profiles p LEFT JOIN driver_identity_profiles ip ON ip.driver_id=p.driver_id WHERE p.driver_id=$1::UUID`, driverID(ctx)).Scan(&name, &photo, &portraitKey, &adminStatus, &adminReason)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "driver_profile_unavailable", "Driver profile is unavailable")
 		return
 	}
+	// Only the approved portrait is suitable for profile display. Identity evidence stays private.
+	if portraitKey != "" && a.files != nil {
+		if signed, err := a.files.PresignGet(ctx.Request.Context(), portraitKey, time.Hour); err == nil {
+			photo = signed
+		}
+	}
+	ctx.Header("Cache-Control", "private, no-store")
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"displayName": name, "photoUrl": photo, "adminStatus": adminStatus, "adminReason": adminReason}})
 }
 
@@ -144,27 +156,7 @@ func validPackage(value string) bool {
 }
 
 func (a *driverAPI) updatePackage(ctx *gin.Context) {
-	var body struct {
-		PackageSlug string `json:"packageSlug"`
-	}
-	if ctx.ShouldBindJSON(&body) != nil || !validPackage(body.PackageSlug) {
-		driverError(ctx, http.StatusBadRequest, "invalid_package", "A supported package is required")
-		return
-	}
-	if !a.ensureProfile(ctx) {
-		return
-	}
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,package_slug) VALUES($1::UUID,$2)
-		ON CONFLICT(driver_id) DO UPDATE SET package_slug=EXCLUDED.package_slug,review_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW()`, driverID(ctx), body.PackageSlug)
-	if err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "vehicle_unavailable", "Vehicle package could not be updated")
-		return
-	}
-	if err := a.invalidateApproval(ctx); err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "review_unavailable", "Driver review state could not be updated")
-		return
-	}
-	a.vehicle(ctx)
+	driverError(ctx, http.StatusForbidden, "category_assigned_by_review", "Vehicle category is assigned by the review team after inspection")
 }
 
 func (a *driverAPI) updateVehicle(ctx *gin.Context) {
@@ -182,13 +174,9 @@ func (a *driverAPI) updateVehicle(ctx *gin.Context) {
 	if !a.ensureProfile(ctx) {
 		return
 	}
-	result, err := a.pool.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET make=$2,model=$3,model_year=$4,color=$5,plate=$6,review_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driverID(ctx), strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), *body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,make,model,model_year,color,plate) VALUES($1::UUID,$2,$3,$4,$5,$6) ON CONFLICT(driver_id) DO UPDATE SET make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,review_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW()`, driverID(ctx), strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), *body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "vehicle_unavailable", "Vehicle could not be updated")
-		return
-	}
-	if result.RowsAffected() == 0 {
-		driverError(ctx, http.StatusConflict, "package_required", "Select a vehicle package first")
 		return
 	}
 	if err := a.invalidateApproval(ctx); err != nil {
@@ -234,7 +222,7 @@ func (a *driverAPI) documents(ctx *gin.Context) {
 	user, _ := gatewayauth.CurrentUser(ctx)
 	var manualStatus, manualReason string
 	var manualVerifiedAt *time.Time
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT manual_verification_status,manual_verification_reason,manual_verified_at FROM driver_profiles WHERE driver_id=$1::UUID`, user.ID).Scan(&manualStatus, &manualReason, &manualVerifiedAt); err != nil {
+	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT CASE WHEN manual_verification_status='pending' AND NOT EXISTS(SELECT 1 FROM driver_identity_profiles ip WHERE ip.driver_id=driver_profiles.driver_id) THEN 'required' ELSE manual_verification_status END,manual_verification_reason,manual_verified_at FROM driver_profiles WHERE driver_id=$1::UUID`, user.ID).Scan(&manualStatus, &manualReason, &manualVerifiedAt); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "documents_unavailable", "Documents are unavailable")
 		return
 	}

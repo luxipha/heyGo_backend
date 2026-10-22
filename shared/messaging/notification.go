@@ -83,7 +83,7 @@ func notificationForDriverEvent(kind string, raw json.RawMessage) *InboxNotifica
 		}
 		return makeMessage("verification", "Driver status updated", body)
 	case contracts.DriverCmdTripRequest:
-		return makeMessage("trip", "New ride request", "A rider has requested a trip. Open HeyGo to review the offer.")
+		return makeMessage("dispatch", "New ride request", "A rider has requested a trip. Open HeyGo to review the offer.")
 	case contracts.TripEventDriverAssigned:
 		return makeMessage("trip", "Trip assigned", "You have been assigned a trip.")
 	case contracts.TripEventExpired:
@@ -103,7 +103,7 @@ func notificationForDriverEvent(kind string, raw json.RawMessage) *InboxNotifica
 		if value := amount("expectedAmountKobo"); value != "" {
 			body = "Trip payment status: " + status + " (₦" + value + ")."
 		}
-		return makeMessage("trip", "Trip payment updated", body)
+		return makeMessage("earnings", "Trip payment updated", body)
 	case contracts.TripEventNoShowClaimUpdated:
 		status := humanizeNotificationValue(str("status"))
 		if status == "" {
@@ -113,7 +113,7 @@ func notificationForDriverEvent(kind string, raw json.RawMessage) *InboxNotifica
 		if value := amount("feeKobo"); value != "" {
 			body += " Fee: ₦" + value + "."
 		}
-		return makeMessage("trip", "No-show claim updated", body)
+		return makeMessage("earnings", "No-show claim updated", body)
 	case "driver.operating_balance.updated":
 		updateKind := humanizeNotificationValue(str("kind"))
 		if updateKind == "" {

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 var e164PhonePattern = regexp.MustCompile(`^\+[1-9][0-9]{7,14}$`)
@@ -21,6 +21,9 @@ type driverSafetyContact struct {
 }
 
 func registerDriverSafetyContactRoutes(group *gin.RouterGroup, api *driverAPI) {
+	group.GET("/safety-directory", api.safetyDirectory)
+	group.POST("/safety-contacts", api.addSafetyContact)
+	group.DELETE("/safety-contacts/:contactID", api.removeSafetyContact)
 	group.GET("/safety-contacts", api.getSafetyContact)
 	group.PUT("/safety-contacts", api.putSafetyContact)
 }
@@ -45,8 +48,21 @@ func (a *driverAPI) getSafetyContact(ctx *gin.Context) {
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT full_name,relationship,phone_e164,updated_at
 		FROM driver_safety_contacts WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&contact.FullName, &contact.Relationship, &contact.PhoneNumber, &contact.UpdatedAt)
 	if err == pgx.ErrNoRows {
-		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"contact": nil}})
-		return
+		// An explicitly saved safety contact takes precedence over onboarding data.
+		err = a.pool.QueryRow(ctx.Request.Context(), `SELECT next_of_kin,relationship,emergency_number,updated_at
+			FROM driver_identity_profiles WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&contact.FullName, &contact.Relationship, &contact.PhoneNumber, &contact.UpdatedAt)
+		if err == pgx.ErrNoRows {
+			ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"contact": nil}})
+			return
+		}
+		if err == nil {
+			phone, valid := normalizeSafetyContactPhone(contact.PhoneNumber)
+			if strings.TrimSpace(contact.FullName) == "" || !valid {
+				ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"contact": nil}})
+				return
+			}
+			contact.PhoneNumber = phone
+		}
 	}
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "safety_contact_unavailable", "Safety contact is unavailable")

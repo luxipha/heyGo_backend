@@ -85,9 +85,25 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 		return
 	}
 
-	if _, err := pool.Exec(ctx.Request.Context(), `INSERT INTO driver_socket_sessions(driver_id,session_id,expires_at)
-		VALUES($1::UUID,$2::UUID,NOW()+INTERVAL '30 seconds')
-		ON CONFLICT(driver_id) DO UPDATE SET session_id=EXCLUDED.session_id,expires_at=EXCLUDED.expires_at`, driverID, sessionID); err != nil {
+	var authSessionID any
+	if linked := gatewayauth.CurrentSessionID(ctx); linked != "" {
+		authSessionID = linked
+	} else {
+		raw := bearerFromHeader(ctx.GetHeader("Authorization"))
+		if raw == "" {
+			raw = ctx.Query("access_token")
+		}
+		var linked string
+		if err = pool.QueryRow(ctx.Request.Context(), `SELECT id::text FROM user_sessions WHERE user_id=$1::uuid AND access_token_hash=$2`, driverID, gatewayauth.TokenHash(raw)).Scan(&linked); err == nil {
+			authSessionID = linked
+		} else if err != pgx.ErrNoRows {
+			return
+		}
+	}
+
+	if _, err := pool.Exec(ctx.Request.Context(), `INSERT INTO driver_socket_sessions(driver_id,session_id,expires_at,auth_session_id)
+		VALUES($1::UUID,$2::UUID,NOW()+INTERVAL '30 seconds',$3::uuid)
+		ON CONFLICT(driver_id) DO UPDATE SET session_id=EXCLUDED.session_id,expires_at=EXCLUDED.expires_at,auth_session_id=EXCLUDED.auth_session_id`, driverID, sessionID, authSessionID); err != nil {
 		logs.L().Errorw("failed to register driver socket session", "driverID", driverID, "error", err)
 		return
 	}
@@ -108,6 +124,14 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			logs.L().Errorw("failed to mark disconnected driver offline", "driverID", driverID, "error", err)
 		}
 	}()
+	// Retain the existing socket-ownership cleanup guard. A revoked auth
+	// session cannot replay events or keep a lease alive.
+	if authSessionID != nil {
+		var active bool
+		if err = pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM user_sessions WHERE id=$1::uuid AND revoked_at IS NULL AND refresh_expires_at>NOW())`, authSessionID).Scan(&active); err != nil || !active {
+			return
+		}
+	}
 	cancelStream, err := attachEventStreamForSession(ctx.Request.Context(), connManager, conn, store, driverID, sessionID, ctx.Query("afterEventId"))
 	if err != nil {
 		logs.L().Errorw("failed to replay driver events", "driverID", driverID, "error", err)
@@ -123,7 +147,7 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			case <-requestCtx.Done():
 				return
 			case <-ticker.C:
-				result, err := pool.Exec(requestCtx, `UPDATE driver_socket_sessions SET expires_at=NOW()+INTERVAL '30 seconds' WHERE driver_id=$1::UUID AND session_id=$2::UUID`, driverID, sessionID)
+				result, err := pool.Exec(requestCtx, `UPDATE driver_socket_sessions SET expires_at=NOW()+INTERVAL '30 seconds' WHERE driver_id=$1::UUID AND session_id=$2::UUID AND (auth_session_id IS NULL OR EXISTS(SELECT 1 FROM user_sessions a WHERE a.id=auth_session_id AND a.revoked_at IS NULL AND a.refresh_expires_at>NOW()))`, driverID, sessionID)
 				if err != nil {
 					logs.L().Warnw("failed to refresh driver socket session", "driverID", driverID, "error", err)
 					continue
@@ -154,7 +178,7 @@ func driversWSHandler(ctx *gin.Context, bus *pubsub.Client, connManager *messagi
 			break
 		}
 		var ownsSession bool
-		if err := pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_socket_sessions WHERE driver_id=$1::UUID AND session_id=$2::UUID AND expires_at>NOW())`, driverID, sessionID).Scan(&ownsSession); err != nil || !ownsSession {
+		if err := pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_socket_sessions WHERE driver_id=$1::UUID AND session_id=$2::UUID AND expires_at>NOW() AND (auth_session_id IS NULL OR EXISTS(SELECT 1 FROM user_sessions a WHERE a.id=auth_session_id AND a.revoked_at IS NULL AND a.refresh_expires_at>NOW())))`, driverID, sessionID).Scan(&ownsSession); err != nil || !ownsSession {
 			logs.L().Warnw("driver socket session is no longer current", "driverID", driverID, "error", err)
 			break
 		}

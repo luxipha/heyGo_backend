@@ -180,12 +180,13 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 			t.Fatalf("availability want=%d status=%d body=%s", want, rec.Code, rec.Body.String())
 		}
 	}
+	exec(`INSERT INTO driver_vehicles(driver_id,package_slug,review_status) VALUES($1::UUID,'sedan','approved')`, driver)
 	count(1)
 	for _, change := range []struct{ name, exclude, restore string }{
 		{"balance", `UPDATE driver_operating_accounts SET balance_kobo=0 WHERE driver_id=$1::UUID`, `UPDATE driver_operating_accounts SET balance_kobo=1 WHERE driver_id=$1::UUID`},
 		{"presence", `UPDATE driver_socket_sessions SET expires_at=NOW()-INTERVAL '1 minute' WHERE driver_id=$1::UUID`, `UPDATE driver_socket_sessions SET expires_at=NOW()+INTERVAL '1 hour' WHERE driver_id=$1::UUID`},
 		{"freshness", `UPDATE driver_live_locations SET recorded_at=NOW()-INTERVAL '31 minutes' WHERE driver_id=$1::UUID`, `UPDATE driver_live_locations SET recorded_at=NOW() WHERE driver_id=$1::UUID`},
-		{"package", `UPDATE drivers SET package_slug='suv' WHERE id=$1::UUID`, `UPDATE drivers SET package_slug='sedan' WHERE id=$1::UUID`},
+		{"package", `UPDATE driver_vehicles SET package_slug='suv' WHERE driver_id=$1::UUID`, `UPDATE driver_vehicles SET package_slug='sedan' WHERE driver_id=$1::UUID`},
 		{"eligibility", `UPDATE users SET active=FALSE WHERE id=$1::UUID`, `UPDATE users SET active=TRUE WHERE id=$1::UUID`},
 		{"available", `UPDATE drivers SET available=FALSE WHERE id=$1::UUID`, `UPDATE drivers SET available=TRUE WHERE id=$1::UUID`},
 		{"online", `UPDATE drivers SET online_requested=FALSE WHERE id=$1::UUID`, `UPDATE drivers SET online_requested=TRUE WHERE id=$1::UUID`},

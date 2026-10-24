@@ -23,6 +23,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 const fcmScope = "https://www.googleapis.com/auth/firebase.messaging"
@@ -36,6 +38,7 @@ type firebaseServiceAccount struct {
 }
 
 type fcmSender struct {
+	tokenSource  oauth2.TokenSource
 	account      firebaseServiceAccount
 	projectID    string
 	privateKey   *rsa.PrivateKey
@@ -61,7 +64,16 @@ var errFCMUnregistered = errors.New("fcm token is unregistered")
 func newFCMSenderFromEnv() (*fcmSender, error) {
 	path := strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE"))
 	if path == "" {
-		return nil, errors.New("FCM_SERVICE_ACCOUNT_FILE is not configured")
+		project := strings.TrimSpace(os.Getenv("FCM_PROJECT_ID"))
+		if strings.TrimSpace(os.Getenv("FCM_AUTH_MODE")) != "adc" || project == "" {
+			return nil, errors.New("FCM requires a service account file or explicit ADC mode and project")
+		}
+		authContext := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Timeout: 12 * time.Second})
+		source, err := google.DefaultTokenSource(authContext, fcmScope)
+		if err != nil {
+			return nil, errors.New("FCM default credentials are unavailable")
+		}
+		return &fcmSender{projectID: project, tokenSource: oauth2.ReuseTokenSource(nil, source), apiBaseURL: "https://fcm.googleapis.com/v1", client: &http.Client{Timeout: 12 * time.Second}}, nil
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
@@ -96,6 +108,16 @@ func newFCMSenderFromEnv() (*fcmSender, error) {
 }
 
 func (s *fcmSender) accessToken(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if s.tokenSource != nil {
+		token, err := s.tokenSource.Token()
+		if err != nil || token == nil || token.AccessToken == "" {
+			return "", errors.New("FCM default credential token is unavailable")
+		}
+		return token.AccessToken, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.token != "" && time.Until(s.tokenExpires) > time.Minute {
@@ -190,7 +212,7 @@ type pendingPushDelivery struct {
 }
 
 func StartNotificationPushJobs(ctx context.Context, pool *pgxpool.Pool) {
-	if strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")) == "" {
+	if !fcmConfigured() {
 		logs.L().Infow("FCM push delivery is disabled; inbox and live socket notifications remain active")
 		return
 	}
@@ -206,7 +228,7 @@ func StartNotificationPushJobs(ctx context.Context, pool *pgxpool.Pool) {
 // request-driven Cloud Run instance. Missing FCM configuration intentionally
 // leaves push delivery disabled without failing the scheduler request.
 func RunNotificationPushJobsOnce(ctx context.Context, pool *pgxpool.Pool, limit int) error {
-	if strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")) == "" || limit <= 0 {
+	if !fcmConfigured() || limit <= 0 {
 		return nil
 	}
 	sender, err := newFCMSenderFromEnv()
@@ -330,6 +352,6 @@ func finishPushDelivery(ctx context.Context, pool *pgxpool.Pool, job pendingPush
 
 func driverPushStillAllowed(ctx context.Context, pool *pgxpool.Pool, job pendingPushDelivery) bool {
 	var allowed bool
-	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_notification_push_deliveries p JOIN driver_notifications n ON n.id=p.notification_id JOIN driver_devices d ON d.id=p.device_id WHERE p.id=$1 AND p.status='processing' AND p.attempts=$2 AND d.push_token=$3 AND driver_notification_allowed(n.driver_id,n.type) AND (n.type<>'document_expiry' OR driver_document_reminder_current(n.data)))`, job.ID, job.Attempts, job.Token).Scan(&allowed)
+	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM driver_notification_push_deliveries p JOIN driver_notifications n ON n.id=p.notification_id JOIN driver_devices d ON d.id=p.device_id WHERE p.id=$1 AND p.status='processing' AND p.attempts=$2 AND d.push_token=$3 AND d.revoked_at IS NULL AND driver_notification_allowed(n.driver_id,n.type) AND (n.type<>'document_expiry' OR driver_document_reminder_current(n.data)))`, job.ID, job.Attempts, job.Token).Scan(&allowed)
 	return err == nil && allowed
 }

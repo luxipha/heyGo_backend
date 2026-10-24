@@ -15,24 +15,25 @@ import (
 )
 
 type identityProfile struct {
-	DateOfBirth       string            `json:"dateOfBirth"`
-	EvidenceUploadIDs map[string]string `json:"evidenceUploadIds,omitempty"`
-	FirstName         string            `json:"firstName"`
-	LastName          string            `json:"lastName"`
-	Age               *int              `json:"age"`
-	NINLast4          string            `json:"ninLast4"`
-	BVNLast4          string            `json:"bvnLast4"`
-	IDType            string            `json:"idType"`
-	IDNumberLast4     string            `json:"idNumberLast4"`
-	NextOfKin         string            `json:"nextOfKin"`
-	Relationship      string            `json:"relationship"`
-	EmergencyNumber   string            `json:"emergencyNumber"`
+	ResidentialAddress string            `json:"residentialAddress"`
+	DateOfBirth        string            `json:"dateOfBirth"`
+	EvidenceUploadIDs  map[string]string `json:"evidenceUploadIds,omitempty"`
+	FirstName          string            `json:"firstName"`
+	LastName           string            `json:"lastName"`
+	Age                *int              `json:"age"`
+	NINLast4           string            `json:"ninLast4"`
+	BVNLast4           string            `json:"bvnLast4"`
+	IDType             string            `json:"idType"`
+	IDNumberLast4      string            `json:"idNumberLast4"`
+	NextOfKin          string            `json:"nextOfKin"`
+	Relationship       string            `json:"relationship"`
+	EmergencyNumber    string            `json:"emergencyNumber"`
 }
 
 func readIdentityProfile(ctx *gin.Context, pool *pgxpool.Pool, driver string) (identityProfile, error) {
 	var profile identityProfile
-	err := pool.QueryRow(ctx.Request.Context(), `SELECT first_name,last_name,CASE WHEN date_of_birth IS NOT NULL THEN EXTRACT(YEAR FROM AGE(CURRENT_DATE,date_of_birth))::INT ELSE age END,COALESCE(TO_CHAR(date_of_birth,'YYYY-MM-DD'),''),nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number
-		FROM driver_identity_profiles WHERE driver_id=$1::UUID`, driver).Scan(&profile.FirstName, &profile.LastName, &profile.Age, &profile.DateOfBirth, &profile.NINLast4, &profile.BVNLast4, &profile.IDType, &profile.IDNumberLast4, &profile.NextOfKin, &profile.Relationship, &profile.EmergencyNumber)
+	err := pool.QueryRow(ctx.Request.Context(), `SELECT first_name,last_name,CASE WHEN date_of_birth IS NOT NULL THEN EXTRACT(YEAR FROM AGE(CURRENT_DATE,date_of_birth))::INT ELSE age END,COALESCE(TO_CHAR(date_of_birth,'YYYY-MM-DD'),''),nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,residential_address
+		FROM driver_identity_profiles WHERE driver_id=$1::UUID`, driver).Scan(&profile.FirstName, &profile.LastName, &profile.Age, &profile.DateOfBirth, &profile.NINLast4, &profile.BVNLast4, &profile.IDType, &profile.IDNumberLast4, &profile.NextOfKin, &profile.Relationship, &profile.EmergencyNumber, &profile.ResidentialAddress)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return identityProfile{}, nil
 	}
@@ -40,6 +41,10 @@ func readIdentityProfile(ctx *gin.Context, pool *pgxpool.Pool, driver string) (i
 }
 
 func normalizeIdentityProfile(body *identityProfile) bool {
+	body.ResidentialAddress = strings.TrimSpace(body.ResidentialAddress)
+	if len(body.ResidentialAddress) > 1000 {
+		return false
+	}
 	body.DateOfBirth = strings.TrimSpace(body.DateOfBirth)
 	if body.DateOfBirth != "" {
 		birth, err := time.Parse("2006-01-02", body.DateOfBirth)
@@ -87,10 +92,10 @@ func validLast4(value string) bool {
 }
 
 func upsertIdentityProfile(ctx *gin.Context, tx pgx.Tx, driver string, body identityProfile) error {
-	_, err := tx.Exec(ctx.Request.Context(), `INSERT INTO driver_identity_profiles(driver_id,first_name,last_name,age,nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,date_of_birth,updated_at)
-		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::DATE,NOW())
-		ON CONFLICT(driver_id) DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,age=EXCLUDED.age,nin_last4=EXCLUDED.nin_last4,bvn_last4=EXCLUDED.bvn_last4,id_type=EXCLUDED.id_type,id_number_last4=EXCLUDED.id_number_last4,next_of_kin=EXCLUDED.next_of_kin,relationship=EXCLUDED.relationship,emergency_number=EXCLUDED.emergency_number,date_of_birth=EXCLUDED.date_of_birth,updated_at=NOW()`,
-		driver, body.FirstName, body.LastName, body.Age, body.NINLast4, body.BVNLast4, body.IDType, body.IDNumberLast4, body.NextOfKin, body.Relationship, body.EmergencyNumber, body.DateOfBirth)
+	_, err := tx.Exec(ctx.Request.Context(), `INSERT INTO driver_identity_profiles(driver_id,first_name,last_name,age,nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,date_of_birth,residential_address,updated_at)
+		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::DATE,$13,NOW())
+		ON CONFLICT(driver_id) DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,age=EXCLUDED.age,nin_last4=EXCLUDED.nin_last4,bvn_last4=EXCLUDED.bvn_last4,id_type=EXCLUDED.id_type,id_number_last4=EXCLUDED.id_number_last4,next_of_kin=EXCLUDED.next_of_kin,relationship=EXCLUDED.relationship,emergency_number=EXCLUDED.emergency_number,date_of_birth=EXCLUDED.date_of_birth,residential_address=EXCLUDED.residential_address,updated_at=NOW()`,
+		driver, body.FirstName, body.LastName, body.Age, body.NINLast4, body.BVNLast4, body.IDType, body.IDNumberLast4, body.NextOfKin, body.Relationship, body.EmergencyNumber, body.DateOfBirth, body.ResidentialAddress)
 	return err
 }
 
@@ -125,8 +130,8 @@ func (a *driverAPI) updateIdentity(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_identity", "Identity details are invalid")
 		return
 	}
-	if body.FirstName == "" || body.LastName == "" || body.NINLast4 == "" || body.DateOfBirth == "" || len(body.EvidenceUploadIDs) != 3 {
-		driverError(ctx, 422, "identity_evidence_required", "Enter your name, date of birth, NIN details and capture all three identity photos")
+	if body.ResidentialAddress == "" || body.FirstName == "" || body.LastName == "" || body.NINLast4 == "" || body.DateOfBirth == "" || len(body.EvidenceUploadIDs) != 3 {
+		driverError(ctx, 422, "identity_evidence_required", "Enter your name, date of birth, residential address, NIN details and capture all three identity photos")
 		return
 	}
 	body.IDType = "NIN"

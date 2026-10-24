@@ -96,6 +96,7 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	registerAdminDriverRatingRoutes(admin, api)
 	registerAdminGeofenceRoutes(admin, api)
 	registerAdminPricingRoutes(admin, api)
+	registerAdminCatalogueRoutes(admin, api)
 	registerAdminOperatingBalanceRoutes(admin, api)
 	registerAdminStatutoryChargeRoutes(admin, api)
 	registerNoShowAdminRoutes(admin, api)

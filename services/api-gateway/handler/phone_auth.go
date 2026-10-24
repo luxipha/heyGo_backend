@@ -129,10 +129,14 @@ func registerPhoneAuthRoutes(router *gin.Engine, pool *pgxpool.Pool, users *gate
 	router.POST("/auth/phone/otp/verify", otpLimiter.Middleware, api.verifyOTP)
 	router.POST("/auth/email/otp/request", otpLimiter.Middleware, api.requestEmailOTP)
 	router.POST("/auth/email/otp/verify", otpLimiter.Middleware, api.verifyEmailOTP)
+	router.POST("/auth/2fa/verify", otpLimiter.Middleware, api.verifyLoginPIN)
+	router.POST("/auth/pin/recovery/request", otpLimiter.Middleware, api.requestPINRecovery)
+	router.POST("/auth/pin/recovery/reset", otpLimiter.Middleware, api.resetPIN)
 	router.POST("/auth/refresh", httpmiddleware.NewRateLimiter(30, time.Minute).Middleware, api.refresh)
 }
 
 func registerPhoneSessionRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool) {
+	registerSessionActivityRoutes(authenticated, pool)
 	authenticated.POST("/auth/logout", func(ctx *gin.Context) {
 		raw := bearerFromHeader(ctx.GetHeader("Authorization"))
 		if raw == "" {
@@ -242,6 +246,10 @@ type reviewChallenge struct {
 }
 
 func (a *phoneAuthAPI) requestChallenge(ctx *gin.Context, channel, destination string, send func(context.Context, string, string) error, reviews ...*reviewChallenge) {
+	a.requestPurposeChallenge(ctx, channel, destination, "login", nil, send, reviews...)
+}
+
+func (a *phoneAuthAPI) requestPurposeChallenge(ctx *gin.Context, channel, destination, purpose string, owner *string, send func(context.Context, string, string) error, reviews ...*reviewChallenge) {
 	tx, err := a.pool.Begin(ctx.Request.Context())
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
@@ -280,7 +288,7 @@ func (a *phoneAuthAPI) requestChallenge(ctx *gin.Context, channel, destination s
 			expires = r.ExpiresAt
 		}
 	}
-	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO auth_otp_challenges(id,channel,destination,code_hash,expires_at,review_otp_version) VALUES($1::UUID,$2,$3,$4,$5,$6)`, id, channel, destination, otpHash(a.pepper, id, channel+":"+destination, code), expires, reviewVersion); err != nil {
+	if _, err := tx.Exec(ctx.Request.Context(), `INSERT INTO auth_otp_challenges(id,channel,destination,code_hash,expires_at,review_otp_version,purpose,pin_reset_user_id) VALUES($1::UUID,$2,$3,$4,$5,$6,$7,$8::uuid)`, id, channel, destination, otpHash(a.pepper, id, channel+":"+destination, code), expires, reviewVersion, purpose, owner); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
 		return
 	}
@@ -363,7 +371,7 @@ func (a *phoneAuthAPI) verifyChallenge(ctx *gin.Context, channel, destination, r
 	var expires time.Time
 	var consumed *time.Time
 	var reviewVersion *int64
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT channel,destination,code_hash,attempts,expires_at,consumed_at,review_otp_version FROM auth_otp_challenges WHERE id=$1::UUID FOR UPDATE`, challengeID).Scan(&storedChannel, &storedDestination, &storedHash, &attempts, &expires, &consumed, &reviewVersion)
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT channel,destination,code_hash,attempts,expires_at,consumed_at,review_otp_version FROM auth_otp_challenges WHERE id=$1::UUID AND purpose='login' FOR UPDATE`, challengeID).Scan(&storedChannel, &storedDestination, &storedHash, &attempts, &expires, &consumed, &reviewVersion)
 	if err != nil || consumed != nil || time.Now().After(expires) || attempts >= otpMaxAttempts || storedChannel != channel || storedDestination != destination {
 		driverError(ctx, http.StatusUnauthorized, "invalid_otp", "The sign-in code is invalid or expired")
 		return
@@ -426,6 +434,40 @@ func (a *phoneAuthAPI) verifyChallenge(ctx *gin.Context, channel, destination, r
 	}
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
+		return
+	}
+	var requiresPIN bool
+	if err := tx.QueryRow(ctx.Request.Context(), `SELECT driver_two_factor_enabled FROM users WHERE id=$1::uuid`, userID).Scan(&requiresPIN); err != nil {
+		driverError(ctx, 503, "authentication_unavailable", "Sign-in is temporarily unavailable")
+		return
+	}
+	if requiresPIN {
+		challenge, err := randomToken()
+		if err != nil {
+			driverError(ctx, 503, "authentication_unavailable", "Sign-in is temporarily unavailable")
+			return
+		}
+		expiry := time.Now().UTC().Add(5 * time.Minute)
+		var reviewUntil *time.Time
+		if reviewVersion != nil {
+			reviewUntil = &reviewExpiry
+			if reviewExpiry.Before(expiry) {
+				expiry = reviewExpiry
+			}
+		}
+		_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO auth_pin_challenges(token_hash,user_id,device_name,expires_at,review_otp_version,review_expires_at) VALUES($1,$2::uuid,$3,$4,$5,$6)`, gatewayauth.TokenHash(challenge), userID, strings.TrimSpace(deviceName), expiry, reviewVersion, reviewUntil)
+		if err == nil {
+			_, err = tx.Exec(ctx.Request.Context(), `UPDATE auth_otp_challenges SET consumed_at=NOW() WHERE id=$1::uuid`, challengeID)
+		}
+		if err == nil {
+			err = tx.Commit(ctx.Request.Context())
+		}
+		if err != nil {
+			driverError(ctx, 503, "authentication_unavailable", "Sign-in is temporarily unavailable")
+			return
+		}
+		ctx.Header("Cache-Control", "no-store")
+		ctx.JSON(200, contracts.APIResponse{Data: gin.H{"requiresPin": true, "challengeToken": challenge, "expiresAt": expiry}})
 		return
 	}
 	tokens, err := insertSession(ctx.Request.Context(), tx, userID, strings.TrimSpace(deviceName))

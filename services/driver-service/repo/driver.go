@@ -73,7 +73,7 @@ func (r *postgresDriverRepo) UpsertOnline(ctx context.Context, d *pb.Driver) (*p
 	FROM driver_profiles p JOIN driver_vehicles v ON v.driver_id=p.driver_id
 	JOIN driver_eligibility e ON e.driver_id=p.driver_id
 	JOIN driver_live_locations l ON l.driver_id=p.driver_id
-	WHERE p.driver_id=$1::UUID AND v.package_slug=$2 AND e.eligible_to_drive=TRUE
+	WHERE p.driver_id=$1::UUID AND driver_category_eligible(p.driver_id,$2) AND e.eligible_to_drive=TRUE
 	AND l.recorded_at>=NOW()-INTERVAL '30 minutes'
 	AND driver_balance_eligible(p.driver_id,driver_market_at(l.location))
 	ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,profile_pic=EXCLUDED.profile_pic,car_plate=EXCLUDED.car_plate,package_slug=EXCLUDED.package_slug,

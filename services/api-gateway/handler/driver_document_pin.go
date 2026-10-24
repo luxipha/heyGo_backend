@@ -43,11 +43,16 @@ func documentPINDigest(driver, pin string) (string, bool) {
 	return otpHash([]byte(pepper), driver, "driver-document-pin-v1", pin), true
 }
 func (a *driverAPI) authenticateDocumentPIN(c *gin.Context, pin string, newPIN *string) bool {
+	return a.authenticatePINFor(c, driverID(c), pin, newPIN, nil)
+}
+
+// Reuse the same PIN, lockout and storage for documents and account security.
+func (a *driverAPI) authenticatePINFor(c *gin.Context, owner, pin string, newPIN *string, after func(pgx.Tx) error) bool {
 	if !validDocumentPIN(pin) && newPIN == nil {
 		driverError(c, 400, "invalid_pin", "Enter your four-digit PIN")
 		return false
 	}
-	digest, ready := documentPINDigest(driverID(c), pin)
+	digest, ready := documentPINDigest(owner, pin)
 	if !ready {
 		driverError(c, 503, "pin_unavailable", "PIN verification unavailable")
 		return false
@@ -58,7 +63,7 @@ func (a *driverAPI) authenticateDocumentPIN(c *gin.Context, pin string, newPIN *
 			driverError(c, 400, "invalid_pin", "Use a four-digit PIN")
 			return false
 		}
-		d, _ := documentPINDigest(driverID(c), *newPIN)
+		d, _ := documentPINDigest(owner, *newPIN)
 		var err error
 		newHash, err = bcrypt.GenerateFromPassword([]byte(d), bcrypt.DefaultCost)
 		if err != nil {
@@ -72,12 +77,12 @@ func (a *driverAPI) authenticateDocumentPIN(c *gin.Context, pin string, newPIN *
 		return false
 	}
 	defer tx.Rollback(c.Request.Context())
-	_, err = tx.Exec(c.Request.Context(), `INSERT INTO driver_document_pins(driver_id) VALUES($1::UUID) ON CONFLICT DO NOTHING`, driverID(c))
+	_, err = tx.Exec(c.Request.Context(), `INSERT INTO driver_document_pins(driver_id) VALUES($1::UUID) ON CONFLICT DO NOTHING`, owner)
 	var hash string
 	var attempts int
 	var locked *time.Time
 	if err == nil {
-		err = tx.QueryRow(c.Request.Context(), `SELECT pin_hash,failed_attempts,locked_until FROM driver_document_pins WHERE driver_id=$1::UUID FOR UPDATE`, driverID(c)).Scan(&hash, &attempts, &locked)
+		err = tx.QueryRow(c.Request.Context(), `SELECT pin_hash,failed_attempts,locked_until FROM driver_document_pins WHERE driver_id=$1::UUID FOR UPDATE`, owner).Scan(&hash, &attempts, &locked)
 	}
 	if err != nil {
 		driverError(c, 503, "pin_unavailable", "PIN verification unavailable")
@@ -96,7 +101,7 @@ func (a *driverAPI) authenticateDocumentPIN(c *gin.Context, pin string, newPIN *
 	}
 	if hash != "" && bcrypt.CompareHashAndPassword([]byte(hash), []byte(digest)) != nil {
 		attempts++
-		_, err = tx.Exec(c.Request.Context(), `UPDATE driver_document_pins SET failed_attempts=$2,locked_until=CASE WHEN $2>=5 THEN NOW()+INTERVAL '15 minutes' ELSE NULL END WHERE driver_id=$1::UUID`, driverID(c), attempts)
+		_, err = tx.Exec(c.Request.Context(), `UPDATE driver_document_pins SET failed_attempts=$2,locked_until=CASE WHEN $2>=5 THEN NOW()+INTERVAL '15 minutes' ELSE NULL END WHERE driver_id=$1::UUID`, owner, attempts)
 		if err == nil {
 			err = tx.Commit(c.Request.Context())
 		}
@@ -112,9 +117,12 @@ func (a *driverAPI) authenticateDocumentPIN(c *gin.Context, pin string, newPIN *
 		return false
 	}
 	if newPIN != nil {
-		_, err = tx.Exec(c.Request.Context(), `UPDATE driver_document_pins SET pin_hash=$2,failed_attempts=0,locked_until=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driverID(c), string(newHash))
+		_, err = tx.Exec(c.Request.Context(), `UPDATE driver_document_pins SET pin_hash=$2,failed_attempts=0,locked_until=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, owner, string(newHash))
 	} else {
-		_, err = tx.Exec(c.Request.Context(), `UPDATE driver_document_pins SET failed_attempts=0,locked_until=NULL WHERE driver_id=$1::UUID`, driverID(c))
+		_, err = tx.Exec(c.Request.Context(), `UPDATE driver_document_pins SET failed_attempts=0,locked_until=NULL WHERE driver_id=$1::UUID`, owner)
+	}
+	if err == nil && after != nil {
+		err = after(tx)
 	}
 	if err == nil {
 		err = tx.Commit(c.Request.Context())

@@ -29,7 +29,7 @@ func Read(ctx context.Context, pool *pgxpool.Pool, driverID string) (Eligibility
 	var manualVerification string
 	var inspection string
 	err := pool.QueryRow(ctx, `SELECT u.phone_verified_at IS NOT NULL OR u.email_verified,CASE WHEN COALESCE(p.manual_verification_status,'pending')='pending' AND NOT EXISTS(SELECT 1 FROM driver_identity_profiles ip WHERE ip.driver_id=u.id) THEN 'required' ELSE COALESCE(p.manual_verification_status,'required') END,COALESCE(p.admin_status,'pending'),
-		COALESCE((SELECT i.status FROM driver_inspections i WHERE i.driver_id=u.id ORDER BY i.created_at DESC, i.id DESC LIMIT 1),'required')
+		COALESCE((SELECT CASE WHEN i.vehicle_revision=COALESCE((SELECT v.inspection_revision FROM driver_vehicles v WHERE v.driver_id=u.id),0) THEN i.status ELSE 'required' END FROM driver_inspections i WHERE i.driver_id=u.id ORDER BY i.created_at DESC, i.id DESC LIMIT 1),'required')
 		FROM users u LEFT JOIN driver_profiles p ON p.driver_id=u.id WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driverID).Scan(&accountVerified, &manualVerification, &result.AdminStatus, &inspection)
 	if err != nil {
 		return Eligibility{}, fmt.Errorf("read driver eligibility: %w", err)

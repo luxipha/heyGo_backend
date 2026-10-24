@@ -31,6 +31,9 @@ func registerAdminReviewRoutes(group *gin.RouterGroup, a *adminAPI) {
 	group.POST("/drivers/:driverID/documents/uploads", a.requireCSRF, a.createDocumentUpload)
 	group.POST("/drivers/:driverID/documents", a.requireCSRF, a.submitDocument)
 	group.POST("/drivers/:driverID/documents/:documentID/review", a.requireCSRF, a.reviewDocument)
+	group.GET("/drivers/:driverID/vehicle/photos", a.vehiclePhotos)
+	group.POST("/drivers/:driverID/vehicle/photos/uploads", a.requireCSRF, a.reserveVehiclePhoto)
+	group.POST("/drivers/:driverID/vehicle/photos", a.requireCSRF, a.submitVehiclePhoto)
 	group.POST("/drivers/:driverID/inspection/uploads", a.requireCSRF, a.createReportUpload)
 	group.POST("/drivers/:driverID/inspection", a.requireCSRF, a.submitReport)
 	group.GET("/drivers/:driverID/inspection/:inspectionID/report", a.inspectionReport)
@@ -81,7 +84,7 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	var name, phone, email, adminStatus, adminReason, manualStatus, manualReason, applicationNumber string
 	var manualVerifiedAt *time.Time
 	var vehicle json.RawMessage
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'conditionNotes',v.condition_notes,'findings',v.findings,'vehicleRevision',v.inspection_revision,'categoryIds',COALESCE((SELECT jsonb_agg(category_id) FROM driver_vehicle_categories WHERE driver_id=v.driver_id),'[]'::JSONB),'categoryNames',COALESCE((SELECT jsonb_agg(c.name ORDER BY c.name) FROM driver_vehicle_categories a JOIN ride_categories c ON c.id=a.category_id WHERE a.driver_id=v.driver_id),'[]'::JSONB)) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
 		return
@@ -120,9 +123,11 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	var inspection gin.H = gin.H{"status": "required"}
 	var inspectionID, inspectionStatus, partner, location, reference, reason string
 	var inspected *time.Time
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,status,partner_name,location_name,partner_reference,outcome_reason,inspected_at FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, id).Scan(&inspectionID, &inspectionStatus, &partner, &location, &reference, &reason, &inspected)
+	var vehicleRevision int64
+	var vehicleSnapshot json.RawMessage
+	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,status,partner_name,location_name,partner_reference,outcome_reason,inspected_at,vehicle_revision,vehicle_snapshot FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, id).Scan(&inspectionID, &inspectionStatus, &partner, &location, &reference, &reason, &inspected, &vehicleRevision, &vehicleSnapshot)
 	if err == nil {
-		inspection = gin.H{"id": inspectionID, "status": inspectionStatus, "partnerName": partner, "locationName": location, "partnerReference": reference, "reason": reason, "inspectedAt": inspected}
+		inspection = gin.H{"vehicleRevision": vehicleRevision, "vehicleSnapshot": vehicleSnapshot, "id": inspectionID, "status": inspectionStatus, "partnerName": partner, "locationName": location, "partnerReference": reference, "reason": reason, "inspectedAt": inspected}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		reviewFailure(ctx)
 		return
@@ -189,15 +194,25 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 		return
 	}
 	var body struct {
-		PackageSlug string `json:"packageSlug"`
-		Make        string `json:"make"`
-		Model       string `json:"model"`
-		Year        int    `json:"year"`
-		Color       string `json:"color"`
-		Plate       string `json:"plate"`
+		CatalogueModelID string          `json:"catalogueModelId"`
+		CategoryIDs      []string        `json:"categoryIds"`
+		PassengerSeats   int             `json:"passengerSeats"`
+		WorkingAC        *bool           `json:"workingAc"`
+		Findings         VehicleFindings `json:"findings"`
+		ConditionNotes   string          `json:"conditionNotes"`
+		PackageSlug      string          `json:"packageSlug"`
+		Make             string          `json:"make"`
+		Model            string          `json:"model"`
+		Year             int             `json:"year"`
+		Color            string          `json:"color"`
+		Plate            string          `json:"plate"`
 	}
-	if ctx.ShouldBindJSON(&body) != nil || !validPackage(body.PackageSlug) || strings.TrimSpace(body.Make) == "" || strings.TrimSpace(body.Model) == "" || strings.TrimSpace(body.Plate) == "" || body.Year < 1900 || body.Year > time.Now().Year()+1 || len(body.Plate) > 30 {
+	if ctx.ShouldBindJSON(&body) != nil || (body.CatalogueModelID == "" && (!validPackage(body.PackageSlug) || strings.TrimSpace(body.Make) == "" || strings.TrimSpace(body.Model) == "")) || strings.TrimSpace(body.Plate) == "" || body.Year < 1900 || body.Year > time.Now().Year()+1 || len(body.Plate) > 30 {
 		driverError(ctx, http.StatusBadRequest, "invalid_vehicle", "Valid package, make, model, year, and plate are required")
+		return
+	}
+	if err := body.Findings.validate(); err != nil {
+		driverError(ctx, 400, "invalid_vehicle_findings", err.Error())
 		return
 	}
 	tx, err := a.pool.Begin(ctx.Request.Context())
@@ -206,20 +221,99 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	var profileID string
+	if err = tx.QueryRow(ctx.Request.Context(), `SELECT driver_id::TEXT FROM driver_profiles WHERE driver_id=$1::UUID FOR UPDATE`, driver).Scan(&profileID); err != nil {
+		driverError(ctx, 404, "driver_not_found", "Driver was not found")
+		return
+	}
+
 	var exists bool
 	if err = tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE driver_id=$1::UUID)`, driver).Scan(&exists); err != nil || !exists {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
+		return
+	}
+	if body.CatalogueModelID != "" {
+		// Lock the catalogue against concurrent eligibility edits while recording evidence.
+		if _, err = tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(hashtext('vehicle-catalogue'))`); err != nil {
+			reviewFailure(ctx)
+			return
+		}
+		if _, e := uuid.Parse(body.CatalogueModelID); e != nil || body.PassengerSeats < 1 || body.PassengerSeats > 100 || len(body.CategoryIDs) < 1 || len(body.CategoryIDs) > 100 || len(body.ConditionNotes) > 2000 || strings.TrimSpace(body.ConditionNotes) == "" {
+			driverError(ctx, 400, "invalid_inspected_vehicle", "Select a model, categories, actual seats and condition notes")
+			return
+		}
+		err = tx.QueryRow(ctx.Request.Context(), `SELECT make,model FROM vehicle_catalogue WHERE id=$1::UUID AND status='active' AND $2 BETWEEN year_from AND year_to`, body.CatalogueModelID, body.Year).Scan(&body.Make, &body.Model)
+		if err != nil {
+			driverError(ctx, 409, "model_unavailable", "Choose an active catalogue model and matching year")
+			return
+		}
+		var primary string
+		for _, categoryID := range body.CategoryIDs {
+			if _, e := uuid.Parse(categoryID); e != nil {
+				driverError(ctx, 400, "invalid_category", "Valid category IDs required")
+				return
+			}
+			var slug string
+			err = tx.QueryRow(ctx.Request.Context(), `SELECT c.slug FROM ride_categories c JOIN vehicle_category_models cm ON cm.category_id=c.id WHERE cm.model_id=$1::UUID AND c.id=$2::UUID AND c.status='active' AND c.passengers<=$3 AND c.minimum_year<=$4 AND (NOT c.requires_ac OR $5)`, body.CatalogueModelID, categoryID, body.PassengerSeats, body.Year, body.WorkingAC).Scan(&slug)
+			if err != nil {
+				driverError(ctx, 409, "vehicle_ineligible", "Selected category does not match this model, year, seats or working AC")
+				return
+			}
+			if primary == "" {
+				primary = slug
+			}
+		}
+		body.PackageSlug = primary
+	} else {
+		// A classified car must not be downgraded to the legacy free-text path.
+		var classified bool
+		if err = tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_vehicles WHERE driver_id=$1::UUID AND catalogue_model_id IS NOT NULL)`, driver).Scan(&classified); err != nil {
+			reviewFailure(ctx)
+			return
+		}
+		if classified {
+			driverError(ctx, 409, "catalogue_required", "Select the catalogue vehicle and inspected categories")
+			return
+		}
+	}
+	var previousRevision int64
+	var sameCar bool
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT inspection_revision,COALESCE(make=$2 AND model=$3 AND model_year=$4 AND plate=$5 AND color=$6 AND catalogue_model_id IS NOT DISTINCT FROM NULLIF($7,'')::uuid,FALSE) FROM driver_vehicles WHERE driver_id=$1::uuid FOR UPDATE`, driver, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Plate), strings.TrimSpace(body.Color), body.CatalogueModelID).Scan(&previousRevision, &sameCar)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		reviewFailure(ctx)
 		return
 	}
 	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,package_slug,make,model,model_year,color,plate,review_status,review_reason,reviewed_at,updated_at)
 		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,'approved','',NOW(),NOW())
 		ON CONFLICT(driver_id) DO UPDATE SET package_slug=EXCLUDED.package_slug,make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,review_status='approved',review_reason='',reviewed_at=NOW(),updated_at=NOW()`,
 		driver, body.PackageSlug, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	if err == nil && body.CatalogueModelID != "" {
+		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET catalogue_model_id=$2::UUID,passenger_seats=$3,working_ac=$4,condition_notes=$5,inspection_revision=inspection_revision+1 WHERE driver_id=$1::UUID`, driver, body.CatalogueModelID, body.PassengerSeats, body.WorkingAC, strings.TrimSpace(body.ConditionNotes))
+		if err == nil {
+			_, err = tx.Exec(ctx.Request.Context(), `DELETE FROM driver_vehicle_categories WHERE driver_id=$1::UUID`, driver)
+		}
+		for _, id := range body.CategoryIDs {
+			if err != nil {
+				break
+			}
+			_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicle_categories(driver_id,category_id,reviewed_by) VALUES($1::UUID,$2::UUID,$3::UUID)`, driver, id, currentAdmin(ctx).ID)
+		}
+	}
+	if err == nil {
+		findings, _ := json.Marshal(body.Findings)
+		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET findings=$2::jsonb,inspection_revision=inspection_revision+CASE WHEN catalogue_model_id IS NULL THEN 1 ELSE 0 END WHERE driver_id=$1::UUID`, driver, findings)
+	}
+	if err == nil && sameCar {
+		_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicle_photos(id,driver_id,vehicle_revision,angle,storage_key,content_type,size_bytes,uploaded_by,uploader_type) SELECT gen_random_uuid(),p.driver_id,v.inspection_revision,p.angle,p.storage_key,p.content_type,p.size_bytes,p.uploaded_by,p.uploader_type FROM driver_vehicle_photos p JOIN driver_vehicles v ON v.driver_id=p.driver_id WHERE p.driver_id=$1::uuid AND p.vehicle_revision=$2 AND p.superseded_at IS NULL AND v.inspection_revision<>$2`, driver, previousRevision)
+	}
 	if err == nil {
 		err = invalidateAdminApproval(ctx, tx, driver)
 	}
 	if err == nil {
 		err = adminAudit(ctx, tx, "driver.vehicle.updated_by_admin", driver, body)
+	}
+	if err == nil {
+		_, err = insertDriverEvent(ctx, tx, driver, "driver.vehicle.updated", gin.H{"reviewStatus": "approved"})
 	}
 	if err != nil || tx.Commit(ctx.Request.Context()) != nil {
 		reviewFailure(ctx)
@@ -488,13 +582,18 @@ func (a *adminAPI) submitReport(ctx *gin.Context) {
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	var lockedRevision int64
+	if err = tx.QueryRow(ctx.Request.Context(), `SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$1::uuid FOR UPDATE`, driver).Scan(&lockedRevision); err != nil {
+		driverError(ctx, 409, "vehicle_required", "Save inspected vehicle details before submitting a report")
+		return
+	}
 	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE admin_report_uploads SET consumed_at=NOW() WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW()`, uploadID)
 	if err != nil || tag.RowsAffected() != 1 {
 		driverError(ctx, http.StatusConflict, "upload_already_used", "Report upload is unavailable")
 		return
 	}
 	id := uuid.New()
-	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_inspections(id,driver_id,partner_name,location_name,partner_reference,report_storage_key,report_received_at,status,inspected_at) VALUES($1,$2::UUID,$3,$4,$5,$6,NOW(),'report_received',$7)`, id, driver, strings.TrimSpace(body.PartnerName), strings.TrimSpace(body.LocationName), strings.TrimSpace(body.PartnerReference), key, body.InspectedAt)
+	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_inspections(id,driver_id,partner_name,location_name,partner_reference,report_storage_key,report_received_at,status,inspected_at,vehicle_revision,vehicle_snapshot,evidence_version) VALUES($1,$2::UUID,$3,$4,$5,$6,NOW(),'report_received',$7,COALESCE((SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$2::UUID),0),(SELECT to_jsonb(v) FROM driver_vehicles v WHERE driver_id=$2::UUID),1)`, id, driver, strings.TrimSpace(body.PartnerName), strings.TrimSpace(body.LocationName), strings.TrimSpace(body.PartnerReference), key, body.InspectedAt)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -571,6 +670,28 @@ func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
+	var profileID string
+	if err = tx.QueryRow(ctx.Request.Context(), `SELECT driver_id::TEXT FROM driver_profiles WHERE driver_id=$1::UUID FOR UPDATE`, driver).Scan(&profileID); err != nil {
+		driverError(ctx, 404, "driver_not_found", "Driver was not found")
+		return
+	}
+
+	if body.Status == "completed" {
+		if err := validateInspectionEvidence(ctx, tx, driver, inspection); err != nil {
+			driverError(ctx, 409, "inspection_evidence_incomplete", err.Error())
+			return
+		}
+		var valid bool
+		err = tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_inspections i JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.id=$1::UUID AND i.driver_id=$2::UUID AND i.vehicle_revision=v.inspection_revision AND (v.catalogue_model_id IS NULL OR EXISTS(SELECT 1 FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug))))`, inspection, driver).Scan(&valid)
+		if err != nil {
+			reviewFailure(ctx)
+			return
+		}
+		if !valid {
+			driverError(ctx, 409, "inspection_vehicle_changed", "Save the inspected vehicle and submit a current inspection report before approval")
+			return
+		}
+	}
 	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_inspections SET status=$1,outcome_reason=$2,reviewed_by=$3::UUID,updated_at=NOW() WHERE id=$4::UUID AND driver_id=$5::UUID AND status='report_received' AND report_storage_key IS NOT NULL AND id=(SELECT id FROM driver_inspections WHERE driver_id=$5::UUID ORDER BY created_at DESC,id DESC LIMIT 1)`, body.Status, body.Reason, currentAdmin(ctx).ID, inspection, driver)
 	if err != nil {
 		reviewFailure(ctx)
@@ -633,8 +754,8 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 	}
 	if body.Status == "approved" {
 		var ready bool
-		err = tx.QueryRow(ctx.Request.Context(), `SELECT (u.phone_verified_at IS NOT NULL OR u.email_verified) AND p.manual_verification_status='approved'
-	   AND COALESCE((SELECT status='completed' FROM driver_inspections WHERE driver_id=u.id ORDER BY created_at DESC,id DESC LIMIT 1),FALSE)
+		err = tx.QueryRow(ctx.Request.Context(), `SELECT (u.phone_verified_at IS NOT NULL OR u.email_verified) AND p.manual_verification_status='approved' AND NOT EXISTS(SELECT 1 FROM driver_vehicles v WHERE v.driver_id=u.id AND v.catalogue_model_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug)))
+	   AND COALESCE((SELECT status='completed' AND vehicle_revision=COALESCE((SELECT inspection_revision FROM driver_vehicles WHERE driver_id=u.id),0) FROM driver_inspections WHERE driver_id=u.id ORDER BY created_at DESC,id DESC LIMIT 1),FALSE)
    AND NOT EXISTS(SELECT 1 FROM (VALUES('driver_license'),('vehicle_license'),('roadworthiness'),('auto_insurance'),('hackney_permit')) required(type)
     WHERE NOT COALESCE((SELECT status='approved' AND (expires_at IS NULL OR expires_at>NOW()) FROM driver_documents d WHERE d.driver_id=u.id AND d.type=required.type ORDER BY submitted_at DESC,id DESC LIMIT 1),FALSE))
 	   FROM users u JOIN driver_profiles p ON p.driver_id=u.id WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driver).Scan(&ready)

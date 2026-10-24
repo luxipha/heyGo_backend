@@ -47,7 +47,7 @@ func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longit
 	if err != nil || id == "" {
 		return nil, ErrPricingUnavailable
 	}
-	rows, err := r.pool.Query(ctx, `SELECT package_slug,base_kobo,per_km_kobo,per_minute_kobo FROM pricing_package_rates WHERE pricing_id=$1::UUID ORDER BY package_slug`, id)
+	rows, err := r.pool.Query(ctx, `SELECT r.package_slug,r.base_kobo,r.per_km_kobo,r.per_minute_kobo FROM pricing_package_rates r JOIN ride_categories c ON c.slug=r.package_slug AND c.status='active' WHERE pricing_id=$1::UUID ORDER BY r.package_slug`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +63,7 @@ func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longit
 	if rows.Err() != nil {
 		return nil, rows.Err()
 	}
-	if len(pricing.Rates) != 4 {
+	if len(pricing.Rates) == 0 {
 		return nil, ErrPricingUnavailable
 	}
 	return pricing, nil
@@ -113,6 +113,15 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 	}
 	if consumedAt != nil {
 		return nil, ErrFareInvalid
+	}
+	// A previously issued quote may not start a new trip after its category is
+	// deactivated. Already consumed quotes return their original trip above.
+	var categoryActive bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM ride_fares f JOIN ride_categories c ON c.slug=f.package_slug WHERE f.id=$1::UUID AND c.status='active')`, trip.RideFare.ID).Scan(&categoryActive); err != nil {
+		return nil, err
+	}
+	if !categoryActive {
+		return nil, ErrPricingUnavailable
 	}
 	if !expires.After(time.Now()) {
 		return nil, ErrFareExpired
@@ -286,7 +295,7 @@ func (r *postgresTripRepo) UpdateWithDriver(ctx context.Context, tripID string, 
 		UPDATE trips t SET assigned_driver_id=$2::UUID,status='accepted',updated_at=NOW(),version=version+1
 		FROM driver_assignments a, drivers d
 		WHERE t.id=$1::UUID AND a.trip_id=t.id AND a.driver_id=$2::UUID
-		  AND d.id=a.driver_id AND d.online_requested=TRUE AND d.status='offered'
+		  AND d.id=a.driver_id AND d.online_requested=TRUE AND d.status='offered' AND driver_home_matches(d.id,t.id)
 		  AND a.status='offered' AND a.expires_at>NOW() AND COALESCE(t.matching_deadline,t.created_at+INTERVAL '2 minutes')>NOW() AND t.status IN ('pending','assigned')`, tripID, driver.Id)
 	if err != nil {
 		return nil, fmt.Errorf("accept trip: %w", err)

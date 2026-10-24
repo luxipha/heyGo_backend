@@ -99,7 +99,7 @@ func TestManualIdentitySubmissionAndStaffCategory(t *testing.T) {
 	// A failure after processing earlier photos must roll back the entire submission.
 	validID := uploads["id_document"]
 	uploads["id_document"] = uuid.NewString()
-	incomplete, _ := json.Marshal(map[string]any{"firstName": "Test", "lastName": "Driver", "ninLast4": "1234", "dateOfBirth": "1995-04-12", "evidenceUploadIds": uploads})
+	incomplete, _ := json.Marshal(map[string]any{"firstName": "Test", "lastName": "Driver", "ninLast4": "1234", "dateOfBirth": "1995-04-12", "residentialAddress": "12 Test Street, Lagos", "evidenceUploadIds": uploads})
 	assertStatus(call("PUT", "/driver/identity", string(incomplete)), 422)
 	var documents, consumed int
 	if err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM driver_documents WHERE driver_id=$1::UUID`, id).Scan(&documents); err != nil || documents != 0 {
@@ -109,14 +109,16 @@ func TestManualIdentitySubmissionAndStaffCategory(t *testing.T) {
 		t.Fatalf("partial uploads consumed: %d, %v", consumed, err)
 	}
 	uploads["id_document"] = validID
-	payload, _ := json.Marshal(map[string]any{"firstName": "Test", "lastName": "Driver", "ninLast4": "1234", "dateOfBirth": "1995-04-12", "evidenceUploadIds": uploads})
+	missingAddress, _ := json.Marshal(map[string]any{"firstName": "Test", "lastName": "Driver", "ninLast4": "1234", "dateOfBirth": "1995-04-12", "evidenceUploadIds": uploads})
+	assertStatus(call("PUT", "/driver/identity", string(missingAddress)), 422)
+	payload, _ := json.Marshal(map[string]any{"firstName": "Test", "lastName": "Driver", "ninLast4": "1234", "dateOfBirth": "1995-04-12", "residentialAddress": "12 Test Street, Lagos", "evidenceUploadIds": uploads})
 	assertStatus(call("PUT", "/driver/identity", string(payload)), 200)
 	identityResponse := call("GET", "/driver/identity", "")
 	assertStatus(identityResponse, 200)
 	var identityData struct {
 		Data identityProfile `json:"data"`
 	}
-	if err = json.Unmarshal(identityResponse.Body.Bytes(), &identityData); err != nil || identityData.Data.DateOfBirth != "1995-04-12" || identityData.Data.Age == nil {
+	if err = json.Unmarshal(identityResponse.Body.Bytes(), &identityData); err != nil || identityData.Data.DateOfBirth != "1995-04-12" || identityData.Data.Age == nil || identityData.Data.ResidentialAddress != "12 Test Street, Lagos" {
 		t.Fatal("date of birth and calculated age must round trip")
 	}
 

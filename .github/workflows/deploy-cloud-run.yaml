@@ -4,7 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Full Git commit SHA already published for all five services and the migration job
+        description: Full Git commit SHA with passing audit and published service/migration images
+        required: true
+        type: string
+      include_ride_agent:
+        description: Also deploy the already-provisioned Ride Agent service
+        required: false
+        default: false
+        type: boolean
+      backup_id:
+        description: Reviewed successful heygo-postgres backup ID (verify before dispatch)
         required: true
         type: string
       confirmation:
@@ -33,10 +42,32 @@ jobs:
     environment: production
     permissions:
       contents: read
+      actions: read
       id-token: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Require successful checks for the exact selected commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          test "$IMAGE_TAG" = "$GITHUB_SHA"
+          for workflow in audit.yaml cloud-run-images.yaml; do
+            conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$IMAGE_TAG&branch=main&event=push&per_page=10" --jq '.workflow_runs[0].conclusion')"
+            test "$conclusion" = success
+          done
+
+      - name: Select only provisioned release services
+        env:
+          INCLUDE_RIDE_AGENT: ${{ inputs.include_ride_agent }}
+        run: |
+          services="driver-service trip-service payment-service"
+          if [[ "$INCLUDE_RIDE_AGENT" == true ]]; then
+            services="$services ride-agent-gateway"
+          fi
+          echo "RELEASE_SERVICES=$services api-gateway" >> "$GITHUB_ENV"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -56,12 +87,32 @@ jobs:
             echo "image_tag must be a full lowercase Git SHA" >&2
             exit 1
           fi
-          for service in api-gateway driver-service payment-service trip-service ride-agent-gateway; do
+          for service in $RELEASE_SERVICES; do
             gcloud artifacts docker images describe "$REGISTRY/$service:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
             gcloud run services describe "$service" --project="$PROJECT_ID" --region="$REGION" >/dev/null
           done
           gcloud artifacts docker images describe "$REGISTRY/migration:$IMAGE_TAG" --project="$PROJECT_ID" >/dev/null
           gcloud run jobs describe heygo-migration --project="$PROJECT_ID" --region="$REGION" >/dev/null
+
+      - name: Record reviewed backup and retain rollback evidence
+        env:
+          BACKUP_ID: ${{ inputs.backup_id }}
+        run: |
+          [[ "$BACKUP_ID" =~ ^[0-9]+$ ]]
+          mkdir -p release-evidence
+          # CI has run.admin but no Cloud SQL backup-reader grant. The operator
+          # preflight verifies the actual backup; retain its reference here.
+          printf '{"reviewedBackupId":"%s"}\n' "$BACKUP_ID" > release-evidence/backup-reference.json
+          for service in $RELEASE_SERVICES; do
+            gcloud run services describe "$service" --project="$PROJECT_ID" --region="$REGION" --format=json |
+              jq '{service: .metadata.name, image: .spec.template.spec.containers[0].image, traffic: .status.traffic, url: .status.url}' > "release-evidence/$service-before.json"
+          done
+
+      - name: Upload rollback evidence before migrations
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-rollback-${{ inputs.image_tag }}
+          path: release-evidence/
 
       - name: Run database migrations
         env:
@@ -83,7 +134,7 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           CANDIDATE_TAG="candidate-${IMAGE_TAG:0:12}"
-          for service in driver-service trip-service payment-service ride-agent-gateway api-gateway; do
+          for service in $RELEASE_SERVICES; do
             gcloud run services update "$service" \
               --project="$PROJECT_ID" \
               --region="$REGION" \
@@ -111,6 +162,7 @@ jobs:
           done
 
       - name: Check protected Ride Agent candidate health
+        if: inputs.include_ride_agent
         run: |
           service_json="$(gcloud run services describe ride-agent-gateway --project="$PROJECT_ID" --region="$REGION" --format=json)"
           audience="$(jq -r '.status.url' <<< "$service_json")"
@@ -124,7 +176,7 @@ jobs:
 
       - name: Promote verified candidate revisions
         run: |
-          for service in driver-service trip-service payment-service ride-agent-gateway api-gateway; do
+          for service in $RELEASE_SERVICES; do
             candidate_revision="$(
               gcloud run services describe "$service" \
                 --project="$PROJECT_ID" \
@@ -143,4 +195,11 @@ jobs:
               --region="$REGION" \
               --remove-tags="$CANDIDATE_TAG" \
               --quiet
+          done
+
+      - name: Verify promoted public readiness
+        run: |
+          for service in payment-service api-gateway; do
+            url="$(gcloud run services describe "$service" --project="$PROJECT_ID" --region="$REGION" --format='value(status.url)')"
+            curl --fail --silent --show-error --retry 6 --retry-all-errors --retry-delay 5 "$url/ready"
           done

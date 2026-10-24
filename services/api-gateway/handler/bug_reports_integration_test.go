@@ -19,11 +19,13 @@ import (
 type fakeBugProvider struct {
 	calls int
 	fail  bool
+	last  bugreports.Input
 }
 
 func (*fakeBugProvider) Name() string { return "test-bug-provider" }
 func (p *fakeBugProvider) Create(_ context.Context, in bugreports.Input) (string, error) {
 	p.calls++
+	p.last = in
 	if p.fail {
 		return "", bugreports.ErrUnavailable
 	}
@@ -121,9 +123,30 @@ func TestBugReportsOwnershipDeliveryAndUnplug(t *testing.T) {
 	if rec := call("GET", "/other/bug-reports", ""); rec.Code != 200 || strings.Contains(rec.Body.String(), id) {
 		t.Fatal("another rider listed report")
 	}
-	if rec := call("GET", "/driver/bug-reports", ""); rec.Code != 403 {
-		t.Fatal("driver entered rider project")
+	if rec := call("GET", "/driver/bug-reports", ""); rec.Code != 200 || strings.Contains(rec.Body.String(), id) {
+		t.Fatal("driver listed another account's report")
 	}
+	if rec := call("GET", "/driver/bug-reports/"+id, ""); rec.Code != 404 {
+		t.Fatal("driver read another account's report")
+	}
+	driverBody := strings.Replace(body, requestID, uuid.NewString(), 1)
+	driverCreated := call("POST", "/driver/bug-reports", driverBody)
+	if driverCreated.Code != 201 || p.calls != 2 || p.last.Title != "[Driver] App freezes" || !strings.HasPrefix(p.last.Description, "Source: HeyGo Driver\n") {
+		t.Fatalf("driver submission: %d", driverCreated.Code)
+	}
+	var driverResponse struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	json.Unmarshal(driverCreated.Body.Bytes(), &driverResponse)
+	if rec := call("GET", "/bug-reports/"+driverResponse.Data.ID, ""); rec.Code != 404 {
+		t.Fatal("rider read driver's report")
+	}
+	if rec := call("POST", "/driver/bug-reports", driverBody); rec.Code != 200 || p.calls != 2 {
+		t.Fatal("driver retry duplicated provider write")
+	}
+
 	if rec := call("POST", "/admin/support/bug-reports/"+id+"/comments", `{"body":"Please update the app"}`); rec.Code != 200 {
 		t.Fatalf("comment: %d %s", rec.Code, rec.Body.String())
 	}
@@ -140,7 +163,7 @@ func TestBugReportsOwnershipDeliveryAndUnplug(t *testing.T) {
 	if rec := call("POST", "/bug-reports", failedBody); rec.Code != 502 {
 		t.Fatal("provider failure reported success")
 	}
-	if rec := call("POST", "/bug-reports", failedBody); rec.Code != 409 || p.calls != 2 {
+	if rec := call("POST", "/bug-reports", failedBody); rec.Code != 409 || p.calls != 3 {
 		t.Fatal("uncertain delivery automatically resubmitted")
 	}
 	var external *string

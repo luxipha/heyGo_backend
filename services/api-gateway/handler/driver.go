@@ -29,15 +29,25 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	authenticated.POST("/routes/driver", gatewayauth.RequireRole("driver"), api.route)
 	driver := authenticated.Group("/driver", gatewayauth.RequireRole("driver"))
 	driver.GET("/ride-preferences", api.ridePreferences)
+	driver.PATCH("/ride-preferences/auto-accept", api.toggleAutoAccept)
+	driver.GET("/home-destination", api.homeDestination)
+	driver.POST("/home-destination/resolve", api.resolveHomeDestination)
+	driver.PUT("/home-destination", api.saveHomeDestination)
+	driver.PATCH("/home-destination", api.toggleHomeDestination)
 	driver.PUT("/ride-preferences", api.putRidePreferences)
 	driver.GET("/profile", api.profile)
 	driver.PATCH("/profile", api.updateProfile)
 	driver.GET("/vehicle", api.vehicle)
+	driver.GET("/vehicle/photos", api.ownVehiclePhotos)
+	driver.POST("/vehicle/photos/uploads", api.reserveOwnVehiclePhoto)
+	driver.POST("/vehicle/photos", api.submitOwnVehiclePhoto)
 	driver.PATCH("/vehicle", api.updateVehicle)
 	driver.PUT("/vehicle-package", api.updatePackage)
 	driver.GET("/onboarding", api.onboarding)
 	driver.GET("/identity", api.identity)
 	driver.PUT("/identity", api.updateIdentity)
+	driver.GET("/two-factor", api.twoFactorStatus)
+	driver.PUT("/two-factor", api.setTwoFactor)
 	driver.GET("/document-pin", api.documentPINStatus)
 	driver.PUT("/document-pin", api.setDocumentPIN)
 	driver.POST("/documents/:id/view", api.viewApprovedDocument)
@@ -63,6 +73,7 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	registerDriverPrivacyRoutes(driver, api)
 	driver.GET("/trips/active", api.activeTrip)
 	driver.GET("/trips/:tripID", api.tripDetail)
+	driver.GET("/trips/:tripID/contact", api.tripRiderContact)
 	driver.GET("/trips/:tripID/receipt", api.tripReceipt)
 	driver.GET("/trips/:tripID/settlement", api.tripSettlement)
 	driver.POST("/trips/:tripID/settlement/confirm", api.confirmTripSettlement)
@@ -133,9 +144,8 @@ func (a *driverAPI) updateProfile(ctx *gin.Context) {
 }
 
 func (a *driverAPI) vehicle(ctx *gin.Context) {
-	var packageSlug, makeName, model, color, plate, reviewStatus, reviewReason string
-	var year *int
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT package_slug,make,model,model_year,color,plate,review_status,review_reason FROM driver_vehicles WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&packageSlug, &makeName, &model, &year, &color, &plate, &reviewStatus, &reviewReason)
+	var data json.RawMessage
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'year',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'reviewReason',v.review_reason,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'findings',v.findings,'vehicleRevision',v.inspection_revision,'inspectionStatus',COALESCE((SELECT CASE WHEN i.vehicle_revision=v.inspection_revision THEN i.status ELSE 'required' END FROM driver_inspections i WHERE i.driver_id=v.driver_id ORDER BY i.created_at DESC,i.id DESC LIMIT 1),'required'),'bodyType',m.body_type,'variant',m.variant,'categories',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'slug',c.slug,'name',c.name,'passengers',c.passengers) ORDER BY c.name) FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug)),'[]'::JSONB)) FROM driver_vehicles v LEFT JOIN vehicle_catalogue m ON m.id=v.catalogue_model_id WHERE v.driver_id=$1::UUID`, driverID(ctx)).Scan(&data)
 	if errors.Is(err, pgx.ErrNoRows) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"packageSlug": "", "make": "", "model": "", "year": nil, "color": "", "plate": "", "reviewStatus": "required"}})
 		return
@@ -144,7 +154,29 @@ func (a *driverAPI) vehicle(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "vehicle_unavailable", "Vehicle is unavailable")
 		return
 	}
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"packageSlug": packageSlug, "make": makeName, "model": model, "year": year, "color": color, "plate": plate, "reviewStatus": reviewStatus, "reviewReason": reviewReason}})
+	var projection map[string]any
+	if json.Unmarshal(data, &projection) != nil {
+		driverError(ctx, 503, "vehicle_unavailable", "Vehicle unavailable")
+		return
+	}
+	projection["photos"] = []gin.H{}
+	if projection["reviewStatus"] == "approved" && projection["inspectionStatus"] == "completed" {
+		revision := int64(projection["vehicleRevision"].(float64))
+		photos, e := signedVehiclePhotos(ctx, a.pool, a.files, driverID(ctx), revision)
+		if e != nil {
+			driverError(ctx, 503, "vehicle_photos_unavailable", "Vehicle photos could not be loaded")
+			return
+		}
+		filtered := []gin.H{}
+		for _, photo := range photos {
+			if photo["angle"] == "front" {
+				filtered = append(filtered, photo)
+			}
+		}
+		projection["photos"] = filtered
+	}
+	ctx.Header("Cache-Control", "no-store")
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: projection})
 }
 
 func validPackage(value string) bool {
@@ -174,7 +206,7 @@ func (a *driverAPI) updateVehicle(ctx *gin.Context) {
 	if !a.ensureProfile(ctx) {
 		return
 	}
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,make,model,model_year,color,plate) VALUES($1::UUID,$2,$3,$4,$5,$6) ON CONFLICT(driver_id) DO UPDATE SET make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,review_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW()`, driverID(ctx), strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), *body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,make,model,model_year,color,plate) VALUES($1::UUID,$2,$3,$4,$5,$6) ON CONFLICT(driver_id) DO UPDATE SET make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,inspection_revision=driver_vehicles.inspection_revision+1,review_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW()`, driverID(ctx), strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), *body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "vehicle_unavailable", "Vehicle could not be updated")
 		return
@@ -266,7 +298,7 @@ func (a *driverAPI) documents(ctx *gin.Context) {
 	var inspectionID *string
 	var status string
 	var inspectedAt *time.Time
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,status,inspected_at FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, user.ID).Scan(&inspectionID, &status, &inspectedAt)
+	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT i.id::TEXT,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.status ELSE 'required' END,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.inspected_at ELSE NULL END FROM driver_inspections i LEFT JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.driver_id=$1::UUID ORDER BY i.created_at DESC,i.id DESC LIMIT 1`, user.ID).Scan(&inspectionID, &status, &inspectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		status = "required"
 	} else if err != nil {
@@ -281,8 +313,7 @@ func (a *driverAPI) inspection(ctx *gin.Context) {
 	var id string
 	var partnerName, locationName, status, reason string
 	var reportReceivedAt, inspectedAt *time.Time
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,partner_name,location_name,report_received_at,status,outcome_reason,inspected_at
-		FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, driverID(ctx)).Scan(&id, &partnerName, &locationName, &reportReceivedAt, &status, &reason, &inspectedAt)
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT i.id::TEXT,i.partner_name,i.location_name,i.report_received_at,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.status ELSE 'required' END,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.outcome_reason ELSE 'Vehicle details changed; a current inspection is required.' END,i.inspected_at FROM driver_inspections i LEFT JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.driver_id=$1::UUID ORDER BY i.created_at DESC,i.id DESC LIMIT 1`, driverID(ctx)).Scan(&id, &partnerName, &locationName, &reportReceivedAt, &status, &reason, &inspectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"status": "required"}})
 		return
@@ -458,7 +489,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 	defer client.Close()
 	if *body.Available {
 		var packageSlug string
-		if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT package_slug FROM driver_vehicles WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&packageSlug); err != nil || packageSlug == "" {
+		if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT c.slug FROM ride_categories c WHERE driver_category_eligible($1::UUID,c.slug) ORDER BY c.slug LIMIT 1`, driverID(ctx)).Scan(&packageSlug); err != nil || packageSlug == "" {
 			driverError(ctx, http.StatusConflict, "package_required", "Vehicle package is required")
 			return
 		}

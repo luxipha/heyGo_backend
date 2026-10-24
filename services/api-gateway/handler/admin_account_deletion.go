@@ -193,7 +193,9 @@ func queueDriverDeletionFiles(ctx *gin.Context, tx pgx.Tx, requestID, driverID s
 		SELECT $1::UUID,storage_key FROM (
 			SELECT storage_key FROM driver_documents WHERE driver_id=$2::UUID
 			UNION SELECT storage_key FROM driver_document_uploads WHERE driver_id=$2::UUID
-			UNION SELECT report_storage_key FROM driver_inspections WHERE driver_id=$2::UUID AND report_storage_key IS NOT NULL
+			UNION SELECT storage_key FROM driver_vehicle_photos WHERE driver_id=$2::uuid
+            UNION SELECT storage_key FROM vehicle_photo_uploads WHERE driver_id=$2::uuid
+            UNION SELECT report_storage_key FROM driver_inspections WHERE driver_id=$2::UUID AND report_storage_key IS NOT NULL
 			UNION SELECT archive_storage_key FROM driver_data_exports WHERE driver_id=$2::UUID AND status IN ('pending','processing','sent','failed') AND archive_storage_key IS NOT NULL
 		) keys ON CONFLICT DO NOTHING`, requestID, driverID)
 	if err == nil {
@@ -227,10 +229,12 @@ func anonymizeDriverAccount(ctx *gin.Context, tx pgx.Tx, requestID, driverID str
 		{`UPDATE users SET active=FALSE,deactivated_at=NOW(),phone_e164=NULL,phone_verified_at=NULL,email=NULL,email_verified=FALSE,casper_id_user_id='deleted:'||id::TEXT,human_id='deleted-'||id::TEXT,
 			roles='{}'::TEXT[],verified=FALSE,nin_verified=FALSE,kyc_tier=NULL,provider_trust_score=NULL,consumer_trust_score=NULL,provider_trust_status=NULL,consumer_trust_status=NULL,trust_score_updated_at=NULL,trust_score_policy_version=NULL,updated_at=NOW() WHERE id=$1::UUID AND active=TRUE`, []any{driverID}},
 		{`UPDATE driver_profiles SET display_name='Deleted Driver',photo_url='',admin_reason='',updated_at=NOW() WHERE driver_id=$1::UUID`, []any{driverID}},
-		{`UPDATE driver_vehicles SET package_slug='',make='',model='',model_year=NULL,color='',plate='',review_reason='',review_status='pending',updated_at=NOW() WHERE driver_id=$1::UUID`, []any{driverID}},
+		{`UPDATE driver_vehicles SET findings='{}'::jsonb,condition_notes='',working_ac=NULL,passenger_seats=NULL,catalogue_model_id=NULL,package_slug='',make='',model='',model_year=NULL,color='',plate='',review_reason='',review_status='pending',updated_at=NOW() WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`UPDATE drivers SET name='Deleted Driver',profile_pic='',car_plate='',package_slug='',status='offline',available=FALSE,online_requested=FALSE,location=NULL,online_market_code=NULL,updated_at=NOW() WHERE id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_additional_safety_contacts WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_notification_preferences WHERE driver_id=$1::UUID`, []any{driverID}},
+		{`UPDATE driver_identity_profiles SET residential_address='' WHERE driver_id=$1::uuid`, []any{driverID}},
+		{`DELETE FROM driver_home_destinations WHERE driver_id=$1::uuid`, []any{driverID}},
 		{`DELETE FROM driver_ride_preferences WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_document_pins WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_safety_contacts WHERE driver_id=$1::UUID`, []any{driverID}},
@@ -250,6 +254,8 @@ func anonymizeDriverAccount(ctx *gin.Context, tx pgx.Tx, requestID, driverID str
 		{`DELETE FROM driver_locations WHERE driver_id=$1`, []any{driverID}},
 		{`DELETE FROM driver_documents WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_document_uploads WHERE driver_id=$1::UUID`, []any{driverID}},
+		{`DELETE FROM driver_vehicle_photos WHERE driver_id=$1::UUID`, []any{driverID}},
+		{`DELETE FROM vehicle_photo_uploads WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_inspections WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM api_idempotency_keys WHERE actor_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM user_events WHERE recipient_id=$1::UUID`, []any{driverID}},

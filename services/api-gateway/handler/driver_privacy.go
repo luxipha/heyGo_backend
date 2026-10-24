@@ -141,11 +141,14 @@ func buildDriverDataArchive(ctx context.Context, pool *pgxpool.Pool, files stora
 		'profile',(SELECT to_jsonb(p)-'driver_id' FROM driver_profiles p WHERE p.driver_id=$1::UUID),
 		'vehicle',(SELECT to_jsonb(v)-'driver_id' FROM driver_vehicles v WHERE v.driver_id=$1::UUID),
 		'notificationPreferences',(SELECT to_jsonb(p)-'driver_id' FROM driver_notification_preferences p WHERE p.driver_id=$1::UUID),
-		'ridePreferences',(SELECT to_jsonb(p)-'driver_id' FROM driver_ride_preferences p WHERE p.driver_id=$1::UUID),
+		'residentialAddress',(SELECT residential_address FROM driver_identity_profiles WHERE driver_id=$1::uuid),
+		'homeDestination',(SELECT to_jsonb(h)-'driver_id'-'location' FROM driver_home_destinations h WHERE h.driver_id=$1::uuid),
+        'ridePreferences',(SELECT to_jsonb(p)-'driver_id' FROM driver_ride_preferences p WHERE p.driver_id=$1::UUID),
  'additionalSafetyContacts',COALESCE((SELECT jsonb_agg(to_jsonb(c)-'driver_id') FROM driver_additional_safety_contacts c WHERE c.driver_id=$1::UUID),'[]'::JSONB),
 		'safetyContact',(SELECT to_jsonb(c)-'driver_id' FROM driver_safety_contacts c WHERE c.driver_id=$1::UUID),
 		'documents',COALESCE((SELECT jsonb_agg(to_jsonb(d)-'storage_key') FROM driver_documents d WHERE d.driver_id=$1::UUID),'[]'::JSONB),
-		'inspections',COALESCE((SELECT jsonb_agg(to_jsonb(i)) FROM driver_inspections i WHERE i.driver_id=$1::UUID),'[]'::JSONB),
+		'vehiclePhotos',COALESCE((SELECT jsonb_agg(to_jsonb(p)-'storage_key'-'uploaded_by') FROM driver_vehicle_photos p WHERE p.driver_id=$1::UUID),'[]'::JSONB),
+        'inspections',COALESCE((SELECT jsonb_agg(to_jsonb(i)) FROM driver_inspections i WHERE i.driver_id=$1::UUID),'[]'::JSONB),
 		'trips',COALESCE((SELECT jsonb_agg(jsonb_build_object('trip',to_jsonb(t),'fare',to_jsonb(f),'earnings',to_jsonb(e),'settlement',to_jsonb(s)) ORDER BY t.created_at)
 			FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id LEFT JOIN driver_trip_earnings e ON e.trip_id=t.id LEFT JOIN trip_settlements s ON s.trip_id=t.id
 			WHERE t.assigned_driver_id=$1::UUID),'[]'::JSONB),
@@ -161,7 +164,8 @@ func buildDriverDataArchive(ctx context.Context, pool *pgxpool.Pool, files stora
 	var attachments []exportAttachment
 	rows, err := pool.Query(ctx, `SELECT storage_key,'documents/'||type||'-'||id::TEXT, 'application/octet-stream' FROM driver_documents WHERE driver_id=$1::UUID
 		UNION ALL SELECT storage_key,'documents/upload-'||id::TEXT,content_type FROM driver_document_uploads WHERE driver_id=$1::UUID
-		UNION ALL SELECT report_storage_key,'inspection-reports/'||id::TEXT,'application/octet-stream' FROM driver_inspections WHERE driver_id=$1::UUID AND report_storage_key IS NOT NULL`, driverID)
+		UNION ALL SELECT storage_key,'vehicle-photos/'||angle||'-'||id::text,content_type FROM driver_vehicle_photos WHERE driver_id=$1::uuid
+        UNION ALL SELECT report_storage_key,'inspection-reports/'||id::TEXT,'application/octet-stream' FROM driver_inspections WHERE driver_id=$1::UUID AND report_storage_key IS NOT NULL`, driverID)
 	if err != nil {
 		return "", fmt.Errorf("read Driver archive files: %w", err)
 	}
@@ -478,6 +482,9 @@ func StartPrivacyJobs(ctx context.Context, pool *pgxpool.Pool, files storage.Obj
 				worked = worked || riderWorked
 				if !worked {
 					worked = processDriverDeletionFile(jobCtx, pool, files)
+					if !worked {
+						worked = expireVehiclePhotoUpload(jobCtx, pool, files)
+					}
 				}
 				if !worked {
 					expireDriverExports(jobCtx, pool, files)
@@ -516,6 +523,9 @@ func RunPrivacyJobsOnce(ctx context.Context, pool *pgxpool.Pool, files storage.O
 			continue
 		}
 		if processDriverDeletionFile(ctx, pool, files) {
+			continue
+		}
+		if expireVehiclePhotoUpload(ctx, pool, files) {
 			continue
 		}
 		break

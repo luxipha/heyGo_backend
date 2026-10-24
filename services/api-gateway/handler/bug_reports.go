@@ -68,7 +68,7 @@ func (a *bugReportAPI) available(c *gin.Context) bool {
 	return true
 }
 
-// Admin permission checks run on the /admin/support route group. Rider ownership
+// Admin permission checks run on the /admin/support route group. App ownership
 // is checked independently on every list/detail request; provider IDs are private.
 func bugOwner(c *gin.Context) (string, bool) {
 	if strings.HasPrefix(c.FullPath(), "/admin/") {
@@ -83,8 +83,8 @@ func bugOwner(c *gin.Context) (string, bool) {
 		driverError(c, 401, "authentication_required", "Authentication is required")
 		return "", false
 	}
-	if !u.HasRole("rider") {
-		driverError(c, 403, "rider_required", "A rider account is required")
+	if !u.HasRole("rider") && !u.HasRole("driver") {
+		driverError(c, 403, "app_account_required", "A rider or driver account is required")
 		return "", false
 	}
 	return u.ID, true
@@ -226,7 +226,12 @@ func (a *bugReportAPI) create(c *gin.Context) {
 		driverError(c, 409, "report_delivery_unconfirmed", "We could not confirm delivery. Contact support with reference "+id+" before submitting again.")
 		return
 	}
-	external, err := a.provider.Create(c.Request.Context(), bugreports.Input{Title: in.Title, Description: in.Description, Reference: id})
+	report := bugreports.Input{Title: in.Title, Description: in.Description, Reference: id}
+	if user, ok := gatewayauth.CurrentUser(c); ok && user.HasRole("driver") {
+		report.Title = "[Driver] " + report.Title
+		report.Description = "Source: HeyGo Driver\n\n" + report.Description
+	}
+	external, err := a.provider.Create(c.Request.Context(), report)
 	if err == nil {
 		// Persist the successful provider reference even if the client disconnected.
 		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)

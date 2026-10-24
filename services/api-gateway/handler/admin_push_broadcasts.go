@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-func fcmConfigured() bool { return strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")) != "" }
+func fcmConfigured() bool {
+	return strings.TrimSpace(os.Getenv("FCM_SERVICE_ACCOUNT_FILE")) != "" ||
+		(strings.TrimSpace(os.Getenv("FCM_AUTH_MODE")) == "adc" && strings.TrimSpace(os.Getenv("FCM_PROJECT_ID")) != "")
+}
 func registerAdminPushBroadcastRoutes(g *gin.RouterGroup, a *adminAPI) {
 	g.GET("/communications/campaigns/:campaignID/broadcast", a.pushBroadcast)
 	g.POST("/communications/campaigns/:campaignID/send", a.requireCSRF, a.sendPushBroadcast)

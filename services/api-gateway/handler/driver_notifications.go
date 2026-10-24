@@ -28,6 +28,7 @@ func registerDriverNotificationRoutes(group *gin.RouterGroup, api *driverAPI) {
 	group.GET("/notification-preferences", api.driverNotificationPreferences)
 	group.PATCH("/notification-preferences", api.patchDriverNotificationPreferences)
 	group.GET("/notifications", api.driverNotifications)
+	group.GET("/notifications/:id", api.driverNotificationDetail)
 	group.PATCH("/notifications/:id", api.markDriverNotificationRead)
 	group.POST("/notifications/read-all", api.markAllDriverNotificationsRead)
 }
@@ -110,4 +111,24 @@ func (a *driverAPI) markAllDriverNotificationsRead(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"updatedCount": result.RowsAffected()}})
+}
+
+func (a *driverAPI) driverNotificationDetail(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id < 1 {
+		driverError(c, 400, "invalid_notification", "Invalid notification")
+		return
+	}
+	var n driverNotification
+	err = a.pool.QueryRow(c.Request.Context(), `SELECT id::text,type,title,message,data,created_at,read_at FROM driver_notifications WHERE id=$1 AND driver_id=$2::uuid`, id, driverID(c)).Scan(&n.ID, &n.Type, &n.Title, &n.Message, &n.Data, &n.CreatedAt, &n.ReadAt)
+	if err == pgx.ErrNoRows {
+		driverError(c, 404, "notification_not_found", "Notification was not found")
+		return
+	}
+	if err != nil {
+		driverError(c, 503, "notification_unavailable", "Notification could not be loaded")
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(200, contracts.APIResponse{Data: n})
 }

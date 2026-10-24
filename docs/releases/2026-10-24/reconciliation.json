@@ -1,0 +1,64 @@
+{
+  "sourceCommit": "59e1a6ee482e87306e3f5e0a6b611cbce6caf4b5",
+  "snapshotTag": "release-20261024-fcm-925fdcca3e37",
+  "runtimeFilesMatched": 433,
+  "evidence": [
+    "sha256 match for every runtime snapshot file",
+    "full Go suite passed with isolated local PostgreSQL"
+  ],
+  "limits": [
+    "Source equivalence is not a byte-identical CI rebuild. Production images were originally built directly.",
+    "No production rollout is authorized by this reconciliation."
+  ],
+  "preservedLocalWork": [
+    "original index/staged changes",
+    "document deletions",
+    "Terraform changes",
+    "catalogue CSV inputs",
+    "other local documentation"
+  ],
+  "production": {
+    "api-gateway": {
+      "image": "europe-west1-docker.pkg.dev/heygo-ng/heygo/api-gateway:release-20261024-fcm-925fdcca3e37",
+      "traffic": [
+        {
+          "revision": "api-gateway-00017-rir",
+          "percent": 100
+        }
+      ]
+    },
+    "driver-service": {
+      "image": "europe-west1-docker.pkg.dev/heygo-ng/heygo/driver-service:release-20261024-599bf8efd18c",
+      "traffic": [
+        {
+          "revision": "driver-service-00006-xos",
+          "percent": 100
+        }
+      ]
+    },
+    "trip-service": {
+      "image": "europe-west1-docker.pkg.dev/heygo-ng/heygo/trip-service:release-20261024-599bf8efd18c",
+      "traffic": [
+        {
+          "revision": "trip-service-00006-ciw",
+          "percent": 100
+        }
+      ]
+    },
+    "payment-service": {
+      "image": "europe-west1-docker.pkg.dev/heygo-ng/heygo/payment-service:release-20261024-599bf8efd18c",
+      "traffic": [
+        {
+          "revision": "payment-service-00007-zip",
+          "percent": 100
+        }
+      ]
+    }
+  },
+  "validation": {
+    "goFullSuite": "passed with isolated PostgreSQL",
+    "automationTests": 8,
+    "actionlint": "passed",
+    "gitleaksFalsePositives": "17 exact commit/path/rule/line fingerprints for verified 64-hex SHA-256 checksums; no file/rule-wide exclusion"
+  }
+}

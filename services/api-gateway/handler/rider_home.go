@@ -165,7 +165,7 @@ func (a *riderHomeAPI) availability(ctx *gin.Context) {
 		return
 	}
 	var validPackage bool
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT COUNT(*)=1 FROM pricing_package_rates r JOIN pricing_versions v ON v.id=r.pricing_id WHERE v.market_code=$1 AND v.status='approved' AND v.effective_from<=NOW() AND (v.effective_until IS NULL OR v.effective_until>NOW()) AND r.package_slug=$2`, *market, slug).Scan(&validPackage)
+	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT COUNT(*)=1 FROM pricing_package_rates r JOIN pricing_versions v ON v.id=r.pricing_id WHERE v.market_code=$1 AND v.status='approved' AND v.effective_from<=NOW() AND (v.effective_until IS NULL OR v.effective_until>NOW()) AND r.package_slug=$2 AND EXISTS(SELECT 1 FROM ride_categories c WHERE c.slug=r.package_slug AND c.status='active')`, *market, slug).Scan(&validPackage)
 	if err != nil {
 		driverError(ctx, 503, "availability_unavailable", "Nearby availability is unavailable")
 		return

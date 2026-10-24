@@ -17,24 +17,26 @@ type ridePreferences struct {
 }
 
 func (a *driverAPI) ridePreferences(c *gin.Context) {
-	p := ridePreferences{RideTypes: []string{}, WorkingAreas: []string{}, LongDistance: true, Airport: true}
+	p := ridePreferences{RideTypes: []string{}, WorkingAreas: []string{}, LongDistance: true, Airport: true, AutoAccept: true}
 	err := a.pool.QueryRow(c.Request.Context(), `SELECT ride_types,long_distance,airport,auto_accept,working_areas,version FROM driver_ride_preferences WHERE driver_id=$1::UUID`, driverID(c)).Scan(&p.RideTypes, &p.LongDistance, &p.Airport, &p.AutoAccept, &p.WorkingAreas, &p.Version)
 	if err != nil && err != pgx.ErrNoRows {
 		driverError(c, 503, "preferences_unavailable", "Ride preferences are unavailable")
 		return
 	}
 	types := []string{}
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT package_slug FROM driver_vehicles WHERE driver_id=$1::UUID AND review_status='approved' AND package_slug<>''`, driverID(c))
+	labels := map[string]string{}
+	rows, err := a.pool.Query(c.Request.Context(), `SELECT slug,name FROM ride_categories WHERE driver_category_eligible($1::UUID,slug) ORDER BY name`, driverID(c))
 	if err != nil {
 		driverError(c, 503, "preferences_unavailable", "Ride types are unavailable")
 		return
 	}
 	for rows.Next() {
-		var slug string
-		if err = rows.Scan(&slug); err != nil {
+		var slug, name string
+		if err = rows.Scan(&slug, &name); err != nil {
 			break
 		}
 		types = append(types, slug)
+		labels[slug] = name
 	}
 	if err == nil {
 		err = rows.Err()
@@ -66,7 +68,7 @@ func (a *driverAPI) ridePreferences(c *gin.Context) {
 		return
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(200, contracts.APIResponse{Data: gin.H{"preferences": p, "rideTypes": types, "workingAreas": areas}})
+	c.JSON(200, contracts.APIResponse{Data: gin.H{"preferences": p, "rideTypes": types, "rideTypeLabels": labels, "workingAreas": areas}})
 }
 func (a *driverAPI) putRidePreferences(c *gin.Context) {
 	var p ridePreferences
@@ -88,7 +90,7 @@ func (a *driverAPI) putRidePreferences(c *gin.Context) {
 		return
 	}
 	var valid bool
-	err = tx.QueryRow(c.Request.Context(), `SELECT NOT EXISTS(SELECT 1 FROM unnest($2::TEXT[]) s WHERE NOT EXISTS(SELECT 1 FROM driver_vehicles v WHERE v.driver_id=$1::UUID AND v.review_status='approved' AND v.package_slug=s)) AND NOT EXISTS(SELECT 1 FROM unnest($3::TEXT[]) code_value WHERE NOT EXISTS(SELECT 1 FROM trip_geofences g WHERE g.kind='region' AND g.code=code_value AND g.status='approved' AND g.effective_from<=NOW() AND (g.effective_until IS NULL OR g.effective_until>NOW())))`, owner, p.RideTypes, p.WorkingAreas).Scan(&valid)
+	err = tx.QueryRow(c.Request.Context(), `SELECT NOT EXISTS(SELECT 1 FROM unnest($2::TEXT[]) s WHERE NOT driver_category_eligible($1::UUID,s)) AND NOT EXISTS(SELECT 1 FROM unnest($3::TEXT[]) code_value WHERE NOT EXISTS(SELECT 1 FROM trip_geofences g WHERE g.kind='region' AND g.code=code_value AND g.status='approved' AND g.effective_from<=NOW() AND (g.effective_until IS NULL OR g.effective_until>NOW())))`, owner, p.RideTypes, p.WorkingAreas).Scan(&valid)
 	if err != nil {
 		driverError(c, 503, "preferences_unavailable", "Ride preferences could not be validated")
 		return

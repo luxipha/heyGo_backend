@@ -87,6 +87,11 @@ func adminRoutePermission(method, path string) string {
 			return permissionSafetyRead
 		}
 		return permissionSafetyWrite
+	case strings.HasPrefix(path, "/admin/catalogue"):
+		if read {
+			return permissionFinanceRead
+		}
+		return permissionFinanceWrite
 	case strings.HasPrefix(path, "/admin/geofences"):
 		if read {
 			return permissionGeofenceRead

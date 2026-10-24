@@ -65,10 +65,10 @@ func (m *Middleware) authenticateSession(ctx *gin.Context, rawToken string) {
 		return
 	}
 	hash := TokenHash(rawToken)
-	var userID string
+	var userID, sessionID string
 	err := m.pool.QueryRow(ctx.Request.Context(), `UPDATE user_sessions SET last_used_at=NOW()
 		WHERE access_token_hash=$1 AND revoked_at IS NULL AND access_expires_at>NOW()
-		RETURNING user_id::TEXT`, hash).Scan(&userID)
+		RETURNING user_id::TEXT,id::TEXT`, hash).Scan(&userID, &sessionID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, contracts.APIErrorResponse{Error: contracts.APIError{Code: "authentication_unavailable", Message: "Authentication is temporarily unavailable"}})
@@ -86,6 +86,7 @@ func (m *Middleware) authenticateSession(ctx *gin.Context, rawToken string) {
 		ctx.AbortWithStatusJSON(http.StatusServiceUnavailable, contracts.APIErrorResponse{Error: contracts.APIError{Code: "authentication_unavailable", Message: "Authentication is temporarily unavailable"}})
 		return
 	}
+	ctx.Set("authenticated-session-id", sessionID)
 	ctx.Set(userContextKey, user)
 	ctx.Next()
 }
@@ -121,4 +122,11 @@ func bearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(parts[1])
+}
+
+// CurrentSessionID identifies the authenticated session independently of token rotation.
+func CurrentSessionID(ctx *gin.Context) string {
+	value, _ := ctx.Get("authenticated-session-id")
+	id, _ := value.(string)
+	return id
 }

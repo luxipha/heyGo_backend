@@ -92,7 +92,7 @@ func TestDriverRidePreferencesOwnershipAndMatching(t *testing.T) {
 	if e := json.Unmarshal(w.Body.Bytes(), &result); e != nil {
 		t.Fatal(e)
 	}
-	if result.Data.Preferences.AutoAccept || result.Data.Preferences.Version != 0 {
+	if !result.Data.Preferences.AutoAccept || result.Data.Preferences.Version != 0 {
 		t.Fatal("preferences leaked between owners")
 	}
 	matches(true) // exactly 25km allowed

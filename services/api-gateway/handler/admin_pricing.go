@@ -121,13 +121,13 @@ func (a *adminAPI) createPricing(c *gin.Context) {
 		return
 	}
 	b.MarketCode = strings.ToUpper(strings.TrimSpace(b.MarketCode))
-	if !geofenceCodePattern.MatchString(b.MarketCode) || b.EffectiveFrom.IsZero() || b.EffectiveUntil != nil && !b.EffectiveUntil.After(b.EffectiveFrom) || len(b.Rates) != 4 {
-		driverError(c, 400, "invalid_pricing", "Market, period, and four package rates are required")
+	if !geofenceCodePattern.MatchString(b.MarketCode) || b.EffectiveFrom.IsZero() || b.EffectiveUntil != nil && !b.EffectiveUntil.After(b.EffectiveFrom) || (len(b.Rates) < 1 || len(b.Rates) > 100) {
+		driverError(c, 400, "invalid_pricing", "Market, period, and category rates are required")
 		return
 	}
 	seen := map[string]bool{}
 	for _, rate := range b.Rates {
-		if rate.PackageSlug != "bike" && rate.PackageSlug != "auto" && rate.PackageSlug != "sedan" && rate.PackageSlug != "suv" || seen[rate.PackageSlug] || rate.BaseKobo < 0 || rate.BaseKobo > 1000000 || rate.PerKmKobo < 0 || rate.PerKmKobo > 10000 || rate.PerMinuteKobo < 0 || rate.PerMinuteKobo > 10000 {
+		if strings.TrimSpace(rate.PackageSlug) == "" || seen[rate.PackageSlug] || rate.BaseKobo < 0 || rate.BaseKobo > 1000000 || rate.PerKmKobo < 0 || rate.PerKmKobo > 10000 || rate.PerMinuteKobo < 0 || rate.PerMinuteKobo > 10000 {
 			driverError(c, 400, "invalid_pricing", "Unique package rates must be within kobo bounds")
 			return
 		}
@@ -164,6 +164,15 @@ func (a *adminAPI) createPricing(c *gin.Context) {
 		return
 	}
 	for _, rate := range b.Rates {
+		var valid bool
+		if err = tx.QueryRow(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM ride_categories WHERE slug=$1 AND status<>'archived')`, rate.PackageSlug).Scan(&valid); err != nil {
+			reviewFailure(c)
+			return
+		}
+		if !valid {
+			driverError(c, 400, "invalid_pricing_category", "Choose an existing, non-archived ride category")
+			return
+		}
 		if _, err = tx.Exec(c.Request.Context(), `INSERT INTO pricing_package_rates(pricing_id,package_slug,base_kobo,per_km_kobo,per_minute_kobo) VALUES($1,$2,$3,$4,$5)`, id, rate.PackageSlug, rate.BaseKobo, rate.PerKmKobo, rate.PerMinuteKobo); err != nil {
 			reviewFailure(c)
 			return
@@ -264,8 +273,8 @@ func (a *adminAPI) approvePricing(c *gin.Context) {
 		reviewFailure(c)
 		return
 	}
-	if rateCount != 4 {
-		driverError(c, 409, "pricing_incomplete", "Four package rates are required")
+	if rateCount < 1 {
+		driverError(c, 409, "pricing_incomplete", "At least one category rate is required")
 		return
 	}
 	_, err = tx.Exec(c.Request.Context(), `UPDATE pricing_versions SET status='approved',approved_by=$2::UUID,approved_at=NOW() WHERE id=$1`, id, currentAdmin(c).ID)

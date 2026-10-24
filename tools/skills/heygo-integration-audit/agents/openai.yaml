@@ -1,0 +1,4 @@
+interface:
+  display_name: "HeyGo integration audit"
+  short_description: "Trace app controls through real backend contracts"
+  default_prompt: "Use $heygo-integration-audit to audit the mounted Rider flow for disconnected controls."

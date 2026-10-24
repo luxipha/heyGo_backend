@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 type deviceTestUsers struct{ id string }
@@ -73,6 +73,42 @@ func TestDriverDeviceRegistrationAndOwnerScopedRemoval(t *testing.T) {
 	}
 	if registration.Data.ID != deviceID {
 		t.Fatalf("registered ID=%q want %q", registration.Data.ID, deviceID)
+	}
+
+	register := func(owner, device, push string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/devices", bytes.NewBufferString(`{"id":"`+device+`","platform":"ios","pushToken":"`+push+`","appVersion":"2"}`))
+		req.Header.Set("Authorization", "Bearer test")
+		w := httptest.NewRecorder()
+		routerFor(owner).ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("register=%d want=%d: %s", w.Code, want, w.Body.String())
+		}
+		return w
+	}
+	duplicate := register(ownerID, uuid.NewString(), "push-token-test", 200)
+	var repeated struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err = json.Unmarshal(duplicate.Body.Bytes(), &repeated); err != nil || repeated.Data.ID != deviceID {
+		t.Fatal("Duplicate token must preserve canonical device")
+	}
+	register(ownerID, deviceID, "rotated-token-test", 200)
+	var rows int
+	if err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM driver_devices WHERE driver_id=$1::uuid`, ownerID).Scan(&rows); err != nil || rows != 1 {
+		t.Fatal("Rotation created stale rows")
+	}
+	register(otherID, deviceID, "foreign-token", 409)
+	replacement := uuid.NewString()
+	register(otherID, replacement, "rotated-token-test", 200)
+	if err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM driver_devices WHERE driver_id=$1::uuid`, ownerID).Scan(&rows); err != nil || rows != 0 {
+		t.Fatal("Token remained registered to previous owner")
+	}
+	register(ownerID, deviceID, "rotated-token-test", 200)
+	if err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM driver_devices WHERE driver_id=$1::uuid`, otherID).Scan(&rows); err != nil || rows != 0 {
+		t.Fatal("Previous owner's token was not removed")
 	}
 
 	request = httptest.NewRequest(http.MethodDelete, "/devices/"+deviceID, nil)

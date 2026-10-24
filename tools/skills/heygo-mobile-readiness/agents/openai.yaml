@@ -1,0 +1,4 @@
+interface:
+  display_name: "HeyGo mobile readiness"
+  short_description: "Check Flutter configuration and release evidence"
+  default_prompt: "Use $heygo-mobile-readiness to check Driver or Rider before a mobile release."

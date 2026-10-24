@@ -1,0 +1,4 @@
+interface:
+  display_name: "HeyGo release"
+  short_description: "Prepare and verify Git-linked HeyGo releases"
+  default_prompt: "Use $heygo-release to check release readiness and reconcile deployed artifacts with Git."

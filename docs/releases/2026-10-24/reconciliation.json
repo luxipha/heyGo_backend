@@ -58,6 +58,7 @@
   "validation": {
     "goFullSuite": "passed with isolated PostgreSQL",
     "automationTests": 8,
-    "actionlint": "passed"
+    "actionlint": "passed",
+    "gitleaksFalsePositives": "17 exact commit/path/rule/line fingerprints for verified 64-hex SHA-256 checksums; no file/rule-wide exclusion"
   }
 }

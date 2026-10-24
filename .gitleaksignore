@@ -1,0 +1,19 @@
+# Exact findings for verified SHA-256 file hashes in the reconciliation manifest.
+# These are checksums, not credentials. Do not allowlist the file or a whole rule.
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:15
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:67
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:68
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:82
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:86
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:87
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:158
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:159
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:160
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:167
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:275
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:276
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:332
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:405
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:406
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:433
+1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:434

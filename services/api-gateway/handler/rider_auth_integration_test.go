@@ -45,7 +45,7 @@ func TestRiderAuthEnrollmentRotationAndRevocation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, channel := range []string{"phone", "email"} {
 		t.Run(channel, func(t *testing.T) {
-			destination := "+2348012345678" // Synthetic Nigerian-format input; intercepted in memory, never sent as SMS.
+			destination := fmt.Sprintf("+23480%08d", uint64(time.Now().UnixNano())%100000000) // Synthetic Nigerian-format input; intercepted in memory, never sent as SMS.
 			if channel == "email" {
 				destination = "rider-auth-" + uuid.NewString() + "@example.com"
 			}

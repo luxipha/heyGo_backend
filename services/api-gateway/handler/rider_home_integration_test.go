@@ -50,6 +50,7 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 	for _, id := range []string{rider, other, driver} {
 		exec(`INSERT INTO users(id,casper_id_user_id,human_id,roles,phone_verified_at) VALUES($1::UUID,$1,$1,ARRAY['rider','driver'],NOW())`, id)
 	}
+	exec(`UPDATE users SET phone_e164=$2 WHERE id=$1::uuid`, driver, fmt.Sprintf("+23480%08d", uint64(time.Now().UnixNano())%100000000))
 	for _, id := range []string{creator, approver} {
 		exec(`INSERT INTO admin_users(id,username,password_hash) VALUES($1::UUID,$1,'test')`, id)
 	}

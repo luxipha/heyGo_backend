@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"github.com/luxipha/heyGo_backend/shared/zonepricing"
 	"sync"
 
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
@@ -41,6 +42,7 @@ type PackageRate struct {
 
 type QuotePricing struct {
 	ID, MarketCode string
+	Zone           *zonepricing.Rule
 	Rates          []PackageRate
 }
 

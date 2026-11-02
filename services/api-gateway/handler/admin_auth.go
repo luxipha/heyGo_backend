@@ -56,6 +56,7 @@ func (a adminIdentity) effectiveRoles() []string {
 }
 
 type adminAPI struct {
+	phoneLink        *driverPhoneAPI
 	pool             *pgxpool.Pool
 	files            storage.ObjectStore
 	settingsKey      []byte
@@ -65,12 +66,15 @@ type adminAPI struct {
 	staffEmailSender func(context.Context, string, string, string) error
 }
 
-func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.ObjectStore) {
+func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.ObjectStore, phoneConfig ...PhoneAuthConfig) {
 	settingsKey, _ := hex.DecodeString(env.GetString("HEYGO_ADMIN_SETTINGS_KEY", ""))
 	if len(settingsKey) != 32 {
 		settingsKey = nil
 	}
 	api := &adminAPI{pool: pool, files: files, settingsKey: settingsKey, secureCookie: env.GetBool("ADMIN_COOKIE_SECURE", true), cookieDomain: env.GetString("ADMIN_COOKIE_DOMAIN", "")}
+	if len(phoneConfig) > 0 {
+		api.phoneLink = newDriverPhoneAPI(pool, phoneConfig[0])
+	}
 	api.sameSite = http.SameSiteLaxMode
 	if strings.EqualFold(env.GetString("ADMIN_COOKIE_SAME_SITE", "lax"), "none") {
 		api.sameSite = http.SameSiteNoneMode
@@ -88,6 +92,9 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	admin.PUT("/settings/emergency-contacts", api.requireCSRF, api.putEmergencyDirectory)
 	admin.GET("/settings/support-contact", api.getSupportContact)
 	admin.PUT("/settings/support-contact", api.requireCSRF, api.putSupportContact)
+	admin.GET("/settings/agent", api.getAgentSettings)
+	admin.PUT("/settings/agent", api.requireCSRF, api.putAgentSettings)
+	admin.POST("/settings/agent/test", api.requireCSRF, api.testAgentSettings)
 	admin.GET("/settings/geo", api.getGeoSettings)
 	admin.PUT("/settings/geo", api.requireCSRF, api.putGeoSettings)
 	admin.GET("/auth/me", api.me)
@@ -110,6 +117,7 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	registerAdminCampaignRoutes(admin, api)
 	admin.GET("/analytics/summary", api.analyticsSummary)
 	registerAdminLiveRoutes(admin, api)
+	registerSimulationRoutes(admin, api)
 	registerAdminSafetyRoutes(admin, api)
 	registerAdminFinanceReadRoutes(admin, api)
 	registerAdminDriverHistoryRoutes(admin, api)

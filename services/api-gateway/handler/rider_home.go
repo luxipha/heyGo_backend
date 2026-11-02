@@ -82,11 +82,11 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
 	var t riderTripSnapshot
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.version,f.package_slug,
  ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.matching_deadline,t.matching_outcome,
- (SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'status',a.status,'expiresAt',a.expires_at,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',CASE WHEN a.status='accepted' THEN jsonb_build_object('make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug) ELSE NULL END) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND a.status IN ('offered','accepted') ORDER BY a.attempt DESC LIMIT 1),
+ (SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'status',a.status,'expiresAt',a.expires_at,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',CASE WHEN a.status='accepted' THEN COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) ELSE NULL END) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND a.status IN ('offered','accepted') ORDER BY a.attempt DESC LIMIT 1),
  CASE WHEN f.pickup IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.pickup::geometry),'longitude',ST_X(f.pickup::geometry)) END,
  CASE WHEN f.destination IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.destination::geometry),'longitude',ST_X(f.destination::geometry)) END,
  CASE WHEN t.status IN ('accepted','arrived','started','completed') AND d.id IS NOT NULL
- THEN jsonb_build_object('id',d.id,'name',d.name,'profilePic',d.profile_pic,'carPlate',d.car_plate,
+ THEN jsonb_build_object('id',d.id,'name',d.name,'profilePic',d.profile_pic,'carPlate',COALESCE(t.accepted_vehicle_snapshot->>'plate',d.car_plate),
  'location',CASE WHEN t.status IN ('accepted','arrived','started') AND l.recorded_at>=NOW()-INTERVAL '2 minutes' THEN jsonb_build_object('latitude',ST_Y(l.location::geometry),'longitude',ST_X(l.location::geometry),'recordedAt',l.recorded_at) ELSE NULL END)
  ELSE 'null'::jsonb END,s.status,t.created_at,t.updated_at,t.arrived_at,t.started_at,t.completed_at,t.cancelled_at,t.cancellation_reason
  FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id

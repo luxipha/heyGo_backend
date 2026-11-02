@@ -81,15 +81,16 @@ func (a *riderAccountAPI) savedPlaces(c *gin.Context) {
 func (a *riderAccountAPI) putSavedPlace(c *gin.Context) {
 	label := strings.TrimSpace(c.Param("label"))
 	var body struct {
-		PlaceID  string `json:"placeId"`
-		Provider string `json:"provider"`
-		Version  *int64 `json:"version"`
+		PlaceID      string `json:"placeId"`
+		Provider     string `json:"provider"`
+		SessionToken string `json:"sessionToken"`
+		Version      *int64 `json:"version"`
 	}
 	if c.ShouldBindJSON(&body) != nil || !validAccountText(label, 80) || !validAccountText(body.PlaceID, 256) || body.Version == nil || *body.Version < 0 {
 		driverError(c, 400, "invalid_saved_place", "Label, resolved place ID and version are required")
 		return
 	}
-	resolved, err := callRideAgent(c.Request.Context(), agent.Request{SchemaVersion: 1, PlaceID: body.PlaceID})
+	resolved, err := callRideAgent(c.Request.Context(), agent.Request{SchemaVersion: 1, PlaceID: body.PlaceID, SessionToken: body.SessionToken})
 	if err != nil || resolved.State != "resolved" || resolved.Place == nil {
 		driverError(c, 503, "places_unavailable", "Place resolution is unavailable; nothing was saved")
 		return

@@ -38,6 +38,9 @@ func TestDriverReviewHistoryPaginatesWithoutStorageKeys(t *testing.T) {
 	if _, err := pool.Exec(dbctx, `INSERT INTO driver_profiles(driver_id) VALUES($1::UUID)`, driverID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(dbctx, `INSERT INTO driver_vehicles(driver_id)VALUES($1::uuid)`, driverID); err != nil {
+		t.Fatal(err)
+	}
 	docIDs := []string{uuid.NewString(), uuid.NewString()}
 	inspectionIDs := []string{uuid.NewString(), uuid.NewString()}
 	for i := range docIDs {

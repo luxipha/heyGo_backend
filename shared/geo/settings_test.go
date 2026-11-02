@@ -25,4 +25,28 @@ func TestAdminEndpointValidation(t *testing.T) {
 	if base.Validate() == nil {
 		t.Fatal("unimplemented adapter accepted")
 	}
+	base.PlaceProvider = "nominatim"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("Nominatim search rejected: %v", err)
+	}
+	base.MapProvider = "nominatim"
+	if base.Validate() == nil {
+		t.Fatal("search provider incorrectly accepted as mobile map provider")
+	}
+}
+
+func TestPlaceSwitchesAndLegacyCompatibility(t *testing.T) {
+	s := Settings{PlaceProvider: "nominatim"}
+	if p := s.EnabledPlaces(); !p.Nominatim || p.Google || p.Geoapify {
+		t.Fatal("legacy changed")
+	}
+	s.PlaceProvider = "google"
+	s.PlaceProviders = &PlaceProviders{Geoapify: true, Nominatim: true}
+	if p := s.EnabledPlaces(); p.Google || !p.Geoapify || !p.Nominatim {
+		t.Fatal("switches ignored")
+	}
+	s.PlaceProvider = "disabled"
+	if s.PlacesEnabled() {
+		t.Fatal("global disable bypassed")
+	}
 }

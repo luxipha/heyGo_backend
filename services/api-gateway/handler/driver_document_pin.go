@@ -26,7 +26,7 @@ func validDocumentPIN(pin string) bool {
 }
 func (a *driverAPI) documentPINStatus(c *gin.Context) {
 	var configured bool
-	if err := a.pool.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT pin_hash<>'' FROM driver_document_pins WHERE driver_id=$1::UUID),FALSE)`, driverID(c)).Scan(&configured); err != nil {
+	if err := a.vehicleDB(c).QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT pin_hash<>'' FROM driver_document_pins WHERE driver_id=$1::UUID),FALSE)`, driverID(c)).Scan(&configured); err != nil {
 		driverError(c, 503, "pin_unavailable", "PIN settings unavailable")
 		return
 	}
@@ -71,7 +71,7 @@ func (a *driverAPI) authenticatePINFor(c *gin.Context, owner, pin string, newPIN
 			return false
 		}
 	}
-	tx, err := a.pool.Begin(c.Request.Context())
+	tx, err := a.vehicleDB(c).Begin(c.Request.Context())
 	if err != nil {
 		driverError(c, 503, "pin_unavailable", "PIN verification unavailable")
 		return false
@@ -109,6 +109,7 @@ func (a *driverAPI) authenticatePINFor(c *gin.Context, owner, pin string, newPIN
 			driverError(c, 503, "pin_unavailable", "PIN verification unavailable")
 			return false
 		}
+		c.Set("commitVehicleScope", true)
 		if attempts >= 5 {
 			driverError(c, 429, "pin_locked", "Too many incorrect PINs. Try again in 15 minutes.")
 		} else {
@@ -157,6 +158,12 @@ func (a *driverAPI) viewApprovedDocument(c *gin.Context) {
 		driverError(c, 400, "invalid_pin", "Enter your PIN")
 		return
 	}
+	c.Set("vehicleDocumentPIN", body.PIN)
+	defer c.Set("vehicleDocumentPIN", "")
+	c.Set("vehicleReadOnly", true)
+	withVehicleScope(a.pool, a.approvedDocument)(c)
+}
+func (a *driverAPI) approvedDocument(c *gin.Context) {
 	kind := c.Param("id")
 	var status string
 	var metadata []byte
@@ -165,13 +172,13 @@ func (a *driverAPI) viewApprovedDocument(c *gin.Context) {
 	fields := gin.H{}
 	files := []gin.H{}
 	if kind == "identity" {
-		err := a.pool.QueryRow(c.Request.Context(), `SELECT manual_verification_status FROM driver_profiles WHERE driver_id=$1::UUID`, driverID(c)).Scan(&status)
+		err := a.vehicleDB(c).QueryRow(c.Request.Context(), `SELECT manual_verification_status FROM driver_profiles WHERE driver_id=$1::UUID`, driverID(c)).Scan(&status)
 		if err != nil || status != "approved" {
 			driverError(c, 409, "document_locked", "This document is not approved for viewing")
 			return
 		}
 	} else if kind == "inspection" {
-		err := a.pool.QueryRow(c.Request.Context(), `SELECT status,COALESCE(report_storage_key,''),partner_name,location_name FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, driverID(c)).Scan(&status, &key, new(string), new(string))
+		err := a.vehicleDB(c).QueryRow(c.Request.Context(), `SELECT status,COALESCE(report_storage_key,''),partner_name,location_name FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, driverID(c)).Scan(&status, &key, new(string), new(string))
 		if err != nil || status != "completed" {
 			driverError(c, 409, "document_locked", "This inspection is not approved for viewing")
 			return
@@ -182,7 +189,7 @@ func (a *driverAPI) viewApprovedDocument(c *gin.Context) {
 			driverError(c, 400, "invalid_document", "Invalid document")
 			return
 		}
-		err = a.pool.QueryRow(c.Request.Context(), `SELECT status,metadata,storage_key,type,expires_at FROM driver_documents d WHERE id=$1 AND driver_id=$2::UUID AND id=(SELECT id FROM driver_documents WHERE driver_id=$2::UUID AND type=d.type ORDER BY submitted_at DESC,id DESC LIMIT 1)`, id, driverID(c)).Scan(&status, &metadata, &key, &docType, &expires)
+		err = a.vehicleDB(c).QueryRow(c.Request.Context(), `SELECT status,metadata,storage_key,type,expires_at FROM driver_documents d WHERE id=$1 AND driver_id=$2::UUID AND id=(SELECT id FROM driver_documents WHERE driver_id=$2::UUID AND type=d.type ORDER BY submitted_at DESC,id DESC LIMIT 1)`, id, driverID(c)).Scan(&status, &metadata, &key, &docType, &expires)
 		if errors.Is(err, pgx.ErrNoRows) {
 			driverError(c, 404, "document_not_found", "Document not found")
 			return
@@ -196,18 +203,18 @@ func (a *driverAPI) viewApprovedDocument(c *gin.Context) {
 			return
 		}
 	}
-	if !a.authenticateDocumentPIN(c, body.PIN, nil) {
+	if !a.authenticateDocumentPIN(c, c.GetString("vehicleDocumentPIN"), nil) {
 		return
 	}
 	if kind == "identity" {
-		profile, err := readIdentityProfile(c, a.pool, driverID(c))
+		profile, err := readIdentityProfile(c, a.vehicleDB(c), driverID(c))
 		if err != nil {
 			driverError(c, 503, "document_unavailable", "Identity unavailable")
 			return
 		}
 		raw, _ := json.Marshal(profile)
 		_ = json.Unmarshal(raw, &fields)
-		rows, err := a.pool.Query(c.Request.Context(), `SELECT DISTINCT ON(type) type,storage_key,status FROM driver_documents WHERE driver_id=$1::UUID AND type IN ('driver_picture','selfie_with_id','id_document') ORDER BY type,submitted_at DESC,id DESC`, driverID(c))
+		rows, err := a.vehicleDB(c).Query(c.Request.Context(), `SELECT DISTINCT ON(type) type,storage_key,status FROM driver_documents WHERE driver_id=$1::UUID AND type IN ('driver_picture','selfie_with_id','id_document') ORDER BY type,submitted_at DESC,id DESC`, driverID(c))
 		if err != nil {
 			driverError(c, 503, "document_unavailable", "Identity photos unavailable")
 			return
@@ -238,7 +245,7 @@ func (a *driverAPI) viewApprovedDocument(c *gin.Context) {
 	} else if kind == "inspection" {
 		var partner, location, reason string
 		var inspected *time.Time
-		if err := a.pool.QueryRow(c.Request.Context(), `SELECT partner_name,location_name,outcome_reason,inspected_at FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, driverID(c)).Scan(&partner, &location, &reason, &inspected); err != nil {
+		if err := a.vehicleDB(c).QueryRow(c.Request.Context(), `SELECT partner_name,location_name,outcome_reason,inspected_at FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, driverID(c)).Scan(&partner, &location, &reason, &inspected); err != nil {
 			driverError(c, 503, "document_unavailable", "Inspection unavailable")
 			return
 		}

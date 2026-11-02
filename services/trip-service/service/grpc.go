@@ -12,6 +12,7 @@ import (
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
 	"github.com/luxipha/heyGo_backend/shared/proto/trip"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
+	"github.com/luxipha/heyGo_backend/shared/zonepricing"
 )
 
 type tripService struct {
@@ -93,6 +94,9 @@ func (s *tripService) GenerateTripFares(ctx context.Context, riderID string, rou
 	fares := make([]*types.RideFareModel, len(pricing.Rates))
 	for i, rate := range pricing.Rates {
 		amount, valid := calculateFareKobo(route.Routes[0].Distance, route.Routes[0].Duration, rate)
+		if valid {
+			amount, valid = zonepricing.Apply(amount, pricing.Zone)
+		}
 		if !valid {
 			return nil, fmt.Errorf("fare outside approved bounds")
 		}

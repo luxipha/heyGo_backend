@@ -36,10 +36,12 @@ type Maneuver struct {
 	Duration float64   `json:"durationSeconds"`
 }
 type Route struct {
-	Distance  float64    `json:"distance"`
-	Duration  float64    `json:"duration"`
-	Geometry  Geometry   `json:"geometry"`
-	Maneuvers []Maneuver `json:"maneuvers,omitempty"`
+	StaticDuration float64    `json:"staticDuration,omitempty"`
+	TrafficAware   bool       `json:"trafficAware,omitempty"`
+	Distance       float64    `json:"distance"`
+	Duration       float64    `json:"duration"`
+	Geometry       Geometry   `json:"geometry"`
+	Maneuvers      []Maneuver `json:"maneuvers,omitempty"`
 }
 type RouteResponse struct {
 	Routes   []Route `json:"routes"`
@@ -59,6 +61,12 @@ func ConfiguredRoutes() (RouteService, error) {
 	provider := strings.ToLower(strings.TrimSpace(os.Getenv("GEO_ROUTE_PROVIDER")))
 	if provider == "" {
 		provider = "osrm"
+	}
+	if provider == "google" {
+		return configuredGoogleRoutes()
+	}
+	if provider == "amap" {
+		return configuredAMapRoutes()
 	}
 	if provider != "osrm" {
 		return nil, errors.New("route provider disabled or unsupported")

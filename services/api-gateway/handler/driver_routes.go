@@ -53,5 +53,5 @@ func (a *driverAPI) route(ctx *gin.Context) {
 		return
 	}
 	route := result.Routes[0]
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": body.TripID, "polyline": geo.Polyline(route.Geometry.Coordinates), "distanceMeters": route.Distance, "etaSeconds": route.Duration, "maneuvers": route.Maneuvers, "provider": result.Provider}})
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": body.TripID, "polyline": geo.Polyline(route.Geometry.Coordinates), "coordinates": route.Geometry.Coordinates, "distanceMeters": route.Distance, "etaSeconds": route.Duration, "staticDurationSeconds": route.StaticDuration, "trafficAware": route.TrafficAware, "maneuvers": route.Maneuvers, "provider": result.Provider}})
 }

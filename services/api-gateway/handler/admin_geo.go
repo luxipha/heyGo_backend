@@ -15,7 +15,14 @@ func (a *adminAPI) getGeoSettings(c *gin.Context) {
 		driverError(c, 503, "geo_settings_unavailable", "Geo settings unavailable")
 		return
 	}
-	c.JSON(200, contracts.APIResponse{Data: status})
+	usage, usageErr := geo.ReadRouteUsage(c.Request.Context(), a.pool)
+	data := gin.H{"settings": status.Settings, "version": status.Version, "source": status.Source,
+		"routingUsageAvailable": usageErr == nil,
+		"routingCredentials":    gin.H{"google": geo.RoutingCredentialConfigured("google"), "amap": geo.RoutingCredentialConfigured("amap")}}
+	if usageErr == nil {
+		data["routingUsage"] = usage
+	}
+	c.JSON(200, contracts.APIResponse{Data: data})
 }
 func (a *adminAPI) putGeoSettings(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
@@ -34,6 +41,11 @@ func (a *adminAPI) putGeoSettings(c *gin.Context) {
 		driverError(c, 400, "invalid_geo_settings", err.Error())
 		return
 	}
+	if (body.Settings.RouteProvider == "google" || body.Settings.RouteProvider == "amap") && !geo.RoutingCredentialConfigured(body.Settings.RouteProvider) {
+		driverError(c, 400, "routing_credential_missing", "Configure the selected routing provider's backend credential before activation")
+		return
+	}
+
 	tx, err := a.pool.Begin(c.Request.Context())
 	if err != nil {
 		driverError(c, 503, "geo_settings_unavailable", "Geo settings unavailable")

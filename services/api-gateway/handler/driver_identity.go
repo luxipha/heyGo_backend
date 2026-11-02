@@ -8,13 +8,16 @@ import (
 	"strings"
 	"time"
 
+	"context"
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 )
 
 type identityProfile struct {
+	Phone              string            `json:"phone"`
+	PhoneVerified      bool              `json:"phoneVerified"`
+	ResidentialState   string            `json:"residentialState"`
 	ResidentialAddress string            `json:"residentialAddress"`
 	DateOfBirth        string            `json:"dateOfBirth"`
 	EvidenceUploadIDs  map[string]string `json:"evidenceUploadIds,omitempty"`
@@ -30,17 +33,29 @@ type identityProfile struct {
 	EmergencyNumber    string            `json:"emergencyNumber"`
 }
 
-func readIdentityProfile(ctx *gin.Context, pool *pgxpool.Pool, driver string) (identityProfile, error) {
+func readIdentityProfile(ctx *gin.Context, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, driver string) (identityProfile, error) {
 	var profile identityProfile
-	err := pool.QueryRow(ctx.Request.Context(), `SELECT first_name,last_name,CASE WHEN date_of_birth IS NOT NULL THEN EXTRACT(YEAR FROM AGE(CURRENT_DATE,date_of_birth))::INT ELSE age END,COALESCE(TO_CHAR(date_of_birth,'YYYY-MM-DD'),''),nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,residential_address
-		FROM driver_identity_profiles WHERE driver_id=$1::UUID`, driver).Scan(&profile.FirstName, &profile.LastName, &profile.Age, &profile.DateOfBirth, &profile.NINLast4, &profile.BVNLast4, &profile.IDType, &profile.IDNumberLast4, &profile.NextOfKin, &profile.Relationship, &profile.EmergencyNumber, &profile.ResidentialAddress)
+	err := pool.QueryRow(ctx.Request.Context(), `SELECT first_name,last_name,CASE WHEN date_of_birth IS NOT NULL THEN EXTRACT(YEAR FROM AGE(CURRENT_DATE,date_of_birth))::INT ELSE age END,COALESCE(TO_CHAR(date_of_birth,'YYYY-MM-DD'),''),nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,residential_address,residential_state
+		FROM driver_identity_profiles WHERE driver_id=$1::UUID`, driver).Scan(&profile.FirstName, &profile.LastName, &profile.Age, &profile.DateOfBirth, &profile.NINLast4, &profile.BVNLast4, &profile.IDType, &profile.IDNumberLast4, &profile.NextOfKin, &profile.Relationship, &profile.EmergencyNumber, &profile.ResidentialAddress, &profile.ResidentialState)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return identityProfile{}, nil
+		err = nil
+	}
+	if err == nil {
+		err = pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(phone_e164,''),phone_verified_at IS NOT NULL AND COALESCE(phone_e164,'')<>'' FROM users WHERE id=$1::uuid`, driver).Scan(&profile.Phone, &profile.PhoneVerified)
 	}
 	return profile, err
 }
 
 func normalizeIdentityProfile(body *identityProfile) bool {
+	// Phone ownership cannot be asserted by identity-form JSON.
+	body.Phone = ""
+	body.PhoneVerified = false
+	body.ResidentialState = strings.TrimSpace(body.ResidentialState)
+	if body.ResidentialState != "" && !validResidentialState(body.ResidentialState) {
+		return false
+	}
 	body.ResidentialAddress = strings.TrimSpace(body.ResidentialAddress)
 	if len(body.ResidentialAddress) > 1000 {
 		return false
@@ -92,10 +107,10 @@ func validLast4(value string) bool {
 }
 
 func upsertIdentityProfile(ctx *gin.Context, tx pgx.Tx, driver string, body identityProfile) error {
-	_, err := tx.Exec(ctx.Request.Context(), `INSERT INTO driver_identity_profiles(driver_id,first_name,last_name,age,nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,date_of_birth,residential_address,updated_at)
-		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::DATE,$13,NOW())
-		ON CONFLICT(driver_id) DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,age=EXCLUDED.age,nin_last4=EXCLUDED.nin_last4,bvn_last4=EXCLUDED.bvn_last4,id_type=EXCLUDED.id_type,id_number_last4=EXCLUDED.id_number_last4,next_of_kin=EXCLUDED.next_of_kin,relationship=EXCLUDED.relationship,emergency_number=EXCLUDED.emergency_number,date_of_birth=EXCLUDED.date_of_birth,residential_address=EXCLUDED.residential_address,updated_at=NOW()`,
-		driver, body.FirstName, body.LastName, body.Age, body.NINLast4, body.BVNLast4, body.IDType, body.IDNumberLast4, body.NextOfKin, body.Relationship, body.EmergencyNumber, body.DateOfBirth, body.ResidentialAddress)
+	_, err := tx.Exec(ctx.Request.Context(), `INSERT INTO driver_identity_profiles(driver_id,first_name,last_name,age,nin_last4,bvn_last4,id_type,id_number_last4,next_of_kin,relationship,emergency_number,date_of_birth,residential_address,residential_state,updated_at)
+		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,'')::DATE,$13,$14,NOW())
+		ON CONFLICT(driver_id) DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,age=EXCLUDED.age,nin_last4=EXCLUDED.nin_last4,bvn_last4=EXCLUDED.bvn_last4,id_type=EXCLUDED.id_type,id_number_last4=EXCLUDED.id_number_last4,next_of_kin=EXCLUDED.next_of_kin,relationship=EXCLUDED.relationship,emergency_number=EXCLUDED.emergency_number,date_of_birth=EXCLUDED.date_of_birth,residential_address=EXCLUDED.residential_address,residential_state=EXCLUDED.residential_state,updated_at=NOW()`,
+		driver, body.FirstName, body.LastName, body.Age, body.NINLast4, body.BVNLast4, body.IDType, body.IDNumberLast4, body.NextOfKin, body.Relationship, body.EmergencyNumber, body.DateOfBirth, body.ResidentialAddress, body.ResidentialState)
 	return err
 }
 

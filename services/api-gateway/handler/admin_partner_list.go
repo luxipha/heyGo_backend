@@ -128,7 +128,7 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	asOf := time.Now().UTC()
 	rows, err := a.pool.Query(ctx.Request.Context(), `WITH partner_state AS (
 		SELECT p.driver_id,COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),'') AS display_name,p.application_number,u.phone_e164,u.email,p.admin_status,p.manual_verification_status,p.updated_at,
-			d.online_market_code,v.make,v.model,v.plate,
+			d.online_market_code,v.make,v.model,v.plate,(SELECT count(*) FROM driver_vehicle_records fleet WHERE fleet.driver_id=p.driver_id AND fleet.approval_status='pending') AS pending_vehicles,
 			COALESCE(d.online_requested,FALSE) AND EXISTS(SELECT 1 FROM driver_socket_sessions s WHERE s.driver_id=p.driver_id AND s.expires_at>$1)
 			AND COALESCE(l.recorded_at>$1::TIMESTAMPTZ-INTERVAL '30 seconds',FALSE) AS online_current,
 			a.balance_kobo,docs.next_expiry,
@@ -149,7 +149,7 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	)
 	SELECT driver_id::TEXT,display_name,COALESCE(phone_e164,''),COALESCE(email,''),admin_status,manual_verification_status,
 		updated_at,online_market_code,online_current,balance_kobo,balance_band,next_expiry,expiry_band,
-		COALESCE(make,''),COALESCE(model,''),COALESCE(plate,''),application_number
+		COALESCE(make,''),COALESCE(model,''),COALESCE(plate,''),application_number,pending_vehicles
 	FROM partner_state
 	WHERE ($2='all' OR admin_status=$2)
 	AND ($3::UUID IS NULL OR driver_id=$3)
@@ -172,14 +172,15 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 		var updated time.Time
 		var marketCode *string
 		var current bool
+		var pendingVehicles int
 		var balanceKobo *int64
 		var nextExpiry *time.Time
-		if err := rows.Scan(&id, &name, &phone, &email, &state, &manual, &updated, &marketCode, &current, &balanceKobo, &balanceBand, &nextExpiry, &expiryBand, &make, &model, &plate, &applicationNumber); err != nil {
+		if err := rows.Scan(&id, &name, &phone, &email, &state, &manual, &updated, &marketCode, &current, &balanceKobo, &balanceBand, &nextExpiry, &expiryBand, &make, &model, &plate, &applicationNumber, &pendingVehicles); err != nil {
 			reviewFailure(ctx)
 			return
 		}
 		item := gin.H{"driverId": id, "displayName": name, "applicationNumber": applicationNumber, "adminStatus": state,
-			"manualVerificationStatus": manual, "updatedAt": updated, "onlineCurrent": current,
+			"manualVerificationStatus": manual, "pendingVehicleCount": pendingVehicles, "updatedAt": updated, "onlineCurrent": current,
 			"zone": marketCode, "balanceBand": balanceBand, "expiryBand": expiryBand, "nextDocumentExpiryAt": nextExpiry,
 			"vehicle": gin.H{"make": make, "model": model, "plate": plate}}
 		if adminHasPermission(ctx, permissionDriverContact) {

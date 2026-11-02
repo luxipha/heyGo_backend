@@ -37,11 +37,14 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.PUT("/ride-preferences", api.putRidePreferences)
 	driver.GET("/profile", api.profile)
 	driver.PATCH("/profile", api.updateProfile)
-	driver.GET("/vehicle", api.vehicle)
-	driver.GET("/vehicle/photos", api.ownVehiclePhotos)
-	driver.POST("/vehicle/photos/uploads", api.reserveOwnVehiclePhoto)
-	driver.POST("/vehicle/photos", api.submitOwnVehiclePhoto)
-	driver.PATCH("/vehicle", api.updateVehicle)
+	driver.GET("/vehicles", api.vehicles)
+	driver.POST("/vehicles", api.addVehicle)
+	driver.PUT("/vehicles/:vehicleID/active", api.activateVehicle)
+	driver.GET("/vehicle", withVehicleScope(pool, api.vehicle))
+	driver.GET("/vehicle/photos", withVehicleScope(pool, api.ownVehiclePhotos))
+	driver.POST("/vehicle/photos/uploads", withVehicleScope(pool, api.reserveOwnVehiclePhoto))
+	driver.POST("/vehicle/photos", withVehicleScope(pool, api.submitOwnVehiclePhoto))
+	driver.PATCH("/vehicle", withVehicleScope(pool, api.updateVehicle))
 	driver.PUT("/vehicle-package", api.updatePackage)
 	driver.GET("/onboarding", api.onboarding)
 	driver.GET("/identity", api.identity)
@@ -51,11 +54,11 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.GET("/document-pin", api.documentPINStatus)
 	driver.PUT("/document-pin", api.setDocumentPIN)
 	driver.POST("/documents/:id/view", api.viewApprovedDocument)
-	driver.GET("/documents", api.documents)
-	driver.POST("/documents/uploads", api.createDocumentUpload)
-	driver.POST("/documents", api.submitDocument)
-	driver.POST("/documents/:id/resubmit", api.submitDocument)
-	driver.GET("/inspection", api.inspection)
+	driver.GET("/documents", withVehicleScope(pool, api.documents))
+	driver.POST("/documents/uploads", withVehicleScope(pool, api.createDocumentUpload))
+	driver.POST("/documents", withVehicleScope(pool, api.submitDocument))
+	driver.POST("/documents/:id/resubmit", withVehicleScope(pool, api.submitDocument))
+	driver.GET("/inspection", withVehicleScope(pool, api.inspection))
 	driver.GET("/dashboard", api.dashboard)
 	driver.GET("/earnings", api.earnings)
 	driver.GET("/operating-balance", api.operatingBalance)
@@ -92,7 +95,7 @@ func driverError(ctx *gin.Context, status int, code, message string) {
 }
 
 func (a *driverAPI) ensureProfile(ctx *gin.Context) bool {
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_profiles(driver_id) VALUES($1::UUID) ON CONFLICT DO NOTHING`, driverID(ctx))
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO driver_profiles(driver_id) VALUES($1::UUID) ON CONFLICT DO NOTHING`, driverID(ctx))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "driver_profile_unavailable", "Driver profile is unavailable")
 		return false
@@ -105,7 +108,7 @@ func (a *driverAPI) profile(ctx *gin.Context) {
 		return
 	}
 	var name, photo, portraitKey, adminStatus, adminReason string
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)),''),p.display_name),p.photo_url,COALESCE((SELECT d.storage_key FROM driver_documents d WHERE d.driver_id=p.driver_id AND d.type='driver_picture' AND d.status='approved' AND p.manual_verification_status='approved' ORDER BY d.submitted_at DESC,d.id DESC LIMIT 1),''),p.admin_status,p.admin_reason FROM driver_profiles p LEFT JOIN driver_identity_profiles ip ON ip.driver_id=p.driver_id WHERE p.driver_id=$1::UUID`, driverID(ctx)).Scan(&name, &photo, &portraitKey, &adminStatus, &adminReason)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)),''),p.display_name),p.photo_url,COALESCE((SELECT d.storage_key FROM driver_documents d WHERE d.driver_id=p.driver_id AND d.type='driver_picture' AND d.status='approved' AND p.manual_verification_status='approved' ORDER BY d.submitted_at DESC,d.id DESC LIMIT 1),''),p.admin_status,p.admin_reason FROM driver_profiles p LEFT JOIN driver_identity_profiles ip ON ip.driver_id=p.driver_id WHERE p.driver_id=$1::UUID`, driverID(ctx)).Scan(&name, &photo, &portraitKey, &adminStatus, &adminReason)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "driver_profile_unavailable", "Driver profile is unavailable")
 		return
@@ -131,7 +134,7 @@ func (a *driverAPI) updateProfile(ctx *gin.Context) {
 	if !a.ensureProfile(ctx) {
 		return
 	}
-	_, err := a.pool.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET display_name=$2,admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driverID(ctx), strings.TrimSpace(*body.DisplayName))
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `UPDATE driver_profiles SET display_name=$2,admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driverID(ctx), strings.TrimSpace(*body.DisplayName))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "driver_profile_unavailable", "Driver profile could not be updated")
 		return
@@ -145,7 +148,7 @@ func (a *driverAPI) updateProfile(ctx *gin.Context) {
 
 func (a *driverAPI) vehicle(ctx *gin.Context) {
 	var data json.RawMessage
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'year',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'reviewReason',v.review_reason,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'findings',v.findings,'vehicleRevision',v.inspection_revision,'inspectionStatus',COALESCE((SELECT CASE WHEN i.vehicle_revision=v.inspection_revision THEN i.status ELSE 'required' END FROM driver_inspections i WHERE i.driver_id=v.driver_id ORDER BY i.created_at DESC,i.id DESC LIMIT 1),'required'),'bodyType',m.body_type,'variant',m.variant,'categories',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'slug',c.slug,'name',c.name,'passengers',c.passengers) ORDER BY c.name) FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug)),'[]'::JSONB)) FROM driver_vehicles v LEFT JOIN vehicle_catalogue m ON m.id=v.catalogue_model_id WHERE v.driver_id=$1::UUID`, driverID(ctx)).Scan(&data)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT jsonb_build_object('vehicleId',v.id,'isActive',v.is_active,'approvalStatus',v.approval_status,'packageSlug',v.package_slug,'make',v.make,'model',v.model,'year',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'reviewReason',v.review_reason,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'findings',v.findings,'vehicleRevision',v.inspection_revision,'inspectionStatus',COALESCE((SELECT CASE WHEN i.vehicle_revision=v.inspection_revision THEN i.status ELSE 'required' END FROM driver_inspections i WHERE i.driver_id=v.driver_id ORDER BY i.created_at DESC,i.id DESC LIMIT 1),'required'),'bodyType',m.body_type,'variant',m.variant,'categories',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'slug',c.slug,'name',c.name,'passengers',c.passengers) ORDER BY c.name) FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug)),'[]'::JSONB)) FROM driver_vehicles v LEFT JOIN vehicle_catalogue m ON m.id=v.catalogue_model_id WHERE v.driver_id=$1::UUID`, driverID(ctx)).Scan(&data)
 	if errors.Is(err, pgx.ErrNoRows) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"packageSlug": "", "make": "", "model": "", "year": nil, "color": "", "plate": "", "reviewStatus": "required"}})
 		return
@@ -162,7 +165,7 @@ func (a *driverAPI) vehicle(ctx *gin.Context) {
 	projection["photos"] = []gin.H{}
 	if projection["reviewStatus"] == "approved" && projection["inspectionStatus"] == "completed" {
 		revision := int64(projection["vehicleRevision"].(float64))
-		photos, e := signedVehiclePhotos(ctx, a.pool, a.files, driverID(ctx), revision)
+		photos, e := signedVehiclePhotos(ctx, a.vehicleDB(ctx), a.files, driverID(ctx), revision)
 		if e != nil {
 			driverError(ctx, 503, "vehicle_photos_unavailable", "Vehicle photos could not be loaded")
 			return
@@ -206,7 +209,22 @@ func (a *driverAPI) updateVehicle(ctx *gin.Context) {
 	if !a.ensureProfile(ctx) {
 		return
 	}
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,make,model,model_year,color,plate) VALUES($1::UUID,$2,$3,$4,$5,$6) ON CONFLICT(driver_id) DO UPDATE SET make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,inspection_revision=driver_vehicles.inspection_revision+1,review_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW()`, driverID(ctx), strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), *body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	if !inactiveVehicleOnly(ctx) {
+		var busy bool
+		e := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT online_requested OR available OR status<>'offline' OR EXISTS(SELECT 1 FROM trips WHERE assigned_driver_id=$1::uuid AND status IN ('accepted','arrived','started')) OR EXISTS(SELECT 1 FROM driver_assignments WHERE driver_id=$1::uuid AND status='offered') FROM drivers WHERE id=$1::uuid FOR UPDATE`, driverID(ctx)).Scan(&busy)
+		if e != nil && e != pgx.ErrNoRows {
+			reviewFailure(ctx)
+			return
+		}
+		if busy {
+			driverError(ctx, 409, "vehicle_edit_busy", "Go offline and finish your trip or offer before editing the active vehicle")
+			return
+		}
+	}
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO driver_vehicle_records(driver_id) SELECT $1::uuid WHERE selected_driver_vehicle($1::uuid) IS NULL ON CONFLICT(driver_id) WHERE is_active DO NOTHING`, driverID(ctx))
+	if err == nil {
+		_, err = a.vehicleDB(ctx).Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET make=$2,model=$3,model_year=$4,color=$5,plate=$6,inspection_revision=inspection_revision+1,review_status='pending',approval_status='pending',review_reason='',reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::uuid`, driverID(ctx), strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), *body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	}
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "vehicle_unavailable", "Vehicle could not be updated")
 		return
@@ -219,20 +237,23 @@ func (a *driverAPI) updateVehicle(ctx *gin.Context) {
 }
 
 func (a *driverAPI) markOffline(ctx *gin.Context) error {
-	_, err := a.pool.Exec(ctx.Request.Context(), `UPDATE drivers SET status=CASE WHEN status='on_trip' THEN status ELSE 'offline' END,available=FALSE,online_requested=FALSE,updated_at=NOW() WHERE id=$1::UUID`, driverID(ctx))
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `UPDATE drivers SET status=CASE WHEN status='on_trip' THEN status ELSE 'offline' END,available=FALSE,online_requested=FALSE,updated_at=NOW() WHERE id=$1::UUID`, driverID(ctx))
 	return err
 }
 
 func (a *driverAPI) invalidateApproval(ctx *gin.Context) error {
-	_, err := a.pool.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driverID(ctx))
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET approval_status='pending',approved_at=NULL WHERE driver_id=$1::uuid`, driverID(ctx))
 	if err != nil {
 		return err
+	}
+	if inactiveVehicleOnly(ctx) {
+		return nil
 	}
 	return a.markOffline(ctx)
 }
 
 func (a *driverAPI) onboarding(ctx *gin.Context) {
-	state, err := driverstate.Read(ctx.Request.Context(), a.pool, driverID(ctx))
+	state, err := driverstate.Read(ctx.Request.Context(), a.vehicleDB(ctx), driverID(ctx))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "onboarding_unavailable", "Onboarding status is unavailable")
 		return
@@ -254,12 +275,12 @@ func (a *driverAPI) documents(ctx *gin.Context) {
 	user, _ := gatewayauth.CurrentUser(ctx)
 	var manualStatus, manualReason string
 	var manualVerifiedAt *time.Time
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT CASE WHEN manual_verification_status='pending' AND NOT EXISTS(SELECT 1 FROM driver_identity_profiles ip WHERE ip.driver_id=driver_profiles.driver_id) THEN 'required' ELSE manual_verification_status END,manual_verification_reason,manual_verified_at FROM driver_profiles WHERE driver_id=$1::UUID`, user.ID).Scan(&manualStatus, &manualReason, &manualVerifiedAt); err != nil {
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT CASE WHEN manual_verification_status='pending' AND NOT EXISTS(SELECT 1 FROM driver_identity_profiles ip WHERE ip.driver_id=driver_profiles.driver_id) THEN 'required' ELSE manual_verification_status END,manual_verification_reason,manual_verified_at FROM driver_profiles WHERE driver_id=$1::UUID`, user.ID).Scan(&manualStatus, &manualReason, &manualVerifiedAt); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "documents_unavailable", "Documents are unavailable")
 		return
 	}
 	result := []documentData{{Type: "manual_identity", Status: manualStatus, Reason: manualReason, VerifiedAt: manualVerifiedAt}}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT DISTINCT ON (type) id::TEXT,type,
+	rows, err := a.vehicleDB(ctx).Query(ctx.Request.Context(), `SELECT DISTINCT ON (type) id::TEXT,type,
 		CASE WHEN status='approved' AND expires_at IS NOT NULL AND expires_at<=NOW() THEN 'expired' ELSE status END,
 		rejection_reason,submitted_at,reviewed_at,expires_at
 		FROM driver_documents WHERE driver_id=$1::UUID ORDER BY type,submitted_at DESC,id DESC`, user.ID)
@@ -298,7 +319,7 @@ func (a *driverAPI) documents(ctx *gin.Context) {
 	var inspectionID *string
 	var status string
 	var inspectedAt *time.Time
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT i.id::TEXT,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.status ELSE 'required' END,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.inspected_at ELSE NULL END FROM driver_inspections i LEFT JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.driver_id=$1::UUID ORDER BY i.created_at DESC,i.id DESC LIMIT 1`, user.ID).Scan(&inspectionID, &status, &inspectedAt)
+	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT i.id::TEXT,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.status ELSE 'required' END,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.inspected_at ELSE NULL END FROM driver_inspections i LEFT JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.driver_id=$1::UUID ORDER BY i.created_at DESC,i.id DESC LIMIT 1`, user.ID).Scan(&inspectionID, &status, &inspectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		status = "required"
 	} else if err != nil {
@@ -313,7 +334,7 @@ func (a *driverAPI) inspection(ctx *gin.Context) {
 	var id string
 	var partnerName, locationName, status, reason string
 	var reportReceivedAt, inspectedAt *time.Time
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT i.id::TEXT,i.partner_name,i.location_name,i.report_received_at,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.status ELSE 'required' END,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.outcome_reason ELSE 'Vehicle details changed; a current inspection is required.' END,i.inspected_at FROM driver_inspections i LEFT JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.driver_id=$1::UUID ORDER BY i.created_at DESC,i.id DESC LIMIT 1`, driverID(ctx)).Scan(&id, &partnerName, &locationName, &reportReceivedAt, &status, &reason, &inspectedAt)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT i.id::TEXT,i.partner_name,i.location_name,i.report_received_at,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.status ELSE 'required' END,CASE WHEN i.vehicle_revision=COALESCE(v.inspection_revision,0) THEN i.outcome_reason ELSE 'Vehicle details changed; a current inspection is required.' END,i.inspected_at FROM driver_inspections i LEFT JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.driver_id=$1::UUID ORDER BY i.created_at DESC,i.id DESC LIMIT 1`, driverID(ctx)).Scan(&id, &partnerName, &locationName, &reportReceivedAt, &status, &reason, &inspectedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"status": "required"}})
 		return
@@ -342,7 +363,7 @@ type activeTripData struct {
 func (a *driverAPI) readActiveTrip(ctx *gin.Context) (*activeTripData, error) {
 	var trip activeTripData
 	var route []byte
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.rider_id::TEXT,t.ride_fare_id::TEXT,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,f.route,t.created_at,t.arrived_at,t.started_at
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.rider_id::TEXT,t.ride_fare_id::TEXT,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,f.route,t.created_at,t.arrived_at,t.started_at
 		FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id WHERE t.assigned_driver_id=$1::UUID AND t.status IN ('assigned','accepted','arrived','started')
 		ORDER BY t.updated_at DESC LIMIT 1`, driverID(ctx)).Scan(&trip.ID, &trip.Status, &trip.RiderID, &trip.FareID, &trip.FareKobo, &trip.NoShowDebtKobo, &trip.AmountDueKobo, &route, &trip.CreatedAt, &trip.ArrivedAt, &trip.StartedAt)
 	if err != nil {
@@ -362,7 +383,7 @@ func (a *driverAPI) activeTrip(ctx *gin.Context) {
 }
 
 func (a *driverAPI) dashboard(ctx *gin.Context) {
-	state, err := driverstate.Read(ctx.Request.Context(), a.pool, driverID(ctx))
+	state, err := driverstate.Read(ctx.Request.Context(), a.vehicleDB(ctx), driverID(ctx))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "dashboard_unavailable", "Dashboard is unavailable")
 		return
@@ -376,7 +397,7 @@ func (a *driverAPI) dashboard(ctx *gin.Context) {
 	var available, onlineRequested bool
 	var latitude, longitude *float64
 	var locationUpdatedAt *time.Time
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT status,available,online_requested,ST_Y(location::geometry),ST_X(location::geometry),last_seen_at FROM drivers WHERE id=$1::UUID`, driverID(ctx)).Scan(&status, &available, &onlineRequested, &latitude, &longitude, &locationUpdatedAt)
+	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT status,available,online_requested,ST_Y(location::geometry),ST_X(location::geometry),last_seen_at FROM drivers WHERE id=$1::UUID`, driverID(ctx)).Scan(&status, &available, &onlineRequested, &latitude, &longitude, &locationUpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		status = "offline"
 		available = false
@@ -396,7 +417,7 @@ func (a *driverAPI) dashboard(ctx *gin.Context) {
 	var offerTripID string
 	var attempt int
 	var expiresAt time.Time
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT trip_id::TEXT,attempt,expires_at FROM driver_assignments WHERE driver_id=$1::UUID AND status='offered' AND expires_at>NOW() ORDER BY offered_at DESC LIMIT 1`, driverID(ctx)).Scan(&offerTripID, &attempt, &expiresAt)
+	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT trip_id::TEXT,attempt,expires_at FROM driver_assignments WHERE driver_id=$1::UUID AND status='offered' AND expires_at>NOW() ORDER BY offered_at DESC LIMIT 1`, driverID(ctx)).Scan(&offerTripID, &attempt, &expiresAt)
 	if err == nil {
 		offer = gin.H{"tripId": offerTripID, "attempt": attempt, "expiresAt": expiresAt}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -424,7 +445,18 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_availability", "available must be true or false")
 		return
 	}
-	state, err := driverstate.Read(ctx.Request.Context(), a.pool, driverID(ctx))
+	if *body.Available {
+		var verified bool
+		if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT phone_verified_at IS NOT NULL AND COALESCE(phone_e164,'')<>'' FROM users WHERE id=$1::uuid AND active`, driverID(ctx)).Scan(&verified); err != nil {
+			driverError(ctx, 503, "availability_unavailable", "Phone verification status is unavailable")
+			return
+		}
+		if !verified {
+			driverError(ctx, 403, "phone_verification_required", "Verify your phone number before going online")
+			return
+		}
+	}
+	state, err := driverstate.Read(ctx.Request.Context(), a.vehicleDB(ctx), driverID(ctx))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "availability_unavailable", "Availability is unavailable")
 		return
@@ -445,7 +477,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 		}
 		var market *string
 		var locationRecordedAt time.Time
-		err = a.pool.QueryRow(ctx.Request.Context(), `SELECT driver_market_at(location),recorded_at FROM driver_live_locations WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&market, &locationRecordedAt)
+		err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT driver_market_at(location),recorded_at FROM driver_live_locations WHERE driver_id=$1::UUID`, driverID(ctx)).Scan(&market, &locationRecordedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			driverError(ctx, http.StatusConflict, "location_required", "Share your current location before going online")
 			return
@@ -464,7 +496,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 		}
 		var policyCount int
 		var minimum, balance int64
-		err = a.pool.QueryRow(ctx.Request.Context(), `SELECT COUNT(*),COALESCE(MIN(minimum_kobo),0),
+		err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT COUNT(*),COALESCE(MIN(minimum_kobo),0),
 			COALESCE((SELECT balance_kobo FROM driver_operating_accounts WHERE driver_id=$1::UUID),0)
 			FROM operating_balance_policies WHERE market_code=$2 AND status='approved'
 			AND effective_from<=NOW() AND (effective_until IS NULL OR effective_until>NOW())`, driverID(ctx), *market).Scan(&policyCount, &minimum, &balance)
@@ -489,7 +521,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 	defer client.Close()
 	if *body.Available {
 		var packageSlug string
-		if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT c.slug FROM ride_categories c WHERE driver_category_eligible($1::UUID,c.slug) ORDER BY c.slug LIMIT 1`, driverID(ctx)).Scan(&packageSlug); err != nil || packageSlug == "" {
+		if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT c.slug FROM ride_categories c WHERE driver_category_eligible($1::UUID,c.slug) ORDER BY c.slug LIMIT 1`, driverID(ctx)).Scan(&packageSlug); err != nil || packageSlug == "" {
 			driverError(ctx, http.StatusConflict, "package_required", "Vehicle package is required")
 			return
 		}
@@ -515,7 +547,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 	}
 	var status string
 	var available, onlineRequested bool
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT status,available,online_requested FROM drivers WHERE id=$1::UUID`, driverID(ctx)).Scan(&status, &available, &onlineRequested)
+	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT status,available,online_requested FROM drivers WHERE id=$1::UUID`, driverID(ctx)).Scan(&status, &available, &onlineRequested)
 	if errors.Is(err, pgx.ErrNoRows) && !*body.Available {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"status": "offline", "available": false, "onlineRequested": false}})
 		return
@@ -529,7 +561,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 
 func (a *driverAPI) driverSocketPresent(ctx *gin.Context) (bool, error) {
 	var present bool
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_socket_sessions WHERE driver_id=$1::UUID AND expires_at>NOW())`, driverID(ctx)).Scan(&present); err != nil {
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_socket_sessions WHERE driver_id=$1::UUID AND expires_at>NOW())`, driverID(ctx)).Scan(&present); err != nil {
 		return false, err
 	}
 	return present, nil

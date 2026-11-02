@@ -55,13 +55,24 @@ func (a *driverAPI) createDocumentUpload(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_document_upload", "Document type, side, content type, or size is invalid")
 		return
 	}
+	if body.Type == "vehicle_license" || body.Type == "roadworthiness" || body.Type == "auto_insurance" || body.Type == "hackney_permit" {
+		var car *string
+		if e := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT selected_driver_vehicle($1::uuid)::text`, driverID(ctx)).Scan(&car); e != nil {
+			reviewFailure(ctx)
+			return
+		}
+		if car == nil {
+			driverError(ctx, 409, "vehicle_required", "Add a vehicle before uploading its documents")
+			return
+		}
+	}
 	if !a.ensureProfile(ctx) {
 		return
 	}
 	uploadID := uuid.New()
 	storageKey := fmt.Sprintf("driver-documents/%s/%s", driverID(ctx), uploadID.String())
 	expiresAt := time.Now().UTC().Add(uploadLifetime)
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO driver_document_uploads(id,driver_id,type,side,storage_key,content_type,size_bytes,expires_at)
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO driver_document_uploads(id,driver_id,type,side,storage_key,content_type,size_bytes,expires_at)
 		VALUES($1,$2::UUID,$3,$4,$5,$6,$7,$8)`, uploadID, driverID(ctx), body.Type, body.Side, storageKey, body.ContentType, body.SizeBytes, expiresAt)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "upload_unavailable", "Document upload could not be reserved")
@@ -69,7 +80,7 @@ func (a *driverAPI) createDocumentUpload(ctx *gin.Context) {
 	}
 	url, headers, err := a.files.PresignPut(ctx.Request.Context(), storageKey, body.ContentType, body.SizeBytes, uploadLifetime)
 	if err != nil {
-		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM driver_document_uploads WHERE id=$1`, uploadID)
+		_, _ = a.vehicleDB(ctx).Exec(ctx.Request.Context(), `DELETE FROM driver_document_uploads WHERE id=$1`, uploadID)
 		driverError(ctx, http.StatusServiceUnavailable, "upload_unavailable", "Document upload URL could not be created")
 		return
 	}
@@ -108,7 +119,7 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 			return
 		}
 		var currentStatus string
-		err := a.pool.QueryRow(ctx.Request.Context(), `SELECT CASE WHEN status='approved' AND expires_at<=NOW() THEN 'expired' ELSE status END FROM driver_documents WHERE id=$1::UUID AND driver_id=$2::UUID AND type=$3 AND id=(SELECT id FROM driver_documents WHERE driver_id=$2::UUID AND type=$3 ORDER BY submitted_at DESC,id DESC LIMIT 1)`, oldID, driverID(ctx), body.Type).Scan(&currentStatus)
+		err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT CASE WHEN status='approved' AND expires_at<=NOW() THEN 'expired' ELSE status END FROM driver_documents WHERE id=$1::UUID AND driver_id=$2::UUID AND type=$3 AND id=(SELECT id FROM driver_documents WHERE driver_id=$2::UUID AND type=$3 ORDER BY submitted_at DESC,id DESC LIMIT 1)`, oldID, driverID(ctx), body.Type).Scan(&currentStatus)
 		if errors.Is(err, pgx.ErrNoRows) || (currentStatus != "rejected" && currentStatus != "expired") {
 			driverError(ctx, http.StatusConflict, "document_not_rejected", "Only the current rejected or expired document can be resubmitted")
 			return
@@ -117,6 +128,10 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 			driverError(ctx, http.StatusServiceUnavailable, "document_unavailable", "Document could not be checked")
 			return
 		}
+	}
+	ctx.Set("vehicleEvidence", true)
+	if body.Type != "vehicle_license" && body.Type != "roadworthiness" && body.Type != "auto_insurance" && body.Type != "hackney_permit" {
+		ctx.Set("sharedDriverEvidence", true)
 	}
 	uploads := make([]uploadRecord, 0, len(body.UploadIDs))
 	sides := map[string]bool{}
@@ -130,7 +145,7 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 		item.id = id
 		var expiresAt time.Time
 		var consumedAt *time.Time
-		err = a.pool.QueryRow(ctx.Request.Context(), `SELECT side,storage_key,content_type,size_bytes,expires_at,consumed_at FROM driver_document_uploads
+		err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT side,storage_key,content_type,size_bytes,expires_at,consumed_at FROM driver_document_uploads
 			WHERE id=$1 AND driver_id=$2::UUID AND type=$3`, id, driverID(ctx), body.Type).Scan(&item.side, &item.key, &item.contentType, &item.size, &expiresAt, &consumedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			driverError(ctx, http.StatusBadRequest, "invalid_upload", "Upload is missing, expired, already used, or duplicated")
@@ -165,7 +180,7 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 		driverError(ctx, http.StatusInternalServerError, "document_encoding_failed", "Document could not be submitted")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "document_unavailable", "Document could not be submitted")
 		return
@@ -199,16 +214,12 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "document_unavailable", "Document could not be submitted")
 		return
 	}
-	_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driverID(ctx))
+	err = invalidateAdminApproval(ctx, tx, driverID(ctx))
 	if err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "document_unavailable", "Document could not be submitted")
+		driverError(ctx, 503, "document_unavailable", "Document could not be submitted")
 		return
 	}
-	_, err = tx.Exec(ctx.Request.Context(), `UPDATE drivers SET status=CASE WHEN status='on_trip' THEN status ELSE 'offline' END,available=FALSE,online_requested=FALSE,updated_at=NOW() WHERE id=$1::UUID`, driverID(ctx))
-	if err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "document_unavailable", "Document could not be submitted")
-		return
-	}
+
 	_, err = insertDriverEvent(ctx, tx, driverID(ctx), "driver.document.updated", gin.H{"id": documentID.String(), "type": body.Type, "status": "under_review"})
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "document_unavailable", "Document could not be submitted")

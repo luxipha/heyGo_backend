@@ -178,12 +178,15 @@ func (x *Geometry) GetCoordinates() []*Coordinate {
 }
 
 type Route struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Geometry      []*Geometry            `protobuf:"bytes,1,rep,name=geometry,proto3" json:"geometry,omitempty"`
-	Distance      float64                `protobuf:"fixed64,2,opt,name=distance,proto3" json:"distance,omitempty"`
-	Duration      float64                `protobuf:"fixed64,3,opt,name=duration,proto3" json:"duration,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Geometry       []*Geometry            `protobuf:"bytes,1,rep,name=geometry,proto3" json:"geometry,omitempty"`
+	Distance       float64                `protobuf:"fixed64,2,opt,name=distance,proto3" json:"distance,omitempty"`
+	Duration       float64                `protobuf:"fixed64,3,opt,name=duration,proto3" json:"duration,omitempty"`
+	StaticDuration float64                `protobuf:"fixed64,4,opt,name=static_duration,json=staticDuration,proto3" json:"static_duration,omitempty"`
+	TrafficAware   bool                   `protobuf:"varint,5,opt,name=traffic_aware,json=trafficAware,proto3" json:"traffic_aware,omitempty"`
+	Provider       string                 `protobuf:"bytes,6,opt,name=provider,proto3" json:"provider,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Route) Reset() {
@@ -235,6 +238,27 @@ func (x *Route) GetDuration() float64 {
 		return x.Duration
 	}
 	return 0
+}
+
+func (x *Route) GetStaticDuration() float64 {
+	if x != nil {
+		return x.StaticDuration
+	}
+	return 0
+}
+
+func (x *Route) GetTrafficAware() bool {
+	if x != nil {
+		return x.TrafficAware
+	}
+	return false
+}
+
+func (x *Route) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
 }
 
 type RideFare struct {
@@ -636,11 +660,14 @@ const file_trip_proto_rawDesc = "" +
 	"\x06pickup\x18\x02 \x01(\v2\x10.trip.CoordinateR\x06pickup\x122\n" +
 	"\vdestination\x18\x03 \x01(\v2\x10.trip.CoordinateR\vdestination\">\n" +
 	"\bGeometry\x122\n" +
-	"\vcoordinates\x18\x01 \x03(\v2\x10.trip.CoordinateR\vcoordinates\"k\n" +
+	"\vcoordinates\x18\x01 \x03(\v2\x10.trip.CoordinateR\vcoordinates\"\xd5\x01\n" +
 	"\x05Route\x12*\n" +
 	"\bgeometry\x18\x01 \x03(\v2\x0e.trip.GeometryR\bgeometry\x12\x1a\n" +
 	"\bdistance\x18\x02 \x01(\x01R\bdistance\x12\x1a\n" +
-	"\bduration\x18\x03 \x01(\x01R\bduration\"\x82\x01\n" +
+	"\bduration\x18\x03 \x01(\x01R\bduration\x12'\n" +
+	"\x0fstatic_duration\x18\x04 \x01(\x01R\x0estaticDuration\x12#\n" +
+	"\rtraffic_aware\x18\x05 \x01(\bR\ftrafficAware\x12\x1a\n" +
+	"\bprovider\x18\x06 \x01(\tR\bprovider\"\x82\x01\n" +
 	"\bRideFare\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\ariderID\x18\x02 \x01(\tR\ariderID\x12 \n" +

@@ -18,6 +18,7 @@ var geofenceCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{1,39}$`)
 
 func registerAdminGeofenceRoutes(group *gin.RouterGroup, a *adminAPI) {
 	group.GET("/geofences", a.listGeofences)
+	group.GET("/geofences/inspect", a.inspectGeofencePoint)
 	group.GET("/geofences/:id", a.geofenceDetail)
 	group.GET("/geofences/:id/conflicts", a.geofenceConflicts)
 	group.POST("/geofences/preview", a.requireCSRF, a.previewGeofence)

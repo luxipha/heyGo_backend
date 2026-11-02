@@ -16,6 +16,7 @@ import (
 	pb "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	"github.com/luxipha/heyGo_backend/shared/tripstate"
 	sharedtypes "github.com/luxipha/heyGo_backend/shared/types"
+	"github.com/luxipha/heyGo_backend/shared/zonepricing"
 )
 
 type postgresTripRepo struct{ pool *pgxpool.Pool }
@@ -63,7 +64,12 @@ func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longit
 	if rows.Err() != nil {
 		return nil, rows.Err()
 	}
+	rows.Close()
 	if len(pricing.Rates) == 0 {
+		return nil, ErrPricingUnavailable
+	}
+	pricing.Zone, err = zonepricing.Match(ctx, r.pool, id, latitude, longitude)
+	if err != nil {
 		return nil, ErrPricingUnavailable
 	}
 	return pricing, nil

@@ -51,11 +51,44 @@ func callRideAgent(ctx context.Context, body agent.Request) (agent.Response, err
 	if err := decoder.Decode(&reply); err != nil {
 		return reply, err
 	}
-	validState := reply.State == "resolved" || reply.State == "clarification" || reply.State == "unavailable" || reply.State == "unsupported"
+	validState := reply.State == "resolved" || reply.State == "clarification" || reply.State == "unavailable" || reply.State == "unsupported" || reply.State == "action" || reply.State == "suggestions"
 	if reply.SchemaVersion != 1 || !reply.ConfirmationRequired || !validState || len(reply.Candidates) > 5 || len(reply.Message) > 1024 {
 
 		return reply, errors.New("unsupported ride agent version")
 	}
+	if reply.State == "action" {
+		if body.Context == nil || len(reply.Candidates) != 0 || reply.Place != nil {
+			return reply, errors.New("invalid agent action proposal")
+		}
+		switch reply.Action {
+		case "resolve_saved_place":
+			if reply.SavedPlaceLabel != "Home" && reply.SavedPlaceLabel != "Work" {
+				return reply, errors.New("invalid saved place label")
+			}
+		case "preview_ride", "request_ride":
+			if !body.Context.HasDestination || reply.SavedPlaceLabel != "" || (reply.Action == "request_ride" && !body.Context.HasQuote) {
+				return reply, errors.New("invalid agent action proposal")
+			}
+		default:
+			return reply, errors.New("invalid agent action proposal")
+		}
+	} else if reply.Action != "" || reply.SavedPlaceLabel != "" {
+		return reply, errors.New("unexpected agent action")
+	}
+
+	if reply.State == "suggestions" {
+		if !body.Autocomplete || len(reply.Candidates) != 0 || reply.Place != nil || len(reply.Suggestions) > 5 {
+			return reply, errors.New("invalid suggestions")
+		}
+		for _, s := range reply.Suggestions {
+			if s.ID == "" || s.Name == "" || len(s.ID) > 256 || len(s.Name) > 256 || len(s.Address) > 1024 {
+				return reply, errors.New("invalid suggestion")
+			}
+		}
+	} else if body.Autocomplete || len(reply.Suggestions) > 0 {
+		return reply, errors.New("unexpected suggestions")
+	}
+
 	for _, p := range reply.Candidates {
 		if p.ID == "" || p.Name == "" || !agent.ValidLocation(p.Location) {
 			return reply, errors.New("invalid place result")
@@ -71,7 +104,7 @@ func registerRideAgentRoutes(authenticated *gin.RouterGroup, pools ...*pgxpool.P
 	rider.POST("/agent/resolve", func(ctx *gin.Context) {
 		if len(pools) > 0 {
 			status, err := geo.ReadSettings(ctx.Request.Context(), pools[0])
-			if err != nil || status.Settings.PlaceProvider != "google" {
+			if err != nil || !status.Settings.PlacesEnabled() {
 				driverError(ctx, 503, "places_unavailable", "Destination lookup is unavailable")
 				return
 			}

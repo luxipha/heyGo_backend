@@ -10,6 +10,7 @@ import (
 func TestAdminRoutePermissionsDenyUnmappedAndSeparateOwners(t *testing.T) {
 	cases := []struct{ method, path, want string }{
 		{http.MethodGet, "/admin/catalogue", permissionFinanceRead},
+		{http.MethodGet, "/admin/geofences/inspect", permissionGeofenceRead},
 		{http.MethodPost, "/admin/catalogue/categories", permissionFinanceWrite},
 		{http.MethodPost, "/admin/catalogue/vehicles/:id/status", permissionFinanceWrite},
 		{http.MethodGet, "/admin/drivers/:driverID/catalogue", permissionDriverRead},
@@ -32,6 +33,8 @@ func TestAdminRoutePermissionsDenyUnmappedAndSeparateOwners(t *testing.T) {
 		{http.MethodGet, "/admin/geofences/pending-approvals", permissionGeofenceRead},
 		{http.MethodGet, "/admin/pricing/:id/decision-receipt", permissionFinanceRead},
 		{http.MethodPost, "/admin/pricing/:id/approve", permissionFinanceWrite},
+		{http.MethodGet, "/admin/pricing/:id/zones", permissionFinanceRead},
+		{http.MethodPost, "/admin/pricing/:id/zones", permissionFinanceWrite},
 		{http.MethodPost, "/admin/support/cases/:caseID/messages", permissionSupportWrite},
 		{http.MethodGet, "/admin/support/cases/:caseID/contact", permissionSupportContact},
 		{http.MethodPut, "/admin/settings/resend", permissionSettings},

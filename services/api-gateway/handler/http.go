@@ -21,7 +21,6 @@ import (
 	"github.com/luxipha/heyGo_backend/services/ride-agent-gateway/agent"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/driverstate"
-	"github.com/luxipha/heyGo_backend/shared/httpmiddleware"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
@@ -49,7 +48,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	// Structured logging middleware
 	r.Use(logs.HTTPLoggingMiddleware)
 	r.Use(metrics.HTTPMiddleware("api-gateway"))
-	r.Use(httpmiddleware.NewRateLimiter(120, time.Minute).Middleware)
+	r.Use(gatewayRequestLimiter(pool))
 	r.Use(corsMiddleware(allowedOrigins))
 
 	r.GET("/health", healthHandler)
@@ -82,7 +81,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	if phoneUsers, ok := users.(*gatewayauth.PostgresUserStore); ok && pool != nil {
 		registerPhoneAuthRoutes(r, pool, phoneUsers, phoneAuth)
 	}
-	registerAdminRoutes(r, pool, files)
+	registerAdminRoutes(r, pool, files, phoneAuth)
 
 	authenticated := r.Group("/", middleware, authMiddleware.Authenticate, idempotencyMiddleware(pool))
 	authenticated.GET("/auth/me", func(ctx *gin.Context) { currentUserHandler(ctx, pool) })
@@ -90,6 +89,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	if pool != nil {
 		registerPhoneSessionRoutes(authenticated, pool)
 		registerRiderIdentityRoutes(authenticated, pool, phoneAuth)
+		registerDriverPhoneRoutes(authenticated, pool, phoneAuth)
 	}
 	registerDeviceRoutes(authenticated, pool)
 	registerDriverRoutes(authenticated, pool, files)
@@ -538,7 +538,7 @@ func publicRiderRoute(route *tripproto.Route) (map[string]any, error) {
 		}
 		coordinates = append(coordinates, []float64{point.Longitude, point.Latitude})
 	}
-	return map[string]any{"distance": route.Distance, "duration": route.Duration, "geometry": map[string]any{"type": "LineString", "coordinates": coordinates}}, nil
+	return map[string]any{"distance": route.Distance, "duration": route.Duration, "staticDuration": route.StaticDuration, "trafficAware": route.TrafficAware, "provider": route.Provider, "geometry": map[string]any{"type": "LineString", "coordinates": coordinates}}, nil
 }
 func finitePositive(value float64) bool {
 	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)

@@ -74,7 +74,7 @@ func (a *adminAPI) reserveVehiclePhoto(ctx *gin.Context) {
 		return
 	}
 	var revision int64
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$1::uuid`, driver).Scan(&revision); err != nil {
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$1::uuid`, driver).Scan(&revision); err != nil {
 		driverError(ctx, 404, "vehicle_not_found", "Save vehicle details first")
 		return
 	}
@@ -85,7 +85,7 @@ func (a *adminAPI) reserveVehiclePhoto(ctx *gin.Context) {
 	id := uuid.New()
 	key := fmt.Sprintf("vehicle-photo-uploads/%s/%s", driver, id)
 	expires := time.Now().UTC().Add(uploadLifetime)
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO vehicle_photo_uploads(id,driver_id,actor_id,actor_type,vehicle_revision,angle,storage_key,content_type,size_bytes,expires_at) VALUES($1,$2::uuid,$3::uuid,$10,$4,$5,$6,$7,$8,$9)`, id, driver, vehiclePhotoActor(ctx), revision, body.Angle, key, body.ContentType, body.SizeBytes, expires, vehiclePhotoActorType(ctx))
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO vehicle_photo_uploads(id,driver_id,actor_id,actor_type,vehicle_revision,angle,storage_key,content_type,size_bytes,expires_at) VALUES($1,$2::uuid,$3::uuid,$10,$4,$5,$6,$7,$8,$9)`, id, driver, vehiclePhotoActor(ctx), revision, body.Angle, key, body.ContentType, body.SizeBytes, expires, vehiclePhotoActorType(ctx))
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -117,7 +117,7 @@ func (a *adminAPI) submitVehiclePhoto(ctx *gin.Context) {
 		driverError(ctx, 400, "invalid_upload", "Valid upload ID required")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -230,7 +230,7 @@ func (a *adminAPI) submitVehiclePhoto(ctx *gin.Context) {
 	committed = true
 	ctx.JSON(200, contracts.APIResponse{Data: gin.H{"id": id, "angle": angle, "vehicleRevision": revision}})
 }
-func signedVehiclePhotos(ctx *gin.Context, pool *pgxpool.Pool, files storage.ObjectStore, driver string, revision int64) ([]gin.H, error) {
+func signedVehiclePhotos(ctx *gin.Context, pool vehicleDatabase, files storage.ObjectStore, driver string, revision int64) ([]gin.H, error) {
 	photos := []gin.H{}
 	rows, err := pool.Query(ctx.Request.Context(), `SELECT id::text,angle,storage_key,content_type FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL ORDER BY CASE WHEN angle='front' THEN 0 ELSE 1 END,angle`, driver, revision)
 	if err != nil {
@@ -266,22 +266,22 @@ func (a *adminAPI) vehiclePhotos(ctx *gin.Context) {
 			driverError(ctx, 400, "invalid_revision", "Valid vehicle revision required")
 			return
 		}
-	} else if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$1::uuid`, driver).Scan(&revision); err != nil {
+	} else if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$1::uuid`, driver).Scan(&revision); err != nil {
 		driverError(ctx, 404, "vehicle_not_found", "Vehicle unavailable")
 		return
 	}
-	photos, err := signedVehiclePhotos(ctx, a.pool, a.files, driver, revision)
+	photos, err := signedVehiclePhotos(ctx, a.vehicleDB(ctx), a.files, driver, revision)
 	if err != nil {
 		reviewFailure(ctx)
 		return
 	}
 	var locked bool
-	if err = a.pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_inspections WHERE driver_id=$1::uuid AND vehicle_revision=$2)`, driver, revision).Scan(&locked); err != nil {
+	if err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_inspections WHERE driver_id=$1::uuid AND vehicle_revision=$2)`, driver, revision).Scan(&locked); err != nil {
 		reviewFailure(ctx)
 		return
 	}
 	ctx.Header("Cache-Control", "no-store")
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"vehicleRevision": revision, "photos": photos, "locked": locked}})
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"vehicleRevision": revision, "vehicleId": ctx.GetString("selectedVehicleId"), "photos": photos, "locked": locked}})
 }
 
 func vehiclePhotoActor(ctx *gin.Context) string {
@@ -439,14 +439,14 @@ func expireVehiclePhotoUpload(ctx context.Context, pool *pgxpool.Pool, files sto
 	}
 	defer tx.Rollback(ctx)
 	var id, key string
-	err = tx.QueryRow(ctx, `SELECT id::text,storage_key FROM vehicle_photo_uploads WHERE expires_at<NOW()-INTERVAL '1 hour' ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &key)
+	err = tx.QueryRow(ctx, `SELECT id::text,storage_key FROM vehicle_photo_uploads_records WHERE expires_at<NOW()-INTERVAL '1 hour' ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &key)
 	if err != nil {
 		return false
 	}
 	if files.Delete(ctx, key) != nil {
 		return false
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM vehicle_photo_uploads WHERE id=$1::uuid`, id); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM vehicle_photo_uploads_records WHERE id=$1::uuid`, id); err != nil {
 		return false
 	}
 	return tx.Commit(ctx) == nil

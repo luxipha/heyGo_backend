@@ -79,20 +79,20 @@ func (a *adminAPI) partnerTimeline(ctx *gin.Context) {
 		FROM driver_profiles p WHERE p.driver_id=$1::UUID
 		UNION ALL
 		SELECT 'document.submitted:'||d.id::TEXT,'document.submitted',d.id::TEXT,d.driver_id::TEXT,'driver',d.submitted_at,
-			jsonb_build_object('type',d.type)
-		FROM driver_documents d WHERE d.driver_id=$1::UUID
+			jsonb_build_object('vehicleId',d.vehicle_id,'type',d.type)
+		FROM driver_documents_records d WHERE d.driver_id=$1::UUID
 		UNION ALL
 		SELECT 'document.reviewed:'||d.id::TEXT,'document.reviewed',d.id::TEXT,d.reviewed_by::TEXT,'staff',d.reviewed_at,
-			jsonb_build_object('type',d.type,'status',d.status)
-		FROM driver_documents d WHERE d.driver_id=$1::UUID AND d.reviewed_at IS NOT NULL
+			jsonb_build_object('vehicleId',d.vehicle_id,'type',d.type,'status',d.status)
+		FROM driver_documents_records d WHERE d.driver_id=$1::UUID AND d.reviewed_at IS NOT NULL
 		UNION ALL
 		SELECT 'inspection.received:'||i.id::TEXT,'inspection.report_received',i.id::TEXT,NULL::TEXT,'unknown',i.report_received_at,
-			jsonb_build_object('status','report_received')
-		FROM driver_inspections i WHERE i.driver_id=$1::UUID AND i.report_received_at IS NOT NULL
+			jsonb_build_object('vehicleId',i.vehicle_id,'status','report_received')
+		FROM driver_inspections_records i WHERE i.driver_id=$1::UUID AND i.report_received_at IS NOT NULL
 		UNION ALL
 		SELECT 'inspection.reviewed:'||i.id::TEXT,'inspection.reviewed',i.id::TEXT,i.reviewed_by::TEXT,'staff',i.updated_at,
-			jsonb_build_object('status',i.status)
-		FROM driver_inspections i WHERE i.driver_id=$1::UUID AND i.reviewed_by IS NOT NULL
+			jsonb_build_object('vehicleId',i.vehicle_id,'status',i.status)
+		FROM driver_inspections_records i WHERE i.driver_id=$1::UUID AND i.reviewed_by IS NOT NULL
 		UNION ALL
 		SELECT 'audit:'||a.id::TEXT,a.action,COALESCE(a.target_id,a.target_driver_id::TEXT),a.admin_id::TEXT,'staff',a.created_at,
 			jsonb_build_object('before',COALESCE(a.before_state,'{}'::JSONB),'after',COALESCE(a.after_state,'{}'::JSONB))

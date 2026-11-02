@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 )
 
 var documentTypes = []string{"driver_license", "vehicle_license", "roadworthiness", "auto_insurance", "hackney_permit"}
@@ -23,7 +23,10 @@ type Eligibility struct {
 	EligibleToDrive bool          `json:"eligibleToDrive"`
 }
 
-func Read(ctx context.Context, pool *pgxpool.Pool, driverID string) (Eligibility, error) {
+func Read(ctx context.Context, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, driverID string) (Eligibility, error) {
 	result := Eligibility{Required: 7, AdminStatus: "pending"}
 	var accountVerified bool
 	var manualVerification string

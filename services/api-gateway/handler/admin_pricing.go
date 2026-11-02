@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/zonepricing"
 )
 
 type pricingRateInput struct {
@@ -23,6 +24,8 @@ type pricingRateInput struct {
 func registerAdminPricingRoutes(g *gin.RouterGroup, a *adminAPI) {
 	g.GET("/pricing", a.listPricing)
 	g.GET("/pricing/:id", a.pricingDetail)
+	g.GET("/pricing/:id/zones", a.readPricingZones)
+	g.POST("/pricing/:id/zones", a.requireCSRF, a.savePricingZones)
 	g.POST("/pricing", a.requireCSRF, a.createPricing)
 	g.POST("/pricing/:id/simulate", a.requireCSRF, a.simulatePricing)
 	g.POST("/pricing/:id/approve", a.requireCSRF, a.approvePricing)
@@ -115,6 +118,7 @@ func (a *adminAPI) createPricing(c *gin.Context) {
 		EffectiveFrom  time.Time          `json:"effectiveFrom"`
 		EffectiveUntil *time.Time         `json:"effectiveUntil"`
 		Rates          []pricingRateInput `json:"rates"`
+		Zones          []zonepricing.Rule `json:"zones"`
 	}
 	if c.ShouldBindJSON(&b) != nil {
 		driverError(c, 400, "invalid_pricing", "Valid pricing input is required")
@@ -127,7 +131,7 @@ func (a *adminAPI) createPricing(c *gin.Context) {
 	}
 	seen := map[string]bool{}
 	for _, rate := range b.Rates {
-		if strings.TrimSpace(rate.PackageSlug) == "" || seen[rate.PackageSlug] || rate.BaseKobo < 0 || rate.BaseKobo > 1000000 || rate.PerKmKobo < 0 || rate.PerKmKobo > 10000 || rate.PerMinuteKobo < 0 || rate.PerMinuteKobo > 10000 {
+		if strings.TrimSpace(rate.PackageSlug) == "" || seen[rate.PackageSlug] || rate.BaseKobo < 0 || rate.BaseKobo > 1000000 || rate.PerKmKobo < 0 || rate.PerKmKobo > 100000 || rate.PerMinuteKobo < 0 || rate.PerMinuteKobo > 100000 {
 			driverError(c, 400, "invalid_pricing", "Unique package rates must be within kobo bounds")
 			return
 		}
@@ -178,6 +182,10 @@ func (a *adminAPI) createPricing(c *gin.Context) {
 			return
 		}
 	}
+	if err = writePricingZones(c, tx, id.String(), b.Zones); err != nil {
+		driverError(c, 400, "invalid_zone_rules", err.Error())
+		return
+	}
 	if adminAudit(c, tx, "pricing.draft.created", "", gin.H{"policyId": id.String(), "marketCode": b.MarketCode, "version": version}) != nil || tx.Commit(c.Request.Context()) != nil {
 		reviewFailure(c)
 		return
@@ -192,11 +200,17 @@ func (a *adminAPI) simulatePricing(c *gin.Context) {
 		return
 	}
 	var b struct {
-		DistanceMeters  float64 `json:"distanceMeters"`
-		DurationSeconds float64 `json:"durationSeconds"`
+		DistanceMeters  float64  `json:"distanceMeters"`
+		DurationSeconds float64  `json:"durationSeconds"`
+		PickupLatitude  *float64 `json:"pickupLatitude"`
+		PickupLongitude *float64 `json:"pickupLongitude"`
 	}
 	if c.ShouldBindJSON(&b) != nil || math.IsNaN(b.DistanceMeters) || math.IsInf(b.DistanceMeters, 0) || math.IsNaN(b.DurationSeconds) || math.IsInf(b.DurationSeconds, 0) || b.DistanceMeters < 0 || b.DistanceMeters > 1000000 || b.DurationSeconds < 0 || b.DurationSeconds > 86400 {
 		driverError(c, 400, "invalid_simulation", "Distance and duration are out of bounds")
+		return
+	}
+	zone, ok := a.simulationZone(c, id.String(), b.PickupLatitude, b.PickupLongitude)
+	if !ok {
 		return
 	}
 	rows, err := a.pool.Query(c.Request.Context(), `SELECT r.package_slug,r.base_kobo,r.per_km_kobo,r.per_minute_kobo FROM pricing_package_rates r JOIN pricing_versions p ON p.id=r.pricing_id WHERE p.id=$1 ORDER BY r.package_slug`, id)
@@ -213,7 +227,8 @@ func (a *adminAPI) simulatePricing(c *gin.Context) {
 			return
 		}
 		amount := math.Round(float64(rate.BaseKobo) + b.DistanceMeters*float64(rate.PerKmKobo)/1000 + b.DurationSeconds*float64(rate.PerMinuteKobo)/60)
-		items = append(items, gin.H{"packageSlug": rate.PackageSlug, "fareKobo": amount, "withinBounds": amount > 0 && amount <= 10000000})
+		amount, valid := zonepricing.Apply(amount, zone)
+		items = append(items, gin.H{"packageSlug": rate.PackageSlug, "fareKobo": amount, "withinBounds": valid})
 	}
 	if rows.Err() != nil {
 		reviewFailure(c)
@@ -223,7 +238,7 @@ func (a *adminAPI) simulatePricing(c *gin.Context) {
 		driverError(c, 404, "pricing_not_found", "Pricing was not found")
 		return
 	}
-	c.JSON(200, contracts.APIResponse{Data: gin.H{"pricingId": id.String(), "distanceMeters": b.DistanceMeters, "durationSeconds": b.DurationSeconds, "fares": items}})
+	c.JSON(200, contracts.APIResponse{Data: gin.H{"pricingId": id.String(), "distanceMeters": b.DistanceMeters, "durationSeconds": b.DurationSeconds, "fares": items, "zoneAdjustment": zone, "zoneEvaluated": b.PickupLatitude != nil}})
 }
 
 func (a *adminAPI) approvePricing(c *gin.Context) {
@@ -266,6 +281,16 @@ func (a *adminAPI) approvePricing(c *gin.Context) {
 	}
 	if count != 0 {
 		driverError(c, 409, "pricing_overlap", "Published market pricing overlaps this period")
+		return
+	}
+	var invalidZones int
+	err = tx.QueryRow(c.Request.Context(), `SELECT COUNT(*) FROM pricing_zone_rules r JOIN trip_geofences z ON z.id=r.zone_id WHERE r.pricing_id=$1 AND (z.status<>'approved' OR z.effective_from>$2 OR (z.effective_until IS NOT NULL AND ($3::timestamptz IS NULL OR z.effective_until<$3)))`, id, from, until).Scan(&invalidZones)
+	if err != nil {
+		reviewFailure(c)
+		return
+	}
+	if invalidZones > 0 {
+		driverError(c, 409, "zone_pricing_not_ready", "Pickup zones no longer cover the pricing period")
 		return
 	}
 	var rateCount int

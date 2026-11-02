@@ -29,6 +29,7 @@ const (
 	permissionStaff              = "staff.manage"
 	permissionAudit              = "audit.read"
 	permissionLive               = "live.read"
+	permissionSimulationManage   = "simulation.manage"
 	permissionLedgerRead         = "finance.ledger.read"
 	permissionPromotionRead      = "promotions.read"
 	permissionPromotionWrite     = "promotions.manage"
@@ -42,7 +43,7 @@ var rolePermissions = map[string][]string{
 	"support":     {permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionTripRead, permissionRiderRead, permissionRiderFlags},
 	"finance":     {permissionFinanceRead, permissionFinanceWrite, permissionLedgerRead, permissionTripRead, permissionRiderRead},
 	"safety":      {permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionLive},
-	"super_admin": {permissionPromotionRead, permissionPromotionWrite, permissionCommunicationRead, permissionCommunicationWrite, permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionLedgerRead, permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionFinanceWrite, permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionSettings, permissionStaff, permissionAudit, permissionLive},
+	"super_admin": {permissionSimulationManage, permissionPromotionRead, permissionPromotionWrite, permissionCommunicationRead, permissionCommunicationWrite, permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionLedgerRead, permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionFinanceWrite, permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionSettings, permissionStaff, permissionAudit, permissionLive},
 }
 
 func roleValue(role *string) string {
@@ -77,6 +78,11 @@ func adminRoutePermission(method, path string) string {
 	}
 	read := method == http.MethodGet
 	switch {
+	case strings.HasPrefix(path, "/admin/simulation/"):
+		if read {
+			return permissionLive
+		}
+		return permissionSimulationManage
 	case path == "/admin/drivers" || strings.HasPrefix(path, "/admin/drivers/") || strings.HasPrefix(path, "/admin/account-deletion-requests"):
 		if read {
 			return permissionDriverRead
@@ -114,7 +120,7 @@ func adminRoutePermission(method, path string) string {
 		if read {
 			return permissionSettings
 		}
-	case strings.HasPrefix(path, "/admin/settings/emergency-contacts"), strings.HasPrefix(path, "/admin/settings/support-contact"), strings.HasPrefix(path, "/admin/settings/review-otp"), strings.HasPrefix(path, "/admin/settings/geo"), strings.HasPrefix(path, "/admin/settings/resend"), strings.HasPrefix(path, "/admin/settings/email-delivery"), strings.HasPrefix(path, "/admin/settings/sms"):
+	case strings.HasPrefix(path, "/admin/settings/agent"), strings.HasPrefix(path, "/admin/settings/emergency-contacts"), strings.HasPrefix(path, "/admin/settings/support-contact"), strings.HasPrefix(path, "/admin/settings/review-otp"), strings.HasPrefix(path, "/admin/settings/geo"), strings.HasPrefix(path, "/admin/settings/resend"), strings.HasPrefix(path, "/admin/settings/email-delivery"), strings.HasPrefix(path, "/admin/settings/sms"):
 		return permissionSettings
 	case strings.HasPrefix(path, "/admin/promotions/"):
 		if read {

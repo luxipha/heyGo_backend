@@ -33,8 +33,8 @@ type staffInspectionHistory struct {
 }
 
 func registerAdminDriverHistoryRoutes(group *gin.RouterGroup, a *adminAPI) {
-	group.GET("/drivers/:driverID/documents/history", a.driverDocumentHistory)
-	group.GET("/drivers/:driverID/inspections/history", a.driverInspectionHistory)
+	group.GET("/drivers/:driverID/documents/history", withVehicleScope(a.pool, a.driverDocumentHistory))
+	group.GET("/drivers/:driverID/inspections/history", withVehicleScope(a.pool, a.driverInspectionHistory))
 }
 
 func (a *adminAPI) driverDocumentHistory(ctx *gin.Context) {
@@ -46,7 +46,7 @@ func (a *adminAPI) driverDocumentHistory(ctx *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT id::TEXT,type,status,rejection_reason,submitted_at,reviewed_at,reviewed_by::TEXT,expires_at FROM driver_documents WHERE driver_id=$1::UUID AND ($2::TIMESTAMPTZ IS NULL OR (submitted_at,id)<($2,$3::UUID)) ORDER BY submitted_at DESC,id DESC LIMIT $4`, driver, at, id, limit+1)
+	rows, err := a.vehicleDB(ctx).Query(ctx.Request.Context(), `SELECT id::TEXT,type,status,rejection_reason,submitted_at,reviewed_at,reviewed_by::TEXT,expires_at FROM driver_documents WHERE driver_id=$1::UUID AND ($2::TIMESTAMPTZ IS NULL OR (submitted_at,id)<($2,$3::UUID)) ORDER BY submitted_at DESC,id DESC LIMIT $4`, driver, at, id, limit+1)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "review_unavailable", "Document history is unavailable")
 		return
@@ -83,7 +83,7 @@ func (a *adminAPI) driverInspectionHistory(ctx *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT id::TEXT,status,partner_name,location_name,partner_reference,outcome_reason,report_received_at,inspected_at,reviewed_by::TEXT,created_at FROM driver_inspections WHERE driver_id=$1::UUID AND ($2::TIMESTAMPTZ IS NULL OR (created_at,id)<($2,$3::UUID)) ORDER BY created_at DESC,id DESC LIMIT $4`, driver, at, id, limit+1)
+	rows, err := a.vehicleDB(ctx).Query(ctx.Request.Context(), `SELECT id::TEXT,status,partner_name,location_name,partner_reference,outcome_reason,report_received_at,inspected_at,reviewed_by::TEXT,created_at FROM driver_inspections WHERE driver_id=$1::UUID AND ($2::TIMESTAMPTZ IS NULL OR (created_at,id)<($2,$3::UUID)) ORDER BY created_at DESC,id DESC LIMIT $4`, driver, at, id, limit+1)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "review_unavailable", "Inspection history is unavailable")
 		return

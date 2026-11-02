@@ -60,6 +60,7 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 	exec(`INSERT INTO pricing_package_rates VALUES($1::UUID,'sedan',10000,100,100)`, pricing)
 	exec(`INSERT INTO operating_balance_policies(id,market_code,version,minimum_kobo,warning_kobo,allow_negative,maximum_negative_kobo,status,effective_from,created_by,approved_by,approved_at) VALUES($1::UUID,$2,1,1,1,FALSE,0,'approved',NOW()-INTERVAL '1 day',$3::UUID,$4::UUID,NOW())`, uuid.NewString(), market, creator, approver)
 	exec(`INSERT INTO driver_profiles(driver_id,manual_verification_status,admin_status,admin_reviewed_at) VALUES($1::UUID,'approved','approved',NOW()+INTERVAL '1 second')`, driver)
+	exec(`INSERT INTO driver_vehicles(driver_id,package_slug)VALUES($1::uuid,'sedan')`, driver)
 	for _, kind := range []string{"driver_license", "vehicle_license", "roadworthiness", "auto_insurance", "hackney_permit"} {
 		exec(`INSERT INTO driver_documents(id,driver_id,type,status,storage_key,expires_at) VALUES($1::UUID,$2::UUID,$3,'approved','test',NOW()+INTERVAL '1 day')`, uuid.NewString(), driver, kind)
 	}
@@ -180,7 +181,7 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 			t.Fatalf("availability want=%d status=%d body=%s", want, rec.Code, rec.Body.String())
 		}
 	}
-	exec(`INSERT INTO driver_vehicles(driver_id,package_slug,review_status) VALUES($1::UUID,'sedan','approved')`, driver)
+	exec(`UPDATE driver_vehicles SET review_status='approved',approval_status='approved',approved_at=NOW()+INTERVAL '1 second' WHERE driver_id=$1::uuid`, driver)
 	count(1)
 	for _, change := range []struct{ name, exclude, restore string }{
 		{"balance", `UPDATE driver_operating_accounts SET balance_kobo=0 WHERE driver_id=$1::UUID`, `UPDATE driver_operating_accounts SET balance_kobo=1 WHERE driver_id=$1::UUID`},

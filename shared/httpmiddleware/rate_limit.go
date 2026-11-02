@@ -24,13 +24,15 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{limit: limit, window: window, visitors: make(map[string]visitor)}
 }
 
-func (l *RateLimiter) Middleware(ctx *gin.Context) {
+func (l *RateLimiter) Middleware(ctx *gin.Context) { l.MiddlewareForKey(ctx, "ip:"+ctx.ClientIP()) }
+
+// MiddlewareForKey accepts only a trusted server-derived identity, never raw client input.
+func (l *RateLimiter) MiddlewareForKey(ctx *gin.Context, key string) {
 	if ctx.Request.URL.Path == "/health" || ctx.Request.URL.Path == "/ready" || ctx.Request.URL.Path == "/metrics" {
 		ctx.Next()
 		return
 	}
 	now := time.Now()
-	key := ctx.ClientIP()
 	l.mu.Lock()
 	entry := l.visitors[key]
 	if entry.reset.Before(now) {

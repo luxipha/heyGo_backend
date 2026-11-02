@@ -15,7 +15,30 @@ import (
 	"time"
 )
 
+type PlaceProviders struct {
+	Google    bool `json:"google"`
+	Geoapify  bool `json:"geoapify"`
+	Nominatim bool `json:"nominatim"`
+}
+
+// Nil preserves legacy single-provider settings until Admin explicitly saves switches.
+func (s Settings) EnabledPlaces() PlaceProviders {
+	if s.PlaceProvider == "disabled" {
+		return PlaceProviders{}
+	}
+	if s.PlaceProviders != nil {
+		return *s.PlaceProviders
+	}
+	return PlaceProviders{Google: s.PlaceProvider == "google", Geoapify: s.PlaceProvider == "geoapify", Nominatim: s.PlaceProvider == "nominatim"}
+}
+func (s Settings) PlacesEnabled() bool {
+	p := s.EnabledPlaces()
+	return p.Google || p.Geoapify || p.Nominatim
+}
+
 type Settings struct {
+	PlaceProviders *PlaceProviders `json:"placeProviders,omitempty"`
+
 	RouteProvider      string `json:"routeProvider"`
 	OSRMEndpoint       string `json:"osrmEndpoint"`
 	AllowDemo          bool   `json:"allowDemo"`
@@ -35,18 +58,29 @@ func DefaultSettings() Settings {
 	if endpoint == "" {
 		endpoint = "https://router.project-osrm.org/route/v1/driving"
 	}
-	return Settings{RouteProvider: "osrm", OSRMEndpoint: endpoint, AllowDemo: os.Getenv("OSRM_ALLOW_DEMO") == "true", PlaceProvider: "google", MapProvider: "google", NavigationProvider: "google"}
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("GEO_PLACE_PROVIDER")))
+	if provider == "" {
+		provider = "google"
+	}
+	routeProvider := strings.ToLower(strings.TrimSpace(os.Getenv("GEO_ROUTE_PROVIDER")))
+	if routeProvider == "" {
+		routeProvider = "osrm"
+	}
+	return Settings{RouteProvider: routeProvider, OSRMEndpoint: endpoint, AllowDemo: os.Getenv("OSRM_ALLOW_DEMO") == "true", PlaceProvider: provider, MapProvider: "google", NavigationProvider: "google"}
 }
 func (s Settings) Validate() error {
-	if s.RouteProvider != "osrm" && s.RouteProvider != "disabled" {
+	if s.RouteProvider != "osrm" && s.RouteProvider != "google" && s.RouteProvider != "amap" && s.RouteProvider != "disabled" {
 		return errors.New("unsupported route provider")
 	}
-	for _, provider := range []string{s.PlaceProvider, s.MapProvider, s.NavigationProvider} {
+	if s.PlaceProvider != "google" && s.PlaceProvider != "nominatim" && s.PlaceProvider != "geoapify" && s.PlaceProvider != "disabled" {
+		return errors.New("unsupported place search provider")
+	}
+	for _, provider := range []string{s.MapProvider, s.NavigationProvider} {
 		if provider != "google" && provider != "disabled" {
 			return errors.New("unsupported Google capability provider")
 		}
 	}
-	if s.RouteProvider == "disabled" && s.OSRMEndpoint == "" {
+	if s.RouteProvider == "google" || s.RouteProvider == "amap" || (s.RouteProvider == "disabled" && s.OSRMEndpoint == "") {
 		return nil
 	}
 	u, err := url.Parse(s.OSRMEndpoint)
@@ -104,10 +138,21 @@ func (d DatabaseRoutes) Route(ctx context.Context, a, b Coordinate) (*RouteRespo
 	if err = s.Validate(); err != nil {
 		return nil, err
 	}
-	if s.RouteProvider != "osrm" {
+	var router RouteService
+	switch s.RouteProvider {
+	case "google":
+		router, err = configuredGoogleRoutes()
+	case "amap":
+		router, err = configuredAMapRoutes()
+	case "osrm":
+		router = &OSRM{Endpoint: s.OSRMEndpoint, Client: routingHTTPClient}
+	default:
 		return nil, errors.New("routing disabled by administrator")
 	}
-	return (&OSRM{Endpoint: s.OSRMEndpoint, Client: routingHTTPClient}).Route(ctx, a, b)
+	if err != nil {
+		return nil, err
+	}
+	return (meteredRoutes{Router: router, Recorder: databaseRouteUsage{Pool: d.Pool}, Provider: s.RouteProvider}).Route(ctx, a, b)
 }
 
 // Resolve at dial time and disallow private/metadata addresses, including DNS rebinding.

@@ -26,7 +26,7 @@ func enqueueTripEvent(ctx context.Context, tx pgx.Tx, trip *types.TripModel, top
 	}
 	if topic == contracts.TripEventDriverAssigned {
 		var assignment []byte
-		if err := tx.QueryRow(ctx, `SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',jsonb_build_object('make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=$1::UUID AND a.status='accepted' ORDER BY a.attempt DESC LIMIT 1`, trip.ID).Scan(&assignment); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug))) FROM driver_assignments a JOIN trips t ON t.id=a.trip_id LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=$1::UUID AND a.status='accepted' ORDER BY a.attempt DESC LIMIT 1`, trip.ID).Scan(&assignment); err != nil {
 			return err
 		}
 		var root map[string]json.RawMessage

@@ -57,6 +57,9 @@ func TestPartnerFiltersContextAndVerificationTimeline(t *testing.T) {
 	if _, err := pool.Exec(ctx, `INSERT INTO driver_operating_accounts(driver_id,balance_kobo) VALUES($1::UUID,5500)`, driverID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO driver_vehicles(driver_id)VALUES($1::uuid)`, driverID); err != nil {
+		t.Fatal(err)
+	}
 	for _, kind := range []string{"driver_license", "vehicle_license", "roadworthiness", "auto_insurance", "hackney_permit"} {
 		if _, err := pool.Exec(ctx, `INSERT INTO driver_documents(id,driver_id,type,status,storage_key,expires_at) VALUES($1::UUID,$2::UUID,$3,'approved',$4,NOW()+INTERVAL '10 days')`, uuid.NewString(), driverID, kind, "private-partner-key-"+kind+driverID); err != nil {
 			t.Fatal(err)

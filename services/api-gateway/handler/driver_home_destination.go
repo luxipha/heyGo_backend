@@ -36,7 +36,7 @@ func (a *driverAPI) homeDestination(c *gin.Context) {
 }
 func (a *driverAPI) resolveHomeDestination(c *gin.Context) {
 	status, err := geo.ReadSettings(c.Request.Context(), a.pool)
-	if err != nil || status.Settings.PlaceProvider != "google" {
+	if err != nil || !status.Settings.PlacesEnabled() {
 		driverError(c, 503, "places_unavailable", "Address search is unavailable")
 		return
 	}
@@ -56,20 +56,21 @@ func (a *driverAPI) resolveHomeDestination(c *gin.Context) {
 }
 func (a *driverAPI) saveHomeDestination(c *gin.Context) {
 	var body struct {
-		PlaceID string `json:"placeId"`
-		Version int64  `json:"version"`
-		Enabled bool   `json:"enabled"`
+		PlaceID      string `json:"placeId"`
+		SessionToken string `json:"sessionToken"`
+		Version      int64  `json:"version"`
+		Enabled      bool   `json:"enabled"`
 	}
 	if c.ShouldBindJSON(&body) != nil || strings.TrimSpace(body.PlaceID) == "" || len(body.PlaceID) > 256 || body.Version < 0 {
 		driverError(c, 400, "invalid_home", "Select and confirm a home address")
 		return
 	}
 	status, err := geo.ReadSettings(c.Request.Context(), a.pool)
-	if err != nil || status.Settings.PlaceProvider != "google" {
+	if err != nil || !status.Settings.PlacesEnabled() {
 		driverError(c, 503, "places_unavailable", "Address confirmation is unavailable")
 		return
 	}
-	reply, err := callRideAgent(c.Request.Context(), agent.Request{SchemaVersion: 1, PlaceID: body.PlaceID})
+	reply, err := callRideAgent(c.Request.Context(), agent.Request{SchemaVersion: 1, PlaceID: body.PlaceID, SessionToken: body.SessionToken})
 	if err != nil || reply.State != "resolved" || reply.Place == nil || reply.Place.ID != body.PlaceID || len(reply.Place.Name) > 300 || len(reply.Place.Address) > 1000 || !agent.ValidLocation(reply.Place.Location) {
 		driverError(c, 503, "home_unconfirmed", "Home address could not be confirmed. Try again")
 		return

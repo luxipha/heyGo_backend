@@ -33,22 +33,33 @@ func (a *adminAPI) createDocumentUpload(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_document_upload", "Document type, side, content type, or size is invalid")
 		return
 	}
+	if body.Type == "vehicle_license" || body.Type == "roadworthiness" || body.Type == "auto_insurance" || body.Type == "hackney_permit" {
+		var car *string
+		if e := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT selected_driver_vehicle($1::uuid)::text`, driver).Scan(&car); e != nil {
+			reviewFailure(ctx)
+			return
+		}
+		if car == nil {
+			driverError(ctx, 409, "vehicle_required", "Add a vehicle before uploading its documents")
+			return
+		}
+	}
 	var exists bool
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE driver_id=$1::UUID)`, driver).Scan(&exists); err != nil || !exists {
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE driver_id=$1::UUID)`, driver).Scan(&exists); err != nil || !exists {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
 		return
 	}
 	id := uuid.New()
 	key := fmt.Sprintf("admin-driver-documents/%s/%s", driver, id)
 	expires := time.Now().UTC().Add(uploadLifetime)
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_document_uploads(id,admin_id,driver_id,type,side,storage_key,content_type,size_bytes,expires_at) VALUES($1,$2::UUID,$3::UUID,$4,$5,$6,$7,$8,$9)`, id, currentAdmin(ctx).ID, driver, body.Type, body.Side, key, body.ContentType, body.SizeBytes, expires)
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO admin_document_uploads(id,admin_id,driver_id,type,side,storage_key,content_type,size_bytes,expires_at) VALUES($1,$2::UUID,$3::UUID,$4,$5,$6,$7,$8,$9)`, id, currentAdmin(ctx).ID, driver, body.Type, body.Side, key, body.ContentType, body.SizeBytes, expires)
 	if err != nil {
 		reviewFailure(ctx)
 		return
 	}
 	url, headers, err := a.files.PresignPut(ctx.Request.Context(), key, body.ContentType, body.SizeBytes, uploadLifetime)
 	if err != nil {
-		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM admin_document_uploads WHERE id=$1`, id)
+		_, _ = a.vehicleDB(ctx).Exec(ctx.Request.Context(), `DELETE FROM admin_document_uploads WHERE id=$1`, id)
 		reviewFailure(ctx)
 		return
 	}
@@ -89,6 +100,10 @@ func (a *adminAPI) submitDocument(ctx *gin.Context) {
 			return
 		}
 	}
+	ctx.Set("vehicleEvidence", true)
+	if body.Type != "vehicle_license" && body.Type != "roadworthiness" && body.Type != "auto_insurance" && body.Type != "hackney_permit" {
+		ctx.Set("sharedDriverEvidence", true)
+	}
 	type upload struct {
 		id                     uuid.UUID
 		side, key, contentType string
@@ -105,7 +120,7 @@ func (a *adminAPI) submitDocument(ctx *gin.Context) {
 		var item upload
 		var expires time.Time
 		var consumed *time.Time
-		err = a.pool.QueryRow(ctx.Request.Context(), `SELECT side,storage_key,content_type,size_bytes,expires_at,consumed_at FROM admin_document_uploads WHERE id=$1 AND admin_id=$2::UUID AND driver_id=$3::UUID AND type=$4`, id, currentAdmin(ctx).ID, driver, body.Type).Scan(&item.side, &item.key, &item.contentType, &item.size, &expires, &consumed)
+		err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT side,storage_key,content_type,size_bytes,expires_at,consumed_at FROM admin_document_uploads WHERE id=$1 AND admin_id=$2::UUID AND driver_id=$3::UUID AND type=$4`, id, currentAdmin(ctx).ID, driver, body.Type).Scan(&item.side, &item.key, &item.contentType, &item.size, &expires, &consumed)
 		if errors.Is(err, pgx.ErrNoRows) || consumed != nil || !expires.After(time.Now()) || sides[item.side] {
 			driverError(ctx, http.StatusBadRequest, "invalid_upload", "Document upload is missing, expired, or already used")
 			return
@@ -123,7 +138,7 @@ func (a *adminAPI) submitDocument(ctx *gin.Context) {
 		}
 		uploads = append(uploads, item)
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return

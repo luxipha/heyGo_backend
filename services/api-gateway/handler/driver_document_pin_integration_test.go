@@ -45,6 +45,9 @@ func TestDriverDocumentPINAndReadOnlyAccess(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err = pool.Exec(ctx, `INSERT INTO driver_vehicles(driver_id)VALUES($1::uuid)`, owner); err != nil {
+		t.Fatal(err)
+	}
 	defer pool.Exec(ctx, `DELETE FROM users WHERE id=ANY($1::UUID[])`, []string{owner, other})
 	_, err = pool.Exec(ctx, `INSERT INTO driver_identity_profiles(driver_id,first_name,last_name,nin_last4) VALUES($1::UUID,'Test','Driver','1234')`, owner)
 	if err != nil {

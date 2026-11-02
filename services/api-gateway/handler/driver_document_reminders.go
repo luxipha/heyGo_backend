@@ -56,9 +56,9 @@ func createDriverDocumentReminder(ctx context.Context, pool *pgxpool.Pool, now t
 	var expires time.Time
 	err = tx.QueryRow(ctx, `SELECT d.id::TEXT,d.driver_id::TEXT,d.type,d.expires_at,
  CASE WHEN d.expires_at<=$1 THEN 'expired' WHEN d.expires_at<=$1+INTERVAL '1 day' THEN '1_day' WHEN d.expires_at<=$1+INTERVAL '7 days' THEN '7_days' ELSE '30_days' END AS stage
- FROM driver_documents d JOIN users u ON u.id=d.driver_id
+ FROM driver_documents_records d JOIN users u ON u.id=d.driver_id
  WHERE u.active AND u.roles @> ARRAY['driver'] AND d.status='approved' AND d.expires_at<=$1+INTERVAL '30 days'
- AND NOT EXISTS(SELECT 1 FROM driver_documents newer WHERE newer.driver_id=d.driver_id AND newer.type=d.type AND (newer.submitted_at,newer.id)>(d.submitted_at,d.id))
+ AND NOT EXISTS(SELECT 1 FROM driver_documents_records newer WHERE newer.driver_id=d.driver_id AND newer.vehicle_id IS NOT DISTINCT FROM d.vehicle_id AND newer.type=d.type AND (newer.submitted_at,newer.id)>(d.submitted_at,d.id))
  AND NOT EXISTS(SELECT 1 FROM driver_document_reminders r WHERE r.document_id=d.id AND r.expires_at=d.expires_at AND r.stage=CASE WHEN d.expires_at<=$1 THEN 'expired' WHEN d.expires_at<=$1+INTERVAL '1 day' THEN '1_day' WHEN d.expires_at<=$1+INTERVAL '7 days' THEN '7_days' ELSE '30_days' END)
  ORDER BY d.expires_at,d.id LIMIT 1 FOR UPDATE OF d SKIP LOCKED`, now).Scan(&id, &owner, &kind, &expires, &stage)
 	if err == pgx.ErrNoRows {

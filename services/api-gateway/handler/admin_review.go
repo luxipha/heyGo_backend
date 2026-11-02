@@ -13,32 +13,37 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/driverstate"
+	"github.com/luxipha/heyGo_backend/shared/httpmiddleware"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 )
 
 func registerAdminReviewRoutes(group *gin.RouterGroup, a *adminAPI) {
+	phoneLimiter := httpmiddleware.NewRateLimiter(10, time.Minute)
+	group.POST("/drivers/:driverID/phone/request", a.requireCSRF, phoneLimiter.Middleware, func(c *gin.Context) { a.phoneAssist(c, false) })
+	group.POST("/drivers/:driverID/phone/confirm", a.requireCSRF, phoneLimiter.Middleware, func(c *gin.Context) { a.phoneAssist(c, true) })
 	group.GET("/drivers", a.listDrivers)
 	group.GET("/drivers/summary", a.partnerSummary)
-	group.GET("/drivers/:driverID", a.driverReview)
+	group.GET("/drivers/:driverID/vehicles", a.vehicles)
+	group.GET("/drivers/:driverID", withVehicleScope(a.pool, a.driverReview))
 	group.GET("/drivers/:driverID/verification-timeline", a.partnerTimeline)
 	group.GET("/drivers/:driverID/verified-legal-name", a.verifiedLegalName)
 	group.POST("/drivers/:driverID/verified-legal-name", a.requireCSRF, a.recordVerifiedLegalName)
 	group.PATCH("/drivers/:driverID/profile", a.requireCSRF, a.updateDriverProfile)
 	group.PUT("/drivers/:driverID/identity", a.requireCSRF, a.updateDriverIdentity)
-	group.PUT("/drivers/:driverID/vehicle", a.requireCSRF, a.updateDriverVehicle)
+	group.PUT("/drivers/:driverID/vehicle", a.requireCSRF, withVehicleScope(a.pool, a.updateDriverVehicle))
 	group.POST("/drivers/:driverID/manual-verification", a.requireCSRF, a.reviewManualIdentity)
-	group.GET("/drivers/:driverID/documents/:documentID/files/:side", a.documentFile)
-	group.POST("/drivers/:driverID/documents/uploads", a.requireCSRF, a.createDocumentUpload)
-	group.POST("/drivers/:driverID/documents", a.requireCSRF, a.submitDocument)
-	group.POST("/drivers/:driverID/documents/:documentID/review", a.requireCSRF, a.reviewDocument)
-	group.GET("/drivers/:driverID/vehicle/photos", a.vehiclePhotos)
-	group.POST("/drivers/:driverID/vehicle/photos/uploads", a.requireCSRF, a.reserveVehiclePhoto)
-	group.POST("/drivers/:driverID/vehicle/photos", a.requireCSRF, a.submitVehiclePhoto)
-	group.POST("/drivers/:driverID/inspection/uploads", a.requireCSRF, a.createReportUpload)
-	group.POST("/drivers/:driverID/inspection", a.requireCSRF, a.submitReport)
-	group.GET("/drivers/:driverID/inspection/:inspectionID/report", a.inspectionReport)
-	group.POST("/drivers/:driverID/inspection/:inspectionID/review", a.requireCSRF, a.reviewInspection)
-	group.POST("/drivers/:driverID/approval", a.requireCSRF, a.reviewDriver)
+	group.GET("/drivers/:driverID/documents/:documentID/files/:side", withVehicleScope(a.pool, a.documentFile))
+	group.POST("/drivers/:driverID/documents/uploads", a.requireCSRF, withVehicleScope(a.pool, a.createDocumentUpload))
+	group.POST("/drivers/:driverID/documents", a.requireCSRF, withVehicleScope(a.pool, a.submitDocument))
+	group.POST("/drivers/:driverID/documents/:documentID/review", a.requireCSRF, withVehicleScope(a.pool, a.reviewDocument))
+	group.GET("/drivers/:driverID/vehicle/photos", withVehicleScope(a.pool, a.vehiclePhotos))
+	group.POST("/drivers/:driverID/vehicle/photos/uploads", a.requireCSRF, withVehicleScope(a.pool, a.reserveVehiclePhoto))
+	group.POST("/drivers/:driverID/vehicle/photos", a.requireCSRF, withVehicleScope(a.pool, a.submitVehiclePhoto))
+	group.POST("/drivers/:driverID/inspection/uploads", a.requireCSRF, withVehicleScope(a.pool, a.createReportUpload))
+	group.POST("/drivers/:driverID/inspection", a.requireCSRF, withVehicleScope(a.pool, a.submitReport))
+	group.GET("/drivers/:driverID/inspection/:inspectionID/report", withVehicleScope(a.pool, a.inspectionReport))
+	group.POST("/drivers/:driverID/inspection/:inspectionID/review", a.requireCSRF, withVehicleScope(a.pool, a.reviewInspection))
+	group.POST("/drivers/:driverID/approval", a.requireCSRF, withVehicleScope(a.pool, a.reviewDriver))
 }
 
 func reviewDriverID(ctx *gin.Context) (string, bool) {
@@ -58,6 +63,9 @@ func reviewID(ctx *gin.Context, param string) (string, bool) {
 	return id.String(), true
 }
 func adminAudit(ctx *gin.Context, tx pgx.Tx, action, driverID string, details any) error {
+	if id := ctx.GetString("selectedVehicleId"); id != "" {
+		details = gin.H{"vehicleId": id, "details": details}
+	}
 	targetType, targetID := adminAuditTarget(action, driverID, details)
 	before, after := auditStates(details)
 	return insertAdminAudit(ctx, tx, currentAdmin(ctx).ID, action, driverID, targetType, targetID, details, before, after)
@@ -84,7 +92,7 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	var name, phone, email, adminStatus, adminReason, manualStatus, manualReason, applicationNumber string
 	var manualVerifiedAt *time.Time
 	var vehicle json.RawMessage
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'conditionNotes',v.condition_notes,'findings',v.findings,'vehicleRevision',v.inspection_revision,'categoryIds',COALESCE((SELECT jsonb_agg(category_id) FROM driver_vehicle_categories WHERE driver_id=v.driver_id),'[]'::JSONB),'categoryNames',COALESCE((SELECT jsonb_agg(c.name ORDER BY c.name) FROM driver_vehicle_categories a JOIN ride_categories c ON c.id=a.category_id WHERE a.driver_id=v.driver_id),'[]'::JSONB)) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('vehicleId',v.id,'isActive',v.is_active,'approvalStatus',v.approval_status,'packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'conditionNotes',v.condition_notes,'findings',v.findings,'vehicleRevision',v.inspection_revision,'categoryIds',COALESCE((SELECT jsonb_agg(category_id) FROM driver_vehicle_categories WHERE driver_id=v.driver_id),'[]'::JSONB),'categoryNames',COALESCE((SELECT jsonb_agg(c.name ORDER BY c.name) FROM driver_vehicle_categories a JOIN ride_categories c ON c.id=a.category_id WHERE a.driver_id=v.driver_id),'[]'::JSONB)) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
 		return
@@ -93,12 +101,12 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	eligibility, err := driverstate.Read(ctx.Request.Context(), a.pool, id)
+	eligibility, err := driverstate.Read(ctx.Request.Context(), a.vehicleDB(ctx), id)
 	if err != nil {
 		reviewFailure(ctx)
 		return
 	}
-	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT DISTINCT ON(type) id::TEXT,type,status,rejection_reason,submitted_at,expires_at,metadata FROM driver_documents WHERE driver_id=$1::UUID ORDER BY type,submitted_at DESC,id DESC`, id)
+	rows, err := a.vehicleDB(ctx).Query(ctx.Request.Context(), `SELECT DISTINCT ON(type) id::TEXT,type,status,rejection_reason,submitted_at,expires_at,metadata FROM driver_documents WHERE driver_id=$1::UUID ORDER BY type,submitted_at DESC,id DESC`, id)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -125,17 +133,20 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	var inspected *time.Time
 	var vehicleRevision int64
 	var vehicleSnapshot json.RawMessage
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT id::TEXT,status,partner_name,location_name,partner_reference,outcome_reason,inspected_at,vehicle_revision,vehicle_snapshot FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, id).Scan(&inspectionID, &inspectionStatus, &partner, &location, &reference, &reason, &inspected, &vehicleRevision, &vehicleSnapshot)
+	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT id::TEXT,status,partner_name,location_name,partner_reference,outcome_reason,inspected_at,vehicle_revision,vehicle_snapshot FROM driver_inspections WHERE driver_id=$1::UUID ORDER BY created_at DESC,id DESC LIMIT 1`, id).Scan(&inspectionID, &inspectionStatus, &partner, &location, &reference, &reason, &inspected, &vehicleRevision, &vehicleSnapshot)
 	if err == nil {
 		inspection = gin.H{"vehicleRevision": vehicleRevision, "vehicleSnapshot": vehicleSnapshot, "id": inspectionID, "status": inspectionStatus, "partnerName": partner, "locationName": location, "partnerReference": reference, "reason": reason, "inspectedAt": inspected}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		reviewFailure(ctx)
 		return
 	}
-	identity, err := readIdentityProfile(ctx, a.pool, id)
+	identity, err := readIdentityProfile(ctx, a.vehicleDB(ctx), id)
 	if err != nil {
 		reviewFailure(ctx)
 		return
+	}
+	if !adminHasPermission(ctx, permissionDriverContact) {
+		identity.Phone = ""
 	}
 	data := gin.H{"driverId": id, "displayName": name, "applicationNumber": applicationNumber, "adminStatus": adminStatus, "adminReason": adminReason, "manualVerification": gin.H{"status": manualStatus, "reason": manualReason, "reviewedAt": manualVerifiedAt}, "identity": identity, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}
 	context, err := a.partnerContext(ctx, id)
@@ -167,7 +178,7 @@ func (a *adminAPI) updateDriverProfile(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_profile", "Display name is required")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -189,6 +200,7 @@ func (a *adminAPI) updateDriverProfile(ctx *gin.Context) {
 }
 
 func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
+	ctx.Set("vehicleEvidence", true)
 	driver, ok := reviewDriverID(ctx)
 	if !ok {
 		return
@@ -215,7 +227,7 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 		driverError(ctx, 400, "invalid_vehicle_findings", err.Error())
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -283,10 +295,11 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicles(driver_id,package_slug,make,model,model_year,color,plate,review_status,review_reason,reviewed_at,updated_at)
-		VALUES($1::UUID,$2,$3,$4,$5,$6,$7,'approved','',NOW(),NOW())
-		ON CONFLICT(driver_id) DO UPDATE SET package_slug=EXCLUDED.package_slug,make=EXCLUDED.make,model=EXCLUDED.model,model_year=EXCLUDED.model_year,color=EXCLUDED.color,plate=EXCLUDED.plate,review_status='approved',review_reason='',reviewed_at=NOW(),updated_at=NOW()`,
-		driver, body.PackageSlug, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_vehicle_records(driver_id) SELECT $1::uuid WHERE selected_driver_vehicle($1::uuid) IS NULL ON CONFLICT(driver_id) WHERE is_active DO NOTHING`, driver)
+	if err == nil {
+		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET package_slug=$2,make=$3,model=$4,model_year=$5,color=$6,plate=$7,review_status='approved',review_reason='',reviewed_at=NOW(),updated_at=NOW() WHERE driver_id=$1::uuid`, driver, body.PackageSlug, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Color), strings.TrimSpace(body.Plate))
+	}
+
 	if err == nil && body.CatalogueModelID != "" {
 		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET catalogue_model_id=$2::UUID,passenger_seats=$3,working_ac=$4,condition_notes=$5,inspection_revision=inspection_revision+1 WHERE driver_id=$1::UUID`, driver, body.CatalogueModelID, body.PassengerSeats, body.WorkingAC, strings.TrimSpace(body.ConditionNotes))
 		if err == nil {
@@ -335,7 +348,7 @@ func (a *adminAPI) reviewManualIdentity(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_review", "Valid manual verification decision and rejection reason are required")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -383,7 +396,7 @@ func (a *adminAPI) documentFile(ctx *gin.Context) {
 		return
 	}
 	var metadata []byte
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT metadata FROM driver_documents WHERE id=$1::UUID AND driver_id=$2::UUID`, doc, driver).Scan(&metadata)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT metadata FROM driver_documents WHERE id=$1::UUID AND driver_id=$2::UUID`, doc, driver).Scan(&metadata)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "document_not_found", "Document was not found")
 		return
@@ -432,7 +445,7 @@ func (a *adminAPI) reviewDocument(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_review", "Valid status and rejection reason are required")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -447,6 +460,10 @@ func (a *adminAPI) reviewDocument(ctx *gin.Context) {
 	if err != nil {
 		reviewFailure(ctx)
 		return
+	}
+	ctx.Set("vehicleEvidence", true)
+	if kind != "vehicle_license" && kind != "roadworthiness" && kind != "auto_insurance" && kind != "hackney_permit" {
+		ctx.Set("sharedDriverEvidence", true)
 	}
 	_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_documents SET status=$1,rejection_reason=$2,reviewed_at=NOW(),reviewed_by=$3::UUID,updated_at=NOW() WHERE id=$4::UUID`, body.Status, body.Reason, currentAdmin(ctx).ID, doc)
 	if err != nil {
@@ -475,12 +492,22 @@ func (a *adminAPI) reviewDocument(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"id": doc, "status": body.Status}})
 }
 func invalidateAdminApproval(ctx *gin.Context, tx pgx.Tx, driver string) error {
-	if _, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::UUID`, driver); err != nil {
-		return err
+	if ctx.GetBool("vehicleEvidence") && !ctx.GetBool("sharedDriverEvidence") {
+		if _, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET approval_status='pending',approved_at=NULL WHERE driver_id=$1::uuid`, driver); err != nil {
+			return err
+		}
+		if inactiveVehicleOnly(ctx) {
+			return nil
+		}
+	} else {
+		if _, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET admin_status='pending',admin_reason='',admin_reviewed_at=NULL,updated_at=NOW() WHERE driver_id=$1::uuid`, driver); err != nil {
+			return err
+		}
 	}
-	_, err := tx.Exec(ctx.Request.Context(), `UPDATE drivers SET status=CASE WHEN status='on_trip' THEN status ELSE 'offline' END,available=FALSE,online_requested=FALSE,updated_at=NOW() WHERE id=$1::UUID`, driver)
+	_, err := tx.Exec(ctx.Request.Context(), `UPDATE drivers SET status=CASE WHEN status='on_trip' THEN status ELSE 'offline' END,available=FALSE,online_requested=FALSE,updated_at=NOW() WHERE id=$1::uuid`, driver)
 	return err
 }
+
 func (a *adminAPI) createReportUpload(ctx *gin.Context) {
 	if a.files == nil {
 		driverError(ctx, http.StatusServiceUnavailable, "document_storage_unavailable", "Document storage is unavailable")
@@ -499,7 +526,7 @@ func (a *adminAPI) createReportUpload(ctx *gin.Context) {
 		return
 	}
 	var exists bool
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE driver_id=$1::UUID)`, driver).Scan(&exists); err != nil {
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_profiles WHERE driver_id=$1::UUID)`, driver).Scan(&exists); err != nil {
 		reviewFailure(ctx)
 		return
 	}
@@ -510,27 +537,28 @@ func (a *adminAPI) createReportUpload(ctx *gin.Context) {
 	id := uuid.New()
 	key := fmt.Sprintf("inspection-reports/%s/%s", driver, id)
 	expires := time.Now().UTC().Add(uploadLifetime)
-	_, err := a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_report_uploads(id,admin_id,driver_id,storage_key,content_type,size_bytes,expires_at) VALUES($1,$2::UUID,$3::UUID,$4,$5,$6,$7)`, id, currentAdmin(ctx).ID, driver, key, body.ContentType, body.SizeBytes, expires)
+	_, err := a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO admin_report_uploads(id,admin_id,driver_id,storage_key,content_type,size_bytes,expires_at) VALUES($1,$2::UUID,$3::UUID,$4,$5,$6,$7)`, id, currentAdmin(ctx).ID, driver, key, body.ContentType, body.SizeBytes, expires)
 	if err != nil {
 		reviewFailure(ctx)
 		return
 	}
 	url, headers, err := a.files.PresignPut(ctx.Request.Context(), key, body.ContentType, body.SizeBytes, uploadLifetime)
 	if err != nil {
-		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM admin_report_uploads WHERE id=$1`, id)
+		_, _ = a.vehicleDB(ctx).Exec(ctx.Request.Context(), `DELETE FROM admin_report_uploads WHERE id=$1`, id)
 		reviewFailure(ctx)
 		return
 	}
-	_, err = a.pool.Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_driver_id,target_type,target_id,details,before_state,after_state)
+	_, err = a.vehicleDB(ctx).Exec(ctx.Request.Context(), `INSERT INTO admin_audit(id,admin_id,action,target_driver_id,target_type,target_id,details,before_state,after_state)
 		VALUES($1,$2::UUID,'inspection.upload_reserved',$3::UUID,'inspection_upload',$4,'{}'::JSONB,'{}'::JSONB,'{}'::JSONB)`, uuid.New(), currentAdmin(ctx).ID, driver, id.String())
 	if err != nil {
-		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM admin_report_uploads WHERE id=$1`, id)
+		_, _ = a.vehicleDB(ctx).Exec(ctx.Request.Context(), `DELETE FROM admin_report_uploads WHERE id=$1`, id)
 		reviewFailure(ctx)
 		return
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"uploadId": id, "url": url, "method": "PUT", "headers": headers, "expiresAt": expires}})
 }
 func (a *adminAPI) submitReport(ctx *gin.Context) {
+	ctx.Set("vehicleEvidence", true)
 	if a.files == nil {
 		driverError(ctx, http.StatusServiceUnavailable, "document_storage_unavailable", "Document storage is unavailable")
 		return
@@ -558,7 +586,7 @@ func (a *adminAPI) submitReport(ctx *gin.Context) {
 	var key, contentType string
 	var size int64
 	var expiry time.Time
-	err = a.pool.QueryRow(ctx.Request.Context(), `SELECT storage_key,content_type,size_bytes,expires_at FROM admin_report_uploads WHERE id=$1 AND admin_id=$2::UUID AND driver_id=$3::UUID AND consumed_at IS NULL`, uploadID, currentAdmin(ctx).ID, driver).Scan(&key, &contentType, &size, &expiry)
+	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT storage_key,content_type,size_bytes,expires_at FROM admin_report_uploads WHERE id=$1 AND admin_id=$2::UUID AND driver_id=$3::UUID AND consumed_at IS NULL`, uploadID, currentAdmin(ctx).ID, driver).Scan(&key, &contentType, &size, &expiry)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusBadRequest, "invalid_upload", "Report upload is missing or expired")
 		return
@@ -576,7 +604,7 @@ func (a *adminAPI) submitReport(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "upload_incomplete", "Report file does not match its reservation")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -631,7 +659,7 @@ func (a *adminAPI) inspectionReport(ctx *gin.Context) {
 		return
 	}
 	var key string
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT report_storage_key FROM driver_inspections WHERE id=$1::UUID AND driver_id=$2::UUID`, inspection, driver).Scan(&key)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT report_storage_key FROM driver_inspections WHERE id=$1::UUID AND driver_id=$2::UUID`, inspection, driver).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "inspection_not_found", "Inspection was not found")
 		return
@@ -648,6 +676,7 @@ func (a *adminAPI) inspectionReport(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"url": url, "expiresInSeconds": 300}})
 }
 func (a *adminAPI) reviewInspection(ctx *gin.Context) {
+	ctx.Set("vehicleEvidence", true)
 	driver, ok := reviewDriverID(ctx)
 	if !ok {
 		return
@@ -664,7 +693,7 @@ func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_review", "Valid outcome and failure reason are required")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -735,7 +764,7 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_review", "Valid decision and rejection reason are required")
 		return
 	}
-	tx, err := a.pool.Begin(ctx.Request.Context())
+	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -768,12 +797,17 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 			return
 		}
 	}
-	_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET admin_status=$1,admin_reason=$2,admin_reviewed_at=NOW(),updated_at=NOW() WHERE driver_id=$3::UUID`, body.Status, body.Reason, driver)
+	_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET approval_status=$1,approved_at=NOW() WHERE driver_id=$2::uuid`, body.Status, driver)
+	if err == nil && (body.Status == "approved" || (!inactiveVehicleOnly(ctx) && !ctx.GetBool("explicitVehicleScope"))) {
+		// Reviewing a complete second car can finish an initially pending account;
+		// vehicle-only approval must never lift an explicit account restriction.
+		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_profiles SET admin_status=$1,admin_reason=$2,admin_reviewed_at=NOW(),updated_at=NOW() WHERE driver_id=$3::uuid AND (admin_status<>'rejected' OR $4)`, body.Status, body.Reason, driver, !ctx.GetBool("explicitVehicleScope"))
+	}
 	if err != nil {
 		reviewFailure(ctx)
 		return
 	}
-	if body.Status == "rejected" {
+	if body.Status == "rejected" && !inactiveVehicleOnly(ctx) {
 		_, err = tx.Exec(ctx.Request.Context(), `UPDATE drivers SET status=CASE WHEN status='on_trip' THEN status ELSE 'offline' END,available=FALSE,online_requested=FALSE,updated_at=NOW() WHERE id=$1::UUID`, driver)
 		if err != nil {
 			reviewFailure(ctx)
@@ -784,7 +818,12 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	_, err = insertDriverEvent(ctx, tx, driver, "driver.onboarding.updated", gin.H{"adminStatus": body.Status, "reason": body.Reason})
+	var actualStatus string
+	if err = tx.QueryRow(ctx.Request.Context(), `SELECT admin_status FROM driver_profiles WHERE driver_id=$1::uuid`, driver).Scan(&actualStatus); err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	_, err = insertDriverEvent(ctx, tx, driver, "driver.onboarding.updated", gin.H{"adminStatus": actualStatus, "vehicleApprovalStatus": body.Status, "vehicleId": ctx.GetString("selectedVehicleId"), "reason": body.Reason})
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -793,5 +832,5 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"driverId": driver, "adminStatus": body.Status}})
+	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"driverId": driver, "vehicleId": ctx.GetString("selectedVehicleId"), "vehicleApprovalStatus": body.Status, "adminStatus": actualStatus}})
 }

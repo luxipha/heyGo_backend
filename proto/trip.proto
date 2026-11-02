@@ -27,6 +27,9 @@ message Route {
     repeated Geometry geometry = 1;
     double distance = 2;
     double duration = 3;
+    double static_duration = 4;
+    bool traffic_aware = 5;
+    string provider = 6;
 }
 
 message RideFare {

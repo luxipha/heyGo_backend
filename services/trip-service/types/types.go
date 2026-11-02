@@ -75,8 +75,11 @@ func (o *OSRMApiResponse) ToProto() *pb.Route {
 		}
 	}
 	return &pb.Route{
-		Distance: route.Distance,
-		Duration: route.Duration,
+		Distance:       route.Distance,
+		Duration:       route.Duration,
+		StaticDuration: route.StaticDuration,
+		TrafficAware:   route.TrafficAware,
+		Provider:       o.Provider,
 		Geometry: []*pb.Geometry{
 			{
 				Coordinates: coordinates,

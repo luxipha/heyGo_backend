@@ -34,6 +34,7 @@ func TestDriverDocumentRemindersMilestonesAndRenewal(t *testing.T) {
 	exec(`INSERT INTO users(id,casper_id_user_id,human_id,roles) VALUES($1::UUID,$1,$1,ARRAY['driver'])`, owner)
 	defer pool.Exec(ctx, `DELETE FROM users WHERE id=$1::UUID`, owner)
 	exec(`INSERT INTO driver_profiles(driver_id) VALUES($1::UUID)`, owner)
+	exec(`INSERT INTO driver_vehicles(driver_id)VALUES($1::uuid)`, owner)
 	exec(`INSERT INTO driver_devices(id,driver_id,platform,push_token) VALUES($1::UUID,$2::UUID,'android',$1)`, device, owner)
 	exec(`INSERT INTO driver_documents(id,driver_id,type,status,storage_key,expires_at) VALUES($1::UUID,$2::UUID,'driver_license','approved','private', $3)`, doc, owner, now.Add(20*24*time.Hour))
 	run := func(at time.Time) {

@@ -144,6 +144,7 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 		}
 		return nil, ErrNoAvailableDriver
 	}
+	simulationMatchingSnapshot(ctx, tx, tripID, packageSlug, lat, lng, radius)
 	c := &Candidate{Driver: &pb.Driver{Location: &pb.Location{}}}
 	err = tx.QueryRow(ctx, `SELECT d.id::TEXT,d.name,d.profile_pic,d.car_plate,d.package_slug,ST_Y(d.location::geometry),ST_X(d.location::geometry),ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)
 	FROM drivers d JOIN users u ON u.id=d.id JOIN driver_eligibility e ON e.driver_id=d.id

@@ -78,6 +78,11 @@ func adminRoutePermission(method, path string) string {
 	}
 	read := method == http.MethodGet
 	switch {
+	case strings.HasPrefix(path, "/admin/heroes/"):
+		if read {
+			return permissionFinanceRead
+		}
+		return permissionFinanceWrite
 	case strings.HasPrefix(path, "/admin/simulation/"):
 		if read {
 			return permissionLive

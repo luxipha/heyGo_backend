@@ -82,10 +82,13 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 		registerPhoneAuthRoutes(r, pool, phoneUsers, phoneAuth)
 	}
 	registerAdminRoutes(r, pool, files, phoneAuth)
+	registerHeroesRoutes(r, pool)
 
 	authenticated := r.Group("/", middleware, authMiddleware.Authenticate, idempotencyMiddleware(pool))
 	authenticated.GET("/auth/me", func(ctx *gin.Context) { currentUserHandler(ctx, pool) })
 	authenticated.POST("/auth/register", func(ctx *gin.Context) { registerRoleHandler(ctx, users) })
+	authenticated.GET("/driver/referral", func(ctx *gin.Context) { getDriverHeroReferral(ctx, pool) })
+	authenticated.POST("/driver/referral", func(ctx *gin.Context) { claimHeroReferral(ctx, pool) })
 	if pool != nil {
 		registerPhoneSessionRoutes(authenticated, pool)
 		registerRiderIdentityRoutes(authenticated, pool, phoneAuth)

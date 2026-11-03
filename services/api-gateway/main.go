@@ -17,6 +17,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/db"
 	"github.com/luxipha/heyGo_backend/shared/env"
+	"github.com/luxipha/heyGo_backend/shared/heroes"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
@@ -170,6 +171,11 @@ func main() {
 			if err := handler.RunNotificationPushJobsOnce(r.Context(), pool, 100); err != nil {
 				logs.L().Warnw("Scheduled gateway maintenance failed", "error", err)
 				http.Error(w, "maintenance failed", http.StatusServiceUnavailable)
+				return
+			}
+			if err := heroes.ProcessRewards(r.Context(), pool); err != nil {
+				logs.L().Warnw("Heroes rewards maintenance failed", "error", err)
+				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)

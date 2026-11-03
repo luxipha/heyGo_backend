@@ -46,7 +46,7 @@ func adminAuditTarget(action, driverID string, details any) (string, string) {
 	raw, _ := json.Marshal(details)
 	_ = json.Unmarshal(raw, &input)
 	for _, candidate := range []struct{ key, kind string }{
-		{"simulationParticipantId", "simulation_participant"}, {"simulationRunId", "simulation_run"}, {"targetStaffId", "staff"}, {"incidentId", "incident"}, {"refundId", "refund"}, {"caseId", "support_case"},
+		{"heroPaymentId", "hero_payment"}, {"heroId", "hero"}, {"simulationParticipantId", "simulation_participant"}, {"simulationRunId", "simulation_run"}, {"targetStaffId", "staff"}, {"incidentId", "incident"}, {"refundId", "refund"}, {"caseId", "support_case"},
 		{"geofenceId", "geofence"}, {"policyId", "policy"}, {"ruleId", "statutory_rule"},
 		{"claimId", "no_show_claim"}, {"inspectionId", "inspection"}, {"documentId", "document"},
 		{"tripId", "trip"}, {"requestId", "request"},

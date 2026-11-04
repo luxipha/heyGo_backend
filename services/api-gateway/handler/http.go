@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/luxipha/heyGo_backend/shared/geo"
 	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
+	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"math"
 	"net/http"
 	"slices"
@@ -83,8 +84,10 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	}
 	registerAdminRoutes(r, pool, files, phoneAuth)
 	registerHeroesRoutes(r, pool)
+	registerReferralPublicRoutes(r, pool)
 
 	authenticated := r.Group("/", middleware, authMiddleware.Authenticate, idempotencyMiddleware(pool))
+	registerReferralRoutes(authenticated, pool)
 	authenticated.GET("/auth/me", func(ctx *gin.Context) { currentUserHandler(ctx, pool) })
 	authenticated.POST("/auth/register", func(ctx *gin.Context) { registerRoleHandler(ctx, users) })
 	authenticated.GET("/driver/referral", func(ctx *gin.Context) { getDriverHeroReferral(ctx, pool) })
@@ -230,15 +233,28 @@ func currentUserHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 
 func registerRoleHandler(ctx *gin.Context, users gatewayauth.UserStore) {
 	var payload struct {
-		Role string `json:"role" binding:"required"`
+		Role         string `json:"role" binding:"required"`
+		ReferralCode string `json:"referralCode"`
 	}
 	if err := ctx.ShouldBindJSON(&payload); err != nil {
 		driverError(ctx, http.StatusBadRequest, "role_required", "Role is required")
 		return
 	}
 	user, _ := gatewayauth.CurrentUser(ctx)
-	registered, err := users.AddRole(ctx.Request.Context(), user.ID, payload.Role)
+	var registered gatewayauth.User
+	var err error
+	if store, ok := users.(interface {
+		AddRoleWithReferral(context.Context, string, string, string) (gatewayauth.User, error)
+	}); ok {
+		registered, err = store.AddRoleWithReferral(ctx.Request.Context(), user.ID, payload.Role, payload.ReferralCode)
+	} else {
+		registered, err = users.AddRole(ctx.Request.Context(), user.ID, payload.Role)
+	}
 	if err != nil {
+		if errors.Is(err, referrals.ErrUnavailable) || errors.Is(err, referrals.ErrInvalid) || errors.Is(err, referrals.ErrIneligible) || errors.Is(err, referrals.ErrConflict) {
+			referralError(ctx, err)
+			return
+		}
 		if err == gatewayauth.ErrInvalidRole {
 			driverError(ctx, http.StatusBadRequest, "invalid_role", err.Error())
 			return

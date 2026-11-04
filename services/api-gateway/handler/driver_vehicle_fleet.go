@@ -62,6 +62,12 @@ func (w *vehicleResponse) Written() bool { return w.status != 0 }
 // Existing endpoints remain active-car APIs. An explicit vehicleId selects a
 // different owned car for this request only; it never changes the active car.
 func withVehicleScope(pool *pgxpool.Pool, next gin.HandlerFunc) gin.HandlerFunc {
+	return withInitialVehicleScope(pool, next, false)
+}
+
+// Only onboarding evidence endpoints may initialize the first, unclassified car.
+// Explicit IDs always require existing ownership and never create a replacement.
+func withInitialVehicleScope(pool *pgxpool.Pool, next gin.HandlerFunc, initialize bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		car := c.Query("vehicleId")
 		c.Set("explicitVehicleScope", car != "")
@@ -80,7 +86,7 @@ func withVehicleScope(pool *pgxpool.Pool, next gin.HandlerFunc) gin.HandlerFunc 
 		}
 		defer tx.Rollback(context.Background())
 		// All fleet mutations use the user lock before profile/driver locks.
-		if c.Request.Method != http.MethodGet && !c.GetBool("vehicleReadOnly") {
+		if initialize || (c.Request.Method != http.MethodGet && !c.GetBool("vehicleReadOnly")) {
 			if _, e = tx.Exec(c.Request.Context(), `SELECT id FROM users WHERE id=$1::uuid FOR UPDATE`, owner); e != nil {
 				reviewFailure(c)
 				return
@@ -88,9 +94,30 @@ func withVehicleScope(pool *pgxpool.Pool, next gin.HandlerFunc) gin.HandlerFunc 
 		}
 		if car == "" {
 			if e = tx.QueryRow(c.Request.Context(), `SELECT id::text FROM driver_vehicle_records WHERE driver_id=$1::uuid AND is_active`, owner).Scan(&car); e == pgx.ErrNoRows {
-				_ = tx.Rollback(c.Request.Context())
-				next(c)
-				return
+				if !initialize {
+					_ = tx.Rollback(c.Request.Context())
+					next(c)
+					return
+				}
+				// Never create a second car merely because an existing fleet
+				// has no active selection. The user lock serializes first uploads.
+				if _, e = tx.Exec(c.Request.Context(), `INSERT INTO driver_profiles(driver_id) VALUES($1::uuid) ON CONFLICT DO NOTHING`, owner); e != nil {
+					reviewFailure(c)
+					return
+				}
+				e = tx.QueryRow(c.Request.Context(), `INSERT INTO driver_vehicle_records(driver_id)
+                    SELECT $1::uuid WHERE NOT EXISTS(SELECT 1 FROM driver_vehicle_records WHERE driver_id=$1::uuid)
+                    RETURNING id::text`, owner).Scan(&car)
+				if e == pgx.ErrNoRows {
+					driverError(c, 409, "vehicle_selection_required", "Choose an existing vehicle before uploading evidence")
+					return
+				}
+				if e != nil {
+					reviewFailure(c)
+					return
+				}
+				// GET initializes a stable evidence/draft scope for legacy apps.
+				c.Header("Cache-Control", "no-store")
 			} else if e != nil {
 				reviewFailure(c)
 				return

@@ -32,6 +32,7 @@ type riderTripSnapshot struct {
 	FareKobo         int64           `json:"fareKobo"`
 	NoShowDebtKobo   int64           `json:"noShowDebtKobo"`
 	AmountDueKobo    int64           `json:"amountDueKobo"`
+	RideCreditKobo   int64           `json:"rideCreditKobo"`
 	Currency         string          `json:"currency"`
 	Route            json.RawMessage `json:"route"`
 	Pickup           json.RawMessage `json:"pickup"`
@@ -81,7 +82,7 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
 	}
 	var t riderTripSnapshot
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.version,f.package_slug,
- ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.matching_deadline,t.matching_outcome,
+ ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo-t.ride_credit_kobo,t.ride_credit_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.matching_deadline,t.matching_outcome,
  (SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'status',a.status,'expiresAt',a.expires_at,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',CASE WHEN a.status='accepted' THEN COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) ELSE NULL END) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND a.status IN ('offered','accepted') ORDER BY a.attempt DESC LIMIT 1),
  CASE WHEN f.pickup IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.pickup::geometry),'longitude',ST_X(f.pickup::geometry)) END,
  CASE WHEN f.destination IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.destination::geometry),'longitude',ST_X(f.destination::geometry)) END,
@@ -94,7 +95,7 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
  LEFT JOIN driver_live_locations l ON l.driver_id=d.id
  LEFT JOIN trip_settlements s ON s.trip_id=t.id
  WHERE t.rider_id=$1::UUID AND `+where+` ORDER BY t.created_at DESC,t.id DESC LIMIT 1`, args...).Scan(
-		&t.ID, &t.Status, &t.Version, &t.PackageSlug, &t.FareKobo, &t.NoShowDebtKobo, &t.AmountDueKobo, &t.Route, &t.PickupPlace, &t.DestinationPlace, &t.MatchingDeadline, &t.MatchingOutcome, &t.Assignment, &t.Pickup, &t.Destination, &t.Driver, &t.SettlementStatus, &t.CreatedAt, &t.UpdatedAt, &t.ArrivedAt, &t.StartedAt, &t.CompletedAt, &t.CancelledAt, &t.CancellationReason)
+		&t.ID, &t.Status, &t.Version, &t.PackageSlug, &t.FareKobo, &t.NoShowDebtKobo, &t.AmountDueKobo, &t.RideCreditKobo, &t.Route, &t.PickupPlace, &t.DestinationPlace, &t.MatchingDeadline, &t.MatchingOutcome, &t.Assignment, &t.Pickup, &t.Destination, &t.Driver, &t.SettlementStatus, &t.CreatedAt, &t.UpdatedAt, &t.ArrivedAt, &t.StartedAt, &t.CompletedAt, &t.CancelledAt, &t.CancellationReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

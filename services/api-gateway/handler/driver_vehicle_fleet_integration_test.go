@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
+	"image"
+	"image/png"
 	"net/http/httptest"
 	"os"
 	"testing"
@@ -221,4 +223,106 @@ func TestDriverFleetIsolationSwitchingAndSnapshots(t *testing.T) {
 	call(other, "", "POST", "", api.addVehicle, map[string]any{"make": "Honda", "model": "Civic", "year": 2020, "plate": "FIRST-PENDING"}, 201)
 	call(other, "", "POST", "", api.addVehicle, map[string]any{"make": "Honda", "model": "Accord", "year": 2021, "plate": "SECOND-BLOCKED"}, 403)
 
+}
+
+// A fresh driver can submit the first car's evidence before staff record its details.
+func TestFirstVehicleEvidenceWithoutVehicleDetails(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL required")
+	}
+	ctx := context.Background()
+	p, err := shareddb.NewPostgresPool(ctx, shareddb.Config{URL: dsn, MaxConns: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err = shareddb.Migrate(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	owner, other, documentOwner := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	for _, id := range []string{owner, other, documentOwner} {
+		if _, err = p.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles)VALUES($1::uuid,$1,$1,ARRAY['driver'])`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := &vehicleEvidenceStore{newPrivacyMemoryStore()}
+	api := &driverAPI{pool: p, files: store}
+	call := func(actor, method, path string, h gin.HandlerFunc, body any, want int) map[string]any {
+		t.Helper()
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(r)
+		c.Request = httptest.NewRequest(method, path, bytes.NewReader(raw))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("authenticated-user", gatewayauth.User{ID: actor, Roles: []string{"driver"}})
+		h(c)
+		if r.Code != want {
+			t.Fatalf("%s %s want %d got %d: %s", method, path, want, r.Code, r.Body)
+		}
+		var result map[string]any
+		_ = json.Unmarshal(r.Body.Bytes(), &result)
+		return result
+	}
+	photos := withInitialVehicleScope(p, api.ownVehiclePhotos, true)
+	first := call(owner, "GET", "/vehicle/photos", photos, nil, 200)["data"].(map[string]any)
+	car := first["vehicleId"].(string)
+	if _, err = uuid.Parse(car); err != nil {
+		t.Fatal("missing stable initial vehicle ID")
+	}
+	again := call(owner, "GET", "/vehicle/photos", photos, nil, 200)["data"].(map[string]any)
+	if again["vehicleId"] != car {
+		t.Fatal("retry changed first vehicle")
+	}
+	var count int
+	var vehicleMake, plate, approval string
+	if err = p.QueryRow(ctx, `SELECT count(*) FROM driver_vehicle_records WHERE driver_id=$1::uuid`, owner).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("initial count %d: %v", count, err)
+	}
+	if err = p.QueryRow(ctx, `SELECT make,plate,approval_status FROM driver_vehicle_records WHERE id=$1::uuid`, car).Scan(&vehicleMake, &plate, &approval); err != nil || vehicleMake != "" || plate != "" || approval != "pending" {
+		t.Fatalf("invented details or approval: %v", err)
+	}
+	call(other, "GET", "/vehicle/photos?vehicleId="+car, photos, nil, 404)
+	call(other, "GET", "/vehicle/photos?vehicleId=bad", photos, nil, 400)
+	call(owner, "POST", "/documents/uploads", api.withInitialDocumentVehicleScope(), map[string]any{"type": "vehicle_license", "side": "document", "contentType": "image/jpeg", "sizeBytes": 128}, 200)
+	reservation := call(documentOwner, "POST", "/documents/uploads", api.withInitialDocumentVehicleScope(), map[string]any{"type": "auto_insurance", "side": "document", "contentType": "image/png", "sizeBytes": 128}, 200)["data"].(map[string]any)
+	var storageKey string
+	if err = p.QueryRow(ctx, `SELECT storage_key FROM driver_document_uploads_records WHERE id=$1::uuid`, reservation["uploadId"]).Scan(&storageKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Put(ctx, storageKey, "image/png", bytes.NewReader(make([]byte, 128)), 128); err != nil {
+		t.Fatal(err)
+	}
+	call(documentOwner, "POST", "/documents", withVehicleScope(p, api.submitDocument), map[string]any{"type": "auto_insurance", "uploadIds": []any{reservation["uploadId"]}}, 201)
+	var bound string
+	if err = p.QueryRow(ctx, `SELECT vehicle_id::text FROM driver_document_uploads_records WHERE driver_id=$1::uuid`, documentOwner).Scan(&bound); err != nil || bound == "" {
+		t.Fatalf("document-first upload not bound: %v", err)
+	}
+	buffer := new(bytes.Buffer)
+	if err = png.Encode(buffer, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	photo := call(owner, "POST", "/vehicle/photos/uploads", withInitialVehicleScope(p, api.reserveOwnVehiclePhoto, true), map[string]any{"angle": "front", "contentType": "image/png", "sizeBytes": buffer.Len(), "vehicleRevision": first["vehicleRevision"]}, 200)["data"].(map[string]any)
+	if err = p.QueryRow(ctx, `SELECT storage_key FROM vehicle_photo_uploads_records WHERE id=$1::uuid`, photo["uploadId"]).Scan(&storageKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Put(ctx, storageKey, "image/png", buffer, int64(buffer.Len())); err != nil {
+		t.Fatal(err)
+	}
+	call(owner, "POST", "/vehicle/photos", withInitialVehicleScope(p, api.submitOwnVehiclePhoto, true), map[string]any{"uploadId": photo["uploadId"]}, 200)
+	var evidenceOwner string
+	if err = p.QueryRow(ctx, `SELECT vehicle_id::text FROM driver_vehicle_photos_records WHERE driver_id=$1::uuid`, owner).Scan(&evidenceOwner); err != nil || evidenceOwner != car {
+		t.Fatalf("photo lost car ownership: %v", err)
+	}
+	if _, err = p.Exec(ctx, `UPDATE driver_vehicle_records SET is_active=FALSE WHERE driver_id=$1::uuid`, owner); err != nil {
+		t.Fatal(err)
+	}
+	call(owner, "GET", "/vehicle/photos", photos, nil, 409)
+	if err = p.QueryRow(ctx, `SELECT count(*) FROM driver_vehicle_records WHERE driver_id=$1::uuid`, owner).Scan(&count); err != nil || count != 1 {
+		t.Fatal("no-active selection created another car")
+	}
+	var otherCount int
+	if err = p.QueryRow(ctx, `SELECT count(*) FROM driver_vehicle_records WHERE driver_id=$1::uuid`, other).Scan(&otherCount); err != nil || otherCount != 0 {
+		t.Fatal("invalid or foreign ID created a vehicle")
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/observe/traces"
+	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"github.com/luxipha/heyGo_backend/shared/storage"
 )
 
@@ -171,6 +172,11 @@ func main() {
 			if err := handler.RunNotificationPushJobsOnce(r.Context(), pool, 100); err != nil {
 				logs.L().Warnw("Scheduled gateway maintenance failed", "error", err)
 				http.Error(w, "maintenance failed", http.StatusServiceUnavailable)
+				return
+			}
+			if err := referrals.ProcessRewards(r.Context(), pool); err != nil {
+				logs.L().Warnw("Referral qualification failed", "error", err)
+				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			if err := heroes.ProcessRewards(r.Context(), pool); err != nil {

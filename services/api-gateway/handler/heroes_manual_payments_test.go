@@ -180,7 +180,26 @@ func TestHeroesManualPaymentsBalancesPrivacyAndConcurrency(t *testing.T) {
 	if !strings.Contains(string(mustJSON(data["payments"])), "******6789") {
 		t.Fatal("Payment lost original destination snapshot")
 	}
-	c, o = call("GET", "/test/payments", "", nil, false)
+	exec(`UPDATE heroes_referrals SET onboarded_at=now() WHERE id=$1::uuid`, ref)
+	c, o = call("GET", "/test/payments?search="+hero, "", nil, false)
 	require(200, c, o)
+	items := o["data"].(map[string]any)["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("Expected one searched Hero, got %v", items)
+	}
+	summary := items[0].(map[string]any)
+	if summary["drivers"] != float64(1) || summary["approved"] != float64(1) || summary["rewards"] != float64(1) {
+		t.Fatalf("Incorrect referral performance counts: %v", summary)
+	}
+	c, o = call("GET", "/test/payments?search="+other, "", nil, false)
+	require(200, c, o)
+	items = o["data"].(map[string]any)["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("Expected other Hero, got %v", items)
+	}
+	summary = items[0].(map[string]any)
+	if summary["drivers"] != float64(0) || summary["approved"] != float64(0) || summary["rewards"] != float64(0) {
+		t.Fatalf("Performance counts leaked across Heroes: %v", summary)
+	}
 }
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

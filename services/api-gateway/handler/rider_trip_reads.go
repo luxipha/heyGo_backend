@@ -122,7 +122,11 @@ func (a *riderTripAPI) settlementData(c *gin.Context, t *riderTripSnapshot) (gin
 	if err != nil {
 		return nil, err
 	}
-	return gin.H{"tripId": t.ID, "status": state, "expectedAmountKobo": expected, "fareKobo": fare, "noShowDebtKobo": debt, "currency": "NGN", "confirmationSource": "driver_entered", "providerVerified": false, "updatedAt": updated, "resolvedAt": resolved}, nil
+	source := "driver_entered"
+	if t.RideCreditKobo > 0 && expected == 0 {
+		source = "ride_credit"
+	}
+	return gin.H{"tripId": t.ID, "status": state, "expectedAmountKobo": expected, "fareKobo": fare, "noShowDebtKobo": debt, "currency": "NGN", "confirmationSource": source, "providerVerified": false, "updatedAt": updated, "resolvedAt": resolved}, nil
 }
 func (a *riderTripAPI) settlement(c *gin.Context) {
 	t := a.owned(c)
@@ -150,7 +154,7 @@ func (a *riderTripAPI) receipt(c *gin.Context) {
 		driverError(c, 503, "receipt_unavailable", "Receipt is unavailable")
 		return
 	}
-	c.JSON(200, contracts.APIResponse{Data: gin.H{"reference": "trip:" + t.ID, "trip": t, "fareKobo": t.FareKobo, "noShowDebtKobo": t.NoShowDebtKobo, "amountDueKobo": t.AmountDueKobo, "currency": "NGN", "settlement": settlement, "providerVerified": false}})
+	c.JSON(200, contracts.APIResponse{Data: gin.H{"reference": "trip:" + t.ID, "trip": t, "fareKobo": t.FareKobo, "noShowDebtKobo": t.NoShowDebtKobo, "amountDueKobo": t.AmountDueKobo, "rideCreditKobo": t.RideCreditKobo, "currency": "NGN", "settlement": settlement, "providerVerified": false}})
 }
 func (a *riderTripAPI) rating(c *gin.Context) {
 	t := a.owned(c)

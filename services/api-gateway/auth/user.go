@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	sharedauth "github.com/luxipha/heyGo_backend/shared/auth"
+	"github.com/luxipha/heyGo_backend/shared/referrals"
 )
 
 var ErrInvalidRole = errors.New("role must be rider or driver")
@@ -146,6 +147,9 @@ func identityHash(value string) string {
 }
 
 func (s *PostgresUserStore) AddRole(ctx context.Context, userID, role string) (User, error) {
+	return s.AddRoleWithReferral(ctx, userID, role, "")
+}
+func (s *PostgresUserStore) AddRoleWithReferral(ctx context.Context, userID, role, code string) (User, error) {
 	if role != "rider" && role != "driver" {
 		return User{}, ErrInvalidRole
 	}
@@ -154,9 +158,14 @@ func (s *PostgresUserStore) AddRole(ctx context.Context, userID, role string) (U
 		return User{}, fmt.Errorf("begin role registration: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if code != "" {
+		if err := referrals.Claim(ctx, tx, userID, code, role); err != nil {
+			return User{}, err
+		}
+	}
 	result, err := tx.Exec(ctx, `
 		UPDATE users
-		SET roles = CASE WHEN $2 = ANY(roles) THEN roles ELSE array_append(roles, $2) END,
+		SET referral_signup_open=FALSE, roles = CASE WHEN $2 = ANY(roles) THEN roles ELSE array_append(roles, $2) END,
 			updated_at = NOW()
 		WHERE id = $1::UUID AND active=TRUE`, userID, role)
 	if err != nil {

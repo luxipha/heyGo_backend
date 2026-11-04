@@ -40,6 +40,21 @@ func validDocumentContentType(value string) bool {
 	return false
 }
 
+// Cache the parsed body so the existing validator sees exactly the same input.
+func (a *driverAPI) withInitialDocumentVehicleScope() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var body struct {
+			Type string `json:"type"`
+		}
+		if c.ShouldBindBodyWithJSON(&body) != nil {
+			driverError(c, http.StatusBadRequest, "invalid_document_upload", "Document upload is invalid")
+			return
+		}
+		initialize := body.Type == "vehicle_license" || body.Type == "roadworthiness" || body.Type == "auto_insurance" || body.Type == "hackney_permit"
+		withInitialVehicleScope(a.pool, a.createDocumentUpload, initialize)(c)
+	}
+}
+
 func (a *driverAPI) createDocumentUpload(ctx *gin.Context) {
 	if a.files == nil {
 		driverError(ctx, http.StatusServiceUnavailable, "document_storage_unavailable", "Document storage is not configured")
@@ -51,7 +66,7 @@ func (a *driverAPI) createDocumentUpload(ctx *gin.Context) {
 		ContentType string `json:"contentType"`
 		SizeBytes   int64  `json:"sizeBytes"`
 	}
-	if ctx.ShouldBindJSON(&body) != nil || !validOperationalDocument(body.Type) || !validDocumentSide(body.Type, body.Side) || !validDocumentContentType(body.ContentType) || body.SizeBytes <= 0 || body.SizeBytes > maxDriverDocumentBytes {
+	if ctx.ShouldBindBodyWithJSON(&body) != nil || !validOperationalDocument(body.Type) || !validDocumentSide(body.Type, body.Side) || !validDocumentContentType(body.ContentType) || body.SizeBytes <= 0 || body.SizeBytes > maxDriverDocumentBytes {
 		driverError(ctx, http.StatusBadRequest, "invalid_document_upload", "Document type, side, content type, or size is invalid")
 		return
 	}

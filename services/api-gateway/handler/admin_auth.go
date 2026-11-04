@@ -87,6 +87,10 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	admin.POST("/auth/verify-email", httpmiddleware.NewRateLimiter(10, time.Minute).Middleware, api.verifyStaffEmail)
 	admin.Use(api.authenticate)
 	admin.Use(api.authorize)
+	admin.GET("/referrals/settings", api.getReferralSettings)
+	admin.PUT("/referrals/settings", api.requireCSRF, api.saveReferralSettings)
+	admin.GET("/referrals/rewards", api.referralRewards)
+	admin.POST("/referrals/rewards/approve", api.requireCSRF, api.approveReferralRewards)
 	admin.GET("/heroes/payments", api.heroesPaymentsList)
 	admin.GET("/heroes/accounts/:id", api.heroesPaymentDetail)
 	admin.POST("/heroes/accounts/:id/payments", api.requireCSRF, api.recordHeroPayment)
@@ -129,6 +133,7 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	registerAdminDriverHistoryRoutes(admin, api)
 	registerAdminVerificationNoteRoutes(admin, api)
 	registerAdminModuleApprovalRoutes(admin, api)
+	admin.GET("/pricing/markets", api.policyMarkets)
 }
 
 func adminTokenHash(raw string) string {

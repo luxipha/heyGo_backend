@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"strings"
 	"time"
 
@@ -439,6 +440,10 @@ func (r *postgresTripRepo) Complete(ctx context.Context, tripID, actorID string)
 		return nil, false, fmt.Errorf("complete trip: %w", err)
 	}
 	if result.RowsAffected() == 1 {
+		rideCredit, err := referrals.SpendRideCredit(ctx, tx, tripID)
+		if err != nil {
+			return nil, false, fmt.Errorf("apply ride credit: %w", err)
+		}
 		if err := assessTripStatutoryCharges(ctx, tx, tripID, actorID); err != nil {
 			return nil, false, fmt.Errorf("assess trip statutory charges: %w", err)
 		}
@@ -457,16 +462,23 @@ func (r *postgresTripRepo) Complete(ctx context.Context, tripID, actorID string)
 		if err := tx.QueryRow(ctx, `SELECT t.rider_id::TEXT,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id WHERE t.id=$1::UUID`, tripID).Scan(&riderID, &fareAmountKobo, &noShowDebtKobo); err != nil {
 			return nil, false, fmt.Errorf("read completed trip settlement amount: %w", err)
 		}
-		amountKobo := fareAmountKobo + noShowDebtKobo
-		if _, err := tx.Exec(ctx, `INSERT INTO trip_settlements(trip_id,driver_id,rider_id,expected_amount_kobo,fare_amount_kobo,no_show_debt_kobo,status)
-			VALUES($1::UUID,$2::UUID,$3::UUID,$4,$5,$6,'pending') ON CONFLICT(trip_id) DO NOTHING`, tripID, actorID, riderID, amountKobo, fareAmountKobo, noShowDebtKobo); err != nil {
+		amountKobo := fareAmountKobo + noShowDebtKobo - rideCredit
+		settlementStatus := "pending"
+		var resolved *time.Time
+		if amountKobo == 0 {
+			settlementStatus = "confirmed"
+			v := time.Now().UTC()
+			resolved = &v
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO trip_settlements(trip_id,driver_id,rider_id,expected_amount_kobo,fare_amount_kobo,no_show_debt_kobo,status,ride_credit_kobo,resolved_at)
+			VALUES($1::UUID,$2::UUID,$3::UUID,$4,$5,$6,$7,$8,$9) ON CONFLICT(trip_id) DO NOTHING`, tripID, actorID, riderID, amountKobo, fareAmountKobo, noShowDebtKobo, settlementStatus, rideCredit, resolved); err != nil {
 			return nil, false, fmt.Errorf("create pending trip settlement: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO trip_settlement_actions(trip_id,actor_id,action,idempotency_key)
-			VALUES($1::UUID,$2::UUID,'pending',$3) ON CONFLICT(idempotency_key) DO NOTHING`, tripID, actorID, "trip:"+tripID+":settlement:pending"); err != nil {
+			VALUES($1::UUID,$2::UUID,$4,$3) ON CONFLICT(idempotency_key) DO NOTHING`, tripID, actorID, "trip:"+tripID+":settlement:pending", settlementStatus); err != nil {
 			return nil, false, fmt.Errorf("record pending trip settlement: %w", err)
 		}
-		if err := enqueueSettlementEvent(ctx, tx, tripID, riderID, actorID, amountKobo, "pending", 0); err != nil {
+		if err := enqueueSettlementEvent(ctx, tx, tripID, riderID, actorID, amountKobo, settlementStatus, 0); err != nil {
 			return nil, false, err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO driver_trip_earnings(trip_id,driver_id,fare_kobo,commission_bps,commission_kobo,earnings_kobo,accrued_at)

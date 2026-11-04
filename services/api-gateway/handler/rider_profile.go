@@ -69,15 +69,15 @@ func (a *riderTripAPI) profileMetrics(c *gin.Context) {
 		return
 	}
 	user, _ := gatewayauth.CurrentUser(c)
-	var completed, received int64
+	var completed, received, credit int64
 	err := a.pool.QueryRow(c.Request.Context(), `SELECT
  (SELECT COUNT(*) FROM trips WHERE rider_id=$1::UUID AND status='completed'),
- (SELECT COUNT(*) FROM trip_ratings r JOIN trips t ON t.id=r.trip_id WHERE t.rider_id=$1::UUID AND r.subject_id=$1::UUID AND r.actor_id=t.assigned_driver_id AND r.actor_id<>r.subject_id AND t.status='completed')`, user.ID).Scan(&completed, &received)
+ (SELECT COUNT(*) FROM trip_ratings r JOIN trips t ON t.id=r.trip_id WHERE t.rider_id=$1::UUID AND r.subject_id=$1::UUID AND r.actor_id=t.assigned_driver_id AND r.actor_id<>r.subject_id AND t.status='completed'),COALESCE((SELECT balance_kobo FROM rider_credit_accounts WHERE rider_id=$1::uuid),0)`, user.ID).Scan(&completed, &received, &credit)
 	if err != nil {
 		driverError(c, 503, "profile_unavailable", "Profile is unavailable")
 		return
 	}
-	c.JSON(200, contracts.APIResponse{Data: gin.H{"completedTrips": completed, "receivedFeedbackCount": received}})
+	c.JSON(200, contracts.APIResponse{Data: gin.H{"completedTrips": completed, "receivedFeedbackCount": received, "rideCreditKobo": credit}})
 }
 
 type riderReceivedFeedback struct {

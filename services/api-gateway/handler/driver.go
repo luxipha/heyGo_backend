@@ -41,9 +41,9 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.POST("/vehicles", api.addVehicle)
 	driver.PUT("/vehicles/:vehicleID/active", api.activateVehicle)
 	driver.GET("/vehicle", withVehicleScope(pool, api.vehicle))
-	driver.GET("/vehicle/photos", withVehicleScope(pool, api.ownVehiclePhotos))
-	driver.POST("/vehicle/photos/uploads", withVehicleScope(pool, api.reserveOwnVehiclePhoto))
-	driver.POST("/vehicle/photos", withVehicleScope(pool, api.submitOwnVehiclePhoto))
+	driver.GET("/vehicle/photos", withInitialVehicleScope(pool, api.ownVehiclePhotos, true))
+	driver.POST("/vehicle/photos/uploads", withInitialVehicleScope(pool, api.reserveOwnVehiclePhoto, true))
+	driver.POST("/vehicle/photos", withInitialVehicleScope(pool, api.submitOwnVehiclePhoto, true))
 	driver.PATCH("/vehicle", withVehicleScope(pool, api.updateVehicle))
 	driver.PUT("/vehicle-package", api.updatePackage)
 	driver.GET("/onboarding", api.onboarding)
@@ -55,7 +55,7 @@ func registerDriverRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, fi
 	driver.PUT("/document-pin", api.setDocumentPIN)
 	driver.POST("/documents/:id/view", api.viewApprovedDocument)
 	driver.GET("/documents", withVehicleScope(pool, api.documents))
-	driver.POST("/documents/uploads", withVehicleScope(pool, api.createDocumentUpload))
+	driver.POST("/documents/uploads", api.withInitialDocumentVehicleScope())
 	driver.POST("/documents", withVehicleScope(pool, api.submitDocument))
 	driver.POST("/documents/:id/resubmit", withVehicleScope(pool, api.submitDocument))
 	driver.GET("/inspection", withVehicleScope(pool, api.inspection))
@@ -347,25 +347,28 @@ func (a *driverAPI) inspection(ctx *gin.Context) {
 }
 
 type activeTripData struct {
-	ID             string          `json:"id"`
-	Status         string          `json:"status"`
-	RiderID        string          `json:"riderId"`
-	FareID         string          `json:"fareId"`
-	FareKobo       int64           `json:"fareKobo"`
-	NoShowDebtKobo int64           `json:"noShowDebtKobo"`
-	AmountDueKobo  int64           `json:"amountDueKobo"`
-	Route          json.RawMessage `json:"route"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	StartedAt      *time.Time      `json:"startedAt"`
-	ArrivedAt      *time.Time      `json:"arrivedAt"`
+	ID                  string          `json:"id"`
+	Status              string          `json:"status"`
+	RiderID             string          `json:"riderId"`
+	FareID              string          `json:"fareId"`
+	FareKobo            int64           `json:"fareKobo"`
+	NoShowDebtKobo      int64           `json:"noShowDebtKobo"`
+	AmountDueKobo       int64           `json:"amountDueKobo"`
+	RideCreditKobo      int64           `json:"rideCreditKobo"`
+	Route               json.RawMessage `json:"route"`
+	PickupMetadata      json.RawMessage `json:"pickupMetadata"`
+	DestinationMetadata json.RawMessage `json:"destinationMetadata"`
+	CreatedAt           time.Time       `json:"createdAt"`
+	StartedAt           *time.Time      `json:"startedAt"`
+	ArrivedAt           *time.Time      `json:"arrivedAt"`
 }
 
 func (a *driverAPI) readActiveTrip(ctx *gin.Context) (*activeTripData, error) {
 	var trip activeTripData
 	var route []byte
-	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.rider_id::TEXT,t.ride_fare_id::TEXT,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,f.route,t.created_at,t.arrived_at,t.started_at
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.rider_id::TEXT,t.ride_fare_id::TEXT,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo-t.ride_credit_kobo,t.ride_credit_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.created_at,t.arrived_at,t.started_at
 		FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id WHERE t.assigned_driver_id=$1::UUID AND t.status IN ('assigned','accepted','arrived','started')
-		ORDER BY t.updated_at DESC LIMIT 1`, driverID(ctx)).Scan(&trip.ID, &trip.Status, &trip.RiderID, &trip.FareID, &trip.FareKobo, &trip.NoShowDebtKobo, &trip.AmountDueKobo, &route, &trip.CreatedAt, &trip.ArrivedAt, &trip.StartedAt)
+		ORDER BY t.updated_at DESC LIMIT 1`, driverID(ctx)).Scan(&trip.ID, &trip.Status, &trip.RiderID, &trip.FareID, &trip.FareKobo, &trip.NoShowDebtKobo, &trip.AmountDueKobo, &trip.RideCreditKobo, &route, &trip.PickupMetadata, &trip.DestinationMetadata, &trip.CreatedAt, &trip.ArrivedAt, &trip.StartedAt)
 	if err != nil {
 		return nil, err
 	}

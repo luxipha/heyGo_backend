@@ -132,7 +132,7 @@ func (a *adminAPI) heroesPaymentsList(c *gin.Context) {
 		driverError(c, 400, "invalid_search", "Search is too long")
 		return
 	}
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT h.id::text,h.name,h.email,h.referral_code,`+heroEarnedSQL+`,`+heroPaidSQL+`,h.payout_account_id IS NOT NULL FROM heroes_accounts h WHERE ($1='' OR strpos(lower(h.name||' '||h.email||' '||h.referral_code),lower($1))>0) ORDER BY (`+heroEarnedSQL+`-`+heroPaidSQL+`) DESC,h.created_at,h.id LIMIT 26 OFFSET $2`, query, offset)
+	rows, err := a.pool.Query(c.Request.Context(), `SELECT h.id::text,h.name,h.email,h.referral_code,`+heroEarnedSQL+`,`+heroPaidSQL+`,h.payout_account_id IS NOT NULL,(SELECT count(*) FROM heroes_all_referrals r WHERE r.hero_id=h.id),(SELECT count(*) FROM heroes_all_referrals r WHERE r.hero_id=h.id AND r.onboarded_at IS NOT NULL),(SELECT count(*) FROM heroes_wallet_entries w WHERE w.hero_id=h.id) FROM heroes_accounts h WHERE ($1='' OR strpos(lower(h.name||' '||h.email||' '||h.referral_code),lower($1))>0) ORDER BY (`+heroEarnedSQL+`-`+heroPaidSQL+`) DESC,h.created_at,h.id LIMIT 26 OFFSET $2`, query, offset)
 	if err != nil {
 		heroFailure(c)
 		return
@@ -141,13 +141,13 @@ func (a *adminAPI) heroesPaymentsList(c *gin.Context) {
 	items := []gin.H{}
 	for rows.Next() {
 		var id, name, email, code string
-		var earned, paid int64
+		var earned, paid, drivers, approved, rewards int64
 		var bank bool
-		if err = rows.Scan(&id, &name, &email, &code, &earned, &paid, &bank); err != nil {
+		if err = rows.Scan(&id, &name, &email, &code, &earned, &paid, &bank, &drivers, &approved, &rewards); err != nil {
 			heroFailure(c)
 			return
 		}
-		items = append(items, gin.H{"id": id, "name": name, "email": email, "code": code, "earnedKobo": earned, "paidKobo": paid, "unpaidKobo": earned - paid, "hasBank": bank})
+		items = append(items, gin.H{"id": id, "name": name, "email": email, "code": code, "earnedKobo": earned, "paidKobo": paid, "unpaidKobo": earned - paid, "hasBank": bank, "drivers": drivers, "approved": approved, "rewards": rewards})
 	}
 	if rows.Err() != nil {
 		heroFailure(c)

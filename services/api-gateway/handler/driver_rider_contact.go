@@ -13,7 +13,7 @@ func (a *driverAPI) tripRiderContact(c *gin.Context) {
 		return
 	}
 	var phone string
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT COALESCE(u.phone_e164,'') FROM trips t JOIN users u ON u.id=t.rider_id WHERE t.id=$1::uuid AND t.assigned_driver_id=$2::uuid AND t.status IN ('accepted','arrived','started') AND u.active`, id, driverID(c)).Scan(&phone)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT CASE WHEN t.guest_name<>'' THEN t.guest_phone ELSE COALESCE(u.phone_e164,'') END FROM trips t JOIN users u ON u.id=t.rider_id WHERE t.id=$1::uuid AND t.assigned_driver_id=$2::uuid AND t.status IN ('accepted','arrived','started') AND u.active`, id, driverID(c)).Scan(&phone)
 	if err != nil || phone == "" {
 		driverError(c, 404, "rider_phone_unavailable", "Rider phone number is unavailable for this trip")
 		return

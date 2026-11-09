@@ -111,11 +111,12 @@ func (a *riderTripAPI) history(c *gin.Context) {
 }
 func (a *riderTripAPI) settlementData(c *gin.Context, t *riderTripSnapshot) (gin.H, error) {
 	user, _ := gatewayauth.CurrentUser(c)
-	var state string
+	var state, method string
+	var verified bool
 	var expected, fare, debt int64
 	var updated time.Time
 	var resolved *time.Time
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT status,expected_amount_kobo,fare_amount_kobo,no_show_debt_kobo,updated_at,resolved_at FROM trip_settlements WHERE trip_id=$1::UUID AND rider_id=$2::UUID`, t.ID, user.ID).Scan(&state, &expected, &fare, &debt, &updated, &resolved)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT s.status,s.expected_amount_kobo,s.fare_amount_kobo,s.no_show_debt_kobo,s.updated_at,s.resolved_at,s.collection_method,EXISTS(SELECT 1 FROM rider_trip_payments p WHERE p.trip_id=s.trip_id AND p.status='success') FROM trip_settlements s WHERE s.trip_id=$1::UUID AND s.rider_id=$2::UUID`, t.ID, user.ID).Scan(&state, &expected, &fare, &debt, &updated, &resolved, &method, &verified)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return gin.H{"tripId": t.ID, "status": "unavailable", "currency": "NGN", "providerVerified": false}, nil
 	}
@@ -123,10 +124,13 @@ func (a *riderTripAPI) settlementData(c *gin.Context, t *riderTripSnapshot) (gin
 		return nil, err
 	}
 	source := "driver_entered"
+	if method == "monnify" {
+		source = "monnify"
+	}
 	if t.RideCreditKobo > 0 && expected == 0 {
 		source = "ride_credit"
 	}
-	return gin.H{"tripId": t.ID, "status": state, "expectedAmountKobo": expected, "fareKobo": fare, "noShowDebtKobo": debt, "currency": "NGN", "confirmationSource": source, "providerVerified": false, "updatedAt": updated, "resolvedAt": resolved}, nil
+	return gin.H{"tripId": t.ID, "status": state, "expectedAmountKobo": expected, "fareKobo": fare, "noShowDebtKobo": debt, "currency": "NGN", "confirmationSource": source, "collectionMethod": method, "providerVerified": verified, "updatedAt": updated, "resolvedAt": resolved}, nil
 }
 func (a *riderTripAPI) settlement(c *gin.Context) {
 	t := a.owned(c)
@@ -154,7 +158,7 @@ func (a *riderTripAPI) receipt(c *gin.Context) {
 		driverError(c, 503, "receipt_unavailable", "Receipt is unavailable")
 		return
 	}
-	c.JSON(200, contracts.APIResponse{Data: gin.H{"reference": "trip:" + t.ID, "trip": t, "fareKobo": t.FareKobo, "noShowDebtKobo": t.NoShowDebtKobo, "amountDueKobo": t.AmountDueKobo, "rideCreditKobo": t.RideCreditKobo, "currency": "NGN", "settlement": settlement, "providerVerified": false}})
+	c.JSON(200, contracts.APIResponse{Data: gin.H{"reference": "trip:" + t.ID, "trip": t, "fareKobo": t.FareKobo, "noShowDebtKobo": t.NoShowDebtKobo, "amountDueKobo": t.AmountDueKobo, "rideCreditKobo": t.RideCreditKobo, "currency": "NGN", "settlement": settlement, "providerVerified": settlement["providerVerified"]}})
 }
 func (a *riderTripAPI) rating(c *gin.Context) {
 	t := a.owned(c)

@@ -24,6 +24,61 @@ func enqueueTripEvent(ctx context.Context, tx pgx.Tx, trip *types.TripModel, top
 	if err != nil {
 		return fmt.Errorf("encode trip outbox event: %w", err)
 	}
+	if trip.Status == "cancelled" {
+		var actor string
+		if err := tx.QueryRow(ctx, `SELECT CASE WHEN cancellation_actor_id=rider_id THEN 'rider' WHEN cancellation_actor_id=assigned_driver_id THEN 'driver' WHEN cancellation_actor_id IS NULL THEN 'system' ELSE 'unknown' END FROM trips WHERE id=$1::uuid`, trip.ID).Scan(&actor); err != nil {
+			return err
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(data, &root); err != nil {
+			return err
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(root["trip"], &payload); err != nil {
+			return err
+		}
+		payload["cancellationActor"], _ = json.Marshal(actor)
+		root["trip"], err = json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		data, err = json.Marshal(root)
+		if err != nil {
+			return err
+		}
+	}
+	var options []byte
+	if err := tx.QueryRow(ctx, `SELECT jsonb_build_object('pickupNote',t.pickup_note,'stops',t.stops,'routeRevision',t.route_revision,'scheduledBookingId',s.id,'scheduledPickupAt',s.pickup_at) FROM trips t LEFT JOIN scheduled_rides s ON s.trip_id=t.id WHERE t.id=$1::uuid`, trip.ID).Scan(&options); err != nil {
+		return err
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return err
+	}
+	var optionFields map[string]json.RawMessage
+	if err := json.Unmarshal(options, &optionFields); err != nil {
+		return err
+	}
+	target := root
+	if topic != contracts.TripEventDriverAssigned {
+		target = map[string]json.RawMessage{}
+		if err := json.Unmarshal(root["trip"], &target); err != nil {
+			return err
+		}
+	}
+	for key, value := range optionFields {
+		target[key] = value
+	}
+	if topic != contracts.TripEventDriverAssigned {
+		root["trip"], err = json.Marshal(target)
+		if err != nil {
+			return err
+		}
+	}
+	data, err = json.Marshal(root)
+	if err != nil {
+		return err
+	}
 	if topic == contracts.TripEventDriverAssigned {
 		var assignment []byte
 		if err := tx.QueryRow(ctx, `SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug))) FROM driver_assignments a JOIN trips t ON t.id=a.trip_id LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=$1::UUID AND a.status='accepted' ORDER BY a.attempt DESC LIMIT 1`, trip.ID).Scan(&assignment); err != nil {

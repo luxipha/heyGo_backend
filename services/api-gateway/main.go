@@ -130,6 +130,7 @@ func main() {
 	var pushHandler http.Handler
 	switch deliveryMode := env.GetString("PUBSUB_DELIVERY_MODE", "pull"); deliveryMode {
 	case "pull":
+		handler.StartScheduledRideJobs(ctx, pool)
 		handler.StartPrivacyJobs(ctx, pool, files)
 		handler.StartSOSLocationPurge(ctx, pool)
 		handler.StartRefundJobs(ctx, pool)
@@ -176,6 +177,11 @@ func main() {
 			}
 			if err := referrals.ProcessRewards(r.Context(), pool); err != nil {
 				logs.L().Warnw("Referral qualification failed", "error", err)
+				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err := handler.RunScheduledRidesOnce(r.Context(), pool, 100); err != nil {
+				logs.L().Warnw("Scheduled ride maintenance failed", "error", err)
 				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
 				return
 			}

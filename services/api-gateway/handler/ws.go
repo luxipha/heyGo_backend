@@ -19,6 +19,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/proto/driver"
+	"github.com/luxipha/heyGo_backend/shared/tripsafety"
 )
 
 const maxWebSocketMessageBytes = 64 << 10
@@ -294,6 +295,9 @@ func appendRiderLocation(ctx context.Context, tx pgx.Tx, driverID string, at tim
 		source = "device_captured"
 	}
 	data, _ := json.Marshal(map[string]any{"captureTimeSource": source, "tripId": tripID, "assignmentId": assignmentID, "driverId": driverID, "capturedAt": at, "recordedAt": time.Now().UTC(), "freshnessSeconds": 120, "location": map[string]any{"latitude": lat, "longitude": lng}})
+	if err := tripsafety.Observe(ctx, tx, tripID, at, lat, lng); err != nil {
+		return err
+	}
 	_, err = messaging.AppendEventTx(ctx, tx, riderID, "location:"+assignmentID+":"+at.UTC().Format(time.RFC3339Nano), contracts.DriverEventLocationUpdated, data)
 	return err
 }

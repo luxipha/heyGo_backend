@@ -17,6 +17,8 @@ message PreviewTripRequest {
     string riderID = 1;
     Coordinate pickup = 2;
     Coordinate destination = 3;
+    // RFC3339 pickup time for a scheduled preview; empty for immediate rides.
+    string pickupAt = 4;
 }
 
 message Geometry {

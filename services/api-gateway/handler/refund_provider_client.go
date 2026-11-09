@@ -16,6 +16,13 @@ import (
 
 var refundProviderHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
+type paymentServiceError struct {
+	Status int
+	Code   string
+}
+
+func (e *paymentServiceError) Error() string { return "payment service rejected request: " + e.Code }
+
 func paymentInternalRequest(ctx context.Context, path string, body any, result any) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -37,7 +44,11 @@ func paymentInternalRequest(ctx context.Context, path string, body any, result a
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("payment service rejected verification")
+		var failure struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&failure)
+		return &paymentServiceError{Status: response.StatusCode, Code: failure.Code}
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<16)).Decode(result); err != nil {
 		return fmt.Errorf("payment service returned invalid verification")

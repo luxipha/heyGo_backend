@@ -123,9 +123,25 @@ func TestCataloguePublicationInspectionAndDynamicPricing(t *testing.T) {
 		c.Params = gin.Params{{Key: "driverID", Value: driver}}
 		api.updateDriverVehicle(c)
 	}
+	call(creator, update, actual, 400) // VIN / chassis number is required for an inspected vehicle
+	actual["vin"] = " jtd-kb20u 0938 47512 "
 	call(creator, update, actual, 409)
 	actual["workingAc"] = true
+	// Drivers upload the first car's evidence before staff fill its details.
+	exec(`INSERT INTO driver_vehicle_records(driver_id) VALUES($1::uuid)`, driver)
+	exec(`INSERT INTO driver_vehicle_photos(id,driver_id,vehicle_revision,angle,storage_key,content_type,size_bytes,uploaded_by,uploader_type) SELECT gen_random_uuid(),$1::uuid,0,angle,'onboarding/'||angle,'image/png',1,$1::uuid,'driver' FROM unnest(ARRAY['front','rear','left','right','front_interior','rear_interior','vin','walkaround']) angle`, driver)
 	call(creator, update, actual, 200)
+	var carriedPhotos int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=1 AND superseded_at IS NULL`, driver).Scan(&carriedPhotos); err != nil || carriedPhotos != 8 {
+		t.Fatalf("initial inspection lost evidence: count=%d err=%v", carriedPhotos, err)
+	}
+	vehicleDetail := call(creator, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "driverID", Value: driver}}
+		api.driverReview(c)
+	}, nil, 200)
+	if !strings.Contains(vehicleDetail, `"vin":"JTDKB20U093847512"`) {
+		t.Fatal("Admin vehicle detail is missing the normalised VIN")
+	}
 	mobile := &driverAPI{pool: pool}
 	ownerRead := func(handler gin.HandlerFunc) string {
 		return call(creator, func(c *gin.Context) {

@@ -32,12 +32,22 @@ func registerRiderNotificationRoutes(group *gin.RouterGroup, api *riderAccountAP
 	group.GET("/notifications/:id", api.riderNotificationDetail)
 	group.GET("/notifications/:id/deliveries", api.riderNotificationDeliveries)
 	group.GET("/notifications", api.riderNotifications)
+	group.GET("/messages/summary", api.riderMessagesSummary)
 	group.PATCH("/notifications/:id", api.markRiderNotificationRead)
 	group.POST("/notifications/read-all", api.markAllRiderNotificationsRead)
 }
 
 func (a *riderAccountAPI) riderNotifications(ctx *gin.Context) {
 	var before any
+	var channel any
+	if value := ctx.Query("type"); value != "" {
+		if value != "promotions" && value != "feedback" && value != "account_alerts" {
+			driverError(ctx, 400, "invalid_notification_type", "Unknown message channel")
+			return
+		}
+		channel = value
+	}
+	ctx.Header("Cache-Control", "private, no-store")
 	if raw := strings.TrimSpace(ctx.Query("cursor")); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || id < 1 {
@@ -47,8 +57,8 @@ func (a *riderAccountAPI) riderNotifications(ctx *gin.Context) {
 		before = id
 	}
 	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT id::TEXT,type,title,message,data,created_at,read_at
-		FROM rider_notifications WHERE rider_id=$1::UUID AND ($2::BIGINT IS NULL OR id<$2)
-		ORDER BY id DESC LIMIT $3`, riderAccountOwner(ctx), before, riderNotificationPageSize+1)
+		FROM rider_notifications WHERE rider_id=$1::UUID AND ($2::BIGINT IS NULL OR id<$2) AND ($3::text IS NULL OR type=$3)
+		ORDER BY id DESC LIMIT $4`, riderAccountOwner(ctx), before, channel, riderNotificationPageSize+1)
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "notifications_unavailable", "Notifications are unavailable")
 		return
@@ -73,7 +83,7 @@ func (a *riderAccountAPI) riderNotifications(ctx *gin.Context) {
 		return
 	}
 	var unreadCount int64
-	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COUNT(*) FROM rider_notifications WHERE rider_id=$1::UUID AND read_at IS NULL`, riderAccountOwner(ctx)).Scan(&unreadCount); err != nil {
+	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT COUNT(*) FROM rider_notifications WHERE rider_id=$1::UUID AND read_at IS NULL AND ($2::text IS NULL OR type=$2)`, riderAccountOwner(ctx), channel).Scan(&unreadCount); err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "notifications_unavailable", "Notifications are unavailable")
 		return
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/driverstate"
 )
 
 // "Missing" is a distinct band: an absent account is not a zero balance,
@@ -28,9 +29,10 @@ func partnerBand(raw string, allowed ...string) bool {
 // does not expose individual locations, contacts, or financial balances.
 func (a *adminAPI) partnerSummary(ctx *gin.Context) {
 	asOf := time.Now().UTC()
-	var total, active, online, pending, restricted, lowBalance, documentsExpiring int
+	var total, active, online, pending, restricted, lowBalance, documentsExpiring, awaitingReview int
 	err := a.pool.QueryRow(ctx.Request.Context(), `WITH state AS (
 		SELECT p.admin_status,a.balance_kobo,
+			EXISTS(SELECT 1 FROM driver_vehicle_records fleet WHERE fleet.driver_id=p.driver_id AND fleet.approval_status='pending') AS pending_vehicle,
 			COALESCE(d.online_requested,FALSE)
 			AND EXISTS(SELECT 1 FROM driver_socket_sessions s WHERE s.driver_id=p.driver_id AND s.expires_at>$1)
 			AND COALESCE(l.recorded_at>$1::TIMESTAMPTZ-INTERVAL '30 seconds',FALSE) AS online_current,
@@ -53,8 +55,9 @@ func (a *adminAPI) partnerSummary(ctx *gin.Context) {
 		COUNT(*) FILTER(WHERE admin_status='pending'),
 		COUNT(*) FILTER(WHERE admin_status='rejected'),
 		COUNT(*) FILTER(WHERE balance_kobo<0),
-		COUNT(*) FILTER(WHERE expiry_band='within_30_days')
-	FROM state`, asOf).Scan(&total, &active, &online, &pending, &restricted, &lowBalance, &documentsExpiring)
+		COUNT(*) FILTER(WHERE expiry_band='within_30_days'),
+		COUNT(*) FILTER(WHERE admin_status='pending' OR pending_vehicle)
+	FROM state`, asOf).Scan(&total, &active, &online, &pending, &restricted, &lowBalance, &documentsExpiring, &awaitingReview)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -64,13 +67,15 @@ func (a *adminAPI) partnerSummary(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{
 		"total": total, "active": active, "online": online,
 		"pending": pending, "restricted": restricted, "lowBalance": lowBalance,
-		"documentsExpiring": documentsExpiring,
+		"documentsExpiring": documentsExpiring, "awaitingReview": awaitingReview,
 	}})
 }
 
 func (a *adminAPI) listPartners(ctx *gin.Context) {
 	status := ctx.DefaultQuery("status", "pending")
-	if !partnerBand(status, "pending", "approved", "rejected") {
+	// awaiting_review is the verification queue: a pending driver, or an approved
+	// driver with a newly added vehicle still waiting for review.
+	if !partnerBand(status, "pending", "approved", "rejected", "awaiting_review") {
 		driverError(ctx, http.StatusBadRequest, "invalid_status", "Status is invalid")
 		return
 	}
@@ -115,6 +120,14 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_limit", err.Error())
 		return
 	}
+	// "recent" (default) pages by last update, newest first; "oldest" pages by
+	// application time, oldest first, so the longest-waiting driver is on top.
+	sort := ctx.DefaultQuery("sort", "recent")
+	if sort != "recent" && sort != "oldest" {
+		driverError(ctx, http.StatusBadRequest, "invalid_sort", "Sort must be recent or oldest")
+		return
+	}
+	withProgress := ctx.Query("progress") == "1"
 	var cursorTime any
 	var cursorID any
 	if raw := ctx.Query("cursor"); raw != "" {
@@ -127,7 +140,7 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	}
 	asOf := time.Now().UTC()
 	rows, err := a.pool.Query(ctx.Request.Context(), `WITH partner_state AS (
-		SELECT p.driver_id,COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),'') AS display_name,p.application_number,u.phone_e164,u.email,p.admin_status,p.manual_verification_status,p.updated_at,
+		SELECT p.driver_id,COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),'') AS display_name,p.application_number,u.phone_e164,u.email,p.admin_status,p.manual_verification_status,p.updated_at,p.created_at AS applied_at,
 			d.online_market_code,v.make,v.model,v.plate,(SELECT count(*) FROM driver_vehicle_records fleet WHERE fleet.driver_id=p.driver_id AND fleet.approval_status='pending') AS pending_vehicles,
 			COALESCE(d.online_requested,FALSE) AND EXISTS(SELECT 1 FROM driver_socket_sessions s WHERE s.driver_id=p.driver_id AND s.expires_at>$1)
 			AND COALESCE(l.recorded_at>$1::TIMESTAMPTZ-INTERVAL '30 seconds',FALSE) AS online_current,
@@ -149,9 +162,9 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	)
 	SELECT driver_id::TEXT,display_name,COALESCE(phone_e164,''),COALESCE(email,''),admin_status,manual_verification_status,
 		updated_at,online_market_code,online_current,balance_kobo,balance_band,next_expiry,expiry_band,
-		COALESCE(make,''),COALESCE(model,''),COALESCE(plate,''),application_number,pending_vehicles
+		COALESCE(make,''),COALESCE(model,''),COALESCE(plate,''),application_number,pending_vehicles,applied_at
 	FROM partner_state
-	WHERE ($2='all' OR admin_status=$2)
+	WHERE ($2='all' OR admin_status=$2 OR ($2='awaiting_review' AND (admin_status='pending' OR pending_vehicles>0)))
 	AND ($3::UUID IS NULL OR driver_id=$3)
 	AND ($4='' OR left(lower(display_name),char_length($4))=lower($4))
 	AND ($5='all' OR ($5='current' AND online_current) OR ($5='not_current' AND NOT online_current))
@@ -159,8 +172,9 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	AND ($7='all' OR balance_band=$7)
 	AND ($8='all' OR expiry_band=$8)
 	AND ($9='' OR lower(make)=lower($9))
-	AND ($10::TIMESTAMPTZ IS NULL OR (updated_at,driver_id)<($10,$11::UUID))
-	ORDER BY updated_at DESC,driver_id DESC LIMIT $12`, asOf, status, searchID, searchName, online, market, balance, expiry, vehicle, cursorTime, cursorID, limit+1)
+	AND ($10::TIMESTAMPTZ IS NULL OR ($13='recent' AND (updated_at,driver_id)<($10,$11::UUID)) OR ($13='oldest' AND (applied_at,driver_id)>($10,$11::UUID)))
+	ORDER BY CASE WHEN $13='oldest' THEN applied_at END ASC,CASE WHEN $13='oldest' THEN driver_id END ASC,
+		CASE WHEN $13='recent' THEN updated_at END DESC,CASE WHEN $13='recent' THEN driver_id END DESC LIMIT $12`, asOf, status, searchID, searchName, online, market, balance, expiry, vehicle, cursorTime, cursorID, limit+1, sort)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -169,18 +183,18 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	items := make([]gin.H, 0, limit+1)
 	for rows.Next() {
 		var id, name, phone, email, state, manual, balanceBand, expiryBand, make, model, plate, applicationNumber string
-		var updated time.Time
+		var updated, applied time.Time
 		var marketCode *string
 		var current bool
 		var pendingVehicles int
 		var balanceKobo *int64
 		var nextExpiry *time.Time
-		if err := rows.Scan(&id, &name, &phone, &email, &state, &manual, &updated, &marketCode, &current, &balanceKobo, &balanceBand, &nextExpiry, &expiryBand, &make, &model, &plate, &applicationNumber, &pendingVehicles); err != nil {
+		if err := rows.Scan(&id, &name, &phone, &email, &state, &manual, &updated, &marketCode, &current, &balanceKobo, &balanceBand, &nextExpiry, &expiryBand, &make, &model, &plate, &applicationNumber, &pendingVehicles, &applied); err != nil {
 			reviewFailure(ctx)
 			return
 		}
 		item := gin.H{"driverId": id, "displayName": name, "applicationNumber": applicationNumber, "adminStatus": state,
-			"manualVerificationStatus": manual, "pendingVehicleCount": pendingVehicles, "updatedAt": updated, "onlineCurrent": current,
+			"manualVerificationStatus": manual, "pendingVehicleCount": pendingVehicles, "updatedAt": updated, "appliedAt": applied, "onlineCurrent": current,
 			"zone": marketCode, "balanceBand": balanceBand, "expiryBand": expiryBand, "nextDocumentExpiryAt": nextExpiry,
 			"vehicle": gin.H{"make": make, "model": model, "plate": plate}}
 		if adminHasPermission(ctx, permissionDriverContact) {
@@ -199,8 +213,23 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	if len(items) > limit {
 		items = items[:limit]
 		last := items[len(items)-1]
-		value := encodeDriverTripHistoryCursor(driverTripHistoryCursor{OccurredAt: last["updatedAt"].(time.Time), ID: last["driverId"].(string)})
+		key := last["updatedAt"].(time.Time)
+		if sort == "oldest" {
+			key = last["appliedAt"].(time.Time)
+		}
+		value := encodeDriverTripHistoryCursor(driverTripHistoryCursor{OccurredAt: key, ID: last["driverId"].(string)})
 		next = &value
+	}
+	if withProgress {
+		// The same seven requirements the review page shows, per listed driver.
+		for _, item := range items {
+			state, err := driverstate.Read(ctx.Request.Context(), a.pool, item["driverId"].(string))
+			if err != nil {
+				reviewFailure(ctx)
+				return
+			}
+			item["requirementsCompleted"], item["requirementsRequired"] = state.Completed, state.Required
+		}
 	}
 	ctx.Header("Cache-Control", "no-store")
 	ctx.Header("X-As-Of", asOf.Format(time.RFC3339Nano))

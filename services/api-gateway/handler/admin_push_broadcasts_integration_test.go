@@ -53,6 +53,23 @@ func TestAdminPushBroadcastSchedulingAndFanout(t *testing.T) {
 		}
 		return id
 	}
+
+	feedback := create("Riders")
+	inputFeedback := map[string]any{"version": 1, "purpose": "feedback", "reason": "Testing feedback"}
+	if w := campaignTestCall(router, "POST", "/admin/communications/campaigns/"+feedback+"/send", inputFeedback, true, "super_admin"); w.Code != 200 {
+		t.Fatalf("feedback: %d %s", w.Code, w.Body.String())
+	}
+	if err := fanOutPushBroadcasts(ctx, pool, 100, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	var feedbackCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM rider_notifications WHERE rider_id=$1::uuid AND type='feedback' AND title='Test announcement' AND message='Test message'`, rider).Scan(&feedbackCount); err != nil || feedbackCount != 1 {
+		t.Fatalf("feedback count=%d error=%v", feedbackCount, err)
+	}
+	wrong := create("Drivers")
+	if w := campaignTestCall(router, "POST", "/admin/communications/campaigns/"+wrong+"/send", inputFeedback, true, "super_admin"); w.Code != 400 {
+		t.Fatalf("feedback audience: %d", w.Code)
+	}
 	campaign := create("All users")
 	at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	input := map[string]any{"version": 1, "purpose": "announcement", "scheduledFor": at, "reason": "Testing schedule"}

@@ -347,6 +347,16 @@ func (a *driverAPI) inspection(ctx *gin.Context) {
 }
 
 type activeTripData struct {
+	ScheduledBookingID  *string         `json:"scheduledBookingId"`
+	ScheduledPickupAt   *time.Time      `json:"scheduledPickupAt"`
+	RidePreferences     json.RawMessage `json:"ridePreferences"`
+	PreferencesRevision int64           `json:"preferencesRevision"`
+	GuestPhone          string          `json:"guestPhone,omitempty"`
+	GuestName           string          `json:"guestName"`
+	PickupNote          string          `json:"pickupNote"`
+	Stops               json.RawMessage `json:"stops"`
+	RouteRevision       int64           `json:"routeRevision"`
+	Version             int64           `json:"version"`
 	ID                  string          `json:"id"`
 	Status              string          `json:"status"`
 	RiderID             string          `json:"riderId"`
@@ -372,11 +382,18 @@ func (a *driverAPI) readActiveTrip(ctx *gin.Context) (*activeTripData, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT ride_preferences,preferences_revision,guest_name,CASE WHEN status IN ('accepted','arrived','started') THEN guest_phone ELSE '' END,pickup_note,stops,route_revision,version FROM trips WHERE id=$1::uuid AND assigned_driver_id=$2::uuid`, trip.ID, driverID(ctx)).Scan(&trip.RidePreferences, &trip.PreferencesRevision, &trip.GuestName, &trip.GuestPhone, &trip.PickupNote, &trip.Stops, &trip.RouteRevision, &trip.Version); err != nil {
+		return nil, err
+	}
 	trip.Route = route
+	if err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT (SELECT id::text FROM scheduled_rides WHERE trip_id=$1::uuid),(SELECT pickup_at FROM scheduled_rides WHERE trip_id=$1::uuid)`, trip.ID).Scan(&trip.ScheduledBookingID, &trip.ScheduledPickupAt); err != nil {
+		return nil, err
+	}
 	return &trip, nil
 }
 
 func (a *driverAPI) activeTrip(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
 	trip, err := a.readActiveTrip(ctx)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusServiceUnavailable, "trip_unavailable", "Active trip is unavailable")
@@ -386,6 +403,7 @@ func (a *driverAPI) activeTrip(ctx *gin.Context) {
 }
 
 func (a *driverAPI) dashboard(ctx *gin.Context) {
+	ctx.Header("Cache-Control", "no-store")
 	state, err := driverstate.Read(ctx.Request.Context(), a.vehicleDB(ctx), driverID(ctx))
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "dashboard_unavailable", "Dashboard is unavailable")

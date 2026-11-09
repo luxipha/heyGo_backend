@@ -217,6 +217,9 @@ func (a *adminAPI) submitVehiclePhoto(ctx *gin.Context) {
 		_, err = tx.Exec(ctx.Request.Context(), `UPDATE vehicle_photo_uploads SET consumed_at=NOW() WHERE id=$1::uuid`, body.UploadID)
 	}
 	if err == nil {
+		err = markVehicleEvidenceComplete(ctx, tx, driver, revision)
+	}
+	if err == nil {
 		if vehiclePhotoActorType(ctx) == "admin" {
 			err = adminAudit(ctx, tx, "vehicle.photo.submitted", driver, gin.H{"photoId": id, "angle": angle, "vehicleRevision": revision})
 		} else {
@@ -230,6 +233,23 @@ func (a *adminAPI) submitVehiclePhoto(ctx *gin.Context) {
 	committed = true
 	ctx.JSON(200, contracts.APIResponse{Data: gin.H{"id": id, "angle": angle, "vehicleRevision": revision}})
 }
+// markVehicleEvidenceComplete opens driver-facing review once all required
+// angles and the walkaround video are present for this revision. The
+// submitVehiclePhoto "frozen" check guards against a duplicate row: once
+// this exists, further uploads for the revision are rejected upstream.
+func markVehicleEvidenceComplete(ctx *gin.Context, tx pgx.Tx, driver string, revision int64) error {
+	var count int
+	if err := tx.QueryRow(ctx.Request.Context(), `SELECT COUNT(DISTINCT angle) FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL`, driver, revision).Scan(&count); err != nil {
+		return err
+	}
+	if count != len(vehiclePhotoAngles) {
+		return nil
+	}
+	id := uuid.New()
+	_, err := tx.Exec(ctx.Request.Context(), `INSERT INTO driver_inspections(id,driver_id,status,vehicle_revision,vehicle_snapshot,evidence_version) VALUES($1,$2::uuid,'report_received',$3,COALESCE((SELECT to_jsonb(v) FROM driver_vehicles v WHERE driver_id=$2::uuid),'{}'::jsonb),1)`, id, driver, revision)
+	return err
+}
+
 func signedVehiclePhotos(ctx *gin.Context, pool vehicleDatabase, files storage.ObjectStore, driver string, revision int64) ([]gin.H, error) {
 	photos := []gin.H{}
 	rows, err := pool.Query(ctx.Request.Context(), `SELECT id::text,angle,storage_key,content_type FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL ORDER BY CASE WHEN angle='front' THEN 0 ELSE 1 END,angle`, driver, revision)

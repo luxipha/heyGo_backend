@@ -32,6 +32,8 @@ func registerAdminReviewRoutes(group *gin.RouterGroup, a *adminAPI) {
 	group.PUT("/drivers/:driverID/identity", a.requireCSRF, a.updateDriverIdentity)
 	group.PUT("/drivers/:driverID/vehicle", a.requireCSRF, withVehicleScope(a.pool, a.updateDriverVehicle))
 	group.POST("/drivers/:driverID/manual-verification", a.requireCSRF, a.reviewManualIdentity)
+	group.PUT("/drivers/:driverID/identity/face-match", a.requireCSRF, a.recordFaceMatch)
+	group.POST("/drivers/:driverID/documents/:documentID/reupload", a.requireCSRF, withVehicleScope(a.pool, a.requestDocumentReupload))
 	group.GET("/drivers/:driverID/documents/:documentID/files/:side", withVehicleScope(a.pool, a.documentFile))
 	group.POST("/drivers/:driverID/documents/uploads", a.requireCSRF, withVehicleScope(a.pool, a.createDocumentUpload))
 	group.POST("/drivers/:driverID/documents", a.requireCSRF, withVehicleScope(a.pool, a.submitDocument))
@@ -92,7 +94,7 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	var name, phone, email, adminStatus, adminReason, manualStatus, manualReason, applicationNumber string
 	var manualVerifiedAt *time.Time
 	var vehicle json.RawMessage
-	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('vehicleId',v.id,'isActive',v.is_active,'approvalStatus',v.approval_status,'packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'conditionNotes',v.condition_notes,'findings',v.findings,'vehicleRevision',v.inspection_revision,'categoryIds',COALESCE((SELECT jsonb_agg(category_id) FROM driver_vehicle_categories WHERE driver_id=v.driver_id),'[]'::JSONB),'categoryNames',COALESCE((SELECT jsonb_agg(c.name ORDER BY c.name) FROM driver_vehicle_categories a JOIN ride_categories c ON c.id=a.category_id WHERE a.driver_id=v.driver_id),'[]'::JSONB)) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
+	err := a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT COALESCE(NULLIF((SELECT BTRIM(CONCAT_WS(' ',ip.first_name,ip.last_name)) FROM driver_identity_profiles ip WHERE ip.driver_id=p.driver_id),''),NULLIF(BTRIM(p.display_name),''),''),COALESCE(u.phone_e164,''),COALESCE(u.email,''),p.application_number,p.admin_status,p.admin_reason,p.manual_verification_status,p.manual_verification_reason,p.manual_verified_at,COALESCE((SELECT jsonb_build_object('vehicleId',v.id,'isActive',v.is_active,'approvalStatus',v.approval_status,'packageSlug',v.package_slug,'make',v.make,'model',v.model,'modelYear',v.model_year,'color',v.color,'plate',v.plate,'reviewStatus',v.review_status,'catalogueModelId',v.catalogue_model_id,'passengerSeats',v.passenger_seats,'workingAc',v.working_ac,'conditionNotes',v.condition_notes,'vin',v.vin,'findings',v.findings,'vehicleRevision',v.inspection_revision,'categoryIds',COALESCE((SELECT jsonb_agg(category_id) FROM driver_vehicle_categories WHERE driver_id=v.driver_id),'[]'::JSONB),'categoryNames',COALESCE((SELECT jsonb_agg(c.name ORDER BY c.name) FROM driver_vehicle_categories a JOIN ride_categories c ON c.id=a.category_id WHERE a.driver_id=v.driver_id),'[]'::JSONB)) FROM driver_vehicles v WHERE v.driver_id=p.driver_id),'{}'::JSONB) FROM driver_profiles p JOIN users u ON u.id=p.driver_id WHERE p.driver_id=$1::UUID`, id).Scan(&name, &phone, &email, &applicationNumber, &adminStatus, &adminReason, &manualStatus, &manualReason, &manualVerifiedAt, &vehicle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "driver_not_found", "Driver was not found")
 		return
@@ -148,7 +150,12 @@ func (a *adminAPI) driverReview(ctx *gin.Context) {
 	if !adminHasPermission(ctx, permissionDriverContact) {
 		identity.Phone = ""
 	}
-	data := gin.H{"driverId": id, "displayName": name, "applicationNumber": applicationNumber, "adminStatus": adminStatus, "adminReason": adminReason, "manualVerification": gin.H{"status": manualStatus, "reason": manualReason, "reviewedAt": manualVerifiedAt}, "identity": identity, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}
+	appliedAt, faceMatch, err := a.verificationExtras(ctx, id)
+	if err != nil {
+		reviewFailure(ctx)
+		return
+	}
+	data := gin.H{"driverId": id, "displayName": name, "applicationNumber": applicationNumber, "appliedAt": appliedAt, "adminStatus": adminStatus, "adminReason": adminReason, "manualVerification": gin.H{"status": manualStatus, "reason": manualReason, "reviewedAt": manualVerifiedAt, "faceMatch": faceMatch}, "identity": identity, "vehicle": vehicle, "eligibility": eligibility, "documents": documents, "inspection": inspection}
 	context, err := a.partnerContext(ctx, id)
 	if err != nil {
 		reviewFailure(ctx)
@@ -218,6 +225,7 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 		Year             int             `json:"year"`
 		Color            string          `json:"color"`
 		Plate            string          `json:"plate"`
+		VIN              string          `json:"vin"`
 	}
 	if ctx.ShouldBindJSON(&body) != nil || (body.CatalogueModelID == "" && (!validPackage(body.PackageSlug) || strings.TrimSpace(body.Make) == "" || strings.TrimSpace(body.Model) == "")) || strings.TrimSpace(body.Plate) == "" || body.Year < 1900 || body.Year > time.Now().Year()+1 || len(body.Plate) > 30 {
 		driverError(ctx, http.StatusBadRequest, "invalid_vehicle", "Valid package, make, model, year, and plate are required")
@@ -225,6 +233,15 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 	}
 	if err := body.Findings.validate(); err != nil {
 		driverError(ctx, 400, "invalid_vehicle_findings", err.Error())
+		return
+	}
+	body.VIN = normalizeVIN(body.VIN)
+	if body.VIN != "" && !vinPattern.MatchString(body.VIN) {
+		driverError(ctx, 400, "invalid_vin", "VIN / chassis number must be 5 to 30 letters and digits")
+		return
+	}
+	if body.CatalogueModelID != "" && body.VIN == "" {
+		driverError(ctx, 400, "vin_required", "Record the VIN / chassis number from the vehicle")
 		return
 	}
 	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
@@ -289,8 +306,11 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 		}
 	}
 	var previousRevision int64
+	// First-car evidence precedes classification. Filling unknown fields on the
+	// initial revision preserves evidence, but conflicting known identity does not.
+	// vehicleDB keeps this comparison and the copy scoped to the selected vehicle.
 	var sameCar bool
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT inspection_revision,COALESCE(make=$2 AND model=$3 AND model_year=$4 AND plate=$5 AND color=$6 AND catalogue_model_id IS NOT DISTINCT FROM NULLIF($7,'')::uuid,FALSE) FROM driver_vehicles WHERE driver_id=$1::uuid FOR UPDATE`, driver, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Plate), strings.TrimSpace(body.Color), body.CatalogueModelID).Scan(&previousRevision, &sameCar)
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT inspection_revision,COALESCE((make=$2 AND model=$3 AND model_year=$4 AND plate=$5 AND color=$6 AND catalogue_model_id IS NOT DISTINCT FROM NULLIF($7,'')::uuid AND (vin='' OR vin=$8)) OR (inspection_revision=0 AND catalogue_model_id IS NULL AND (COALESCE(make,'')='' OR make=$2) AND (COALESCE(model,'')='' OR model=$3) AND (COALESCE(model_year,0)=0 OR model_year=$4) AND (COALESCE(plate,'')='' OR plate=$5) AND (COALESCE(color,'')='' OR color=$6) AND (COALESCE(vin,'')='' OR vin=$8)),FALSE) FROM driver_vehicles WHERE driver_id=$1::uuid FOR UPDATE`, driver, strings.TrimSpace(body.Make), strings.TrimSpace(body.Model), body.Year, strings.TrimSpace(body.Plate), strings.TrimSpace(body.Color), body.CatalogueModelID, body.VIN).Scan(&previousRevision, &sameCar)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		reviewFailure(ctx)
 		return
@@ -301,7 +321,7 @@ func (a *adminAPI) updateDriverVehicle(ctx *gin.Context) {
 	}
 
 	if err == nil && body.CatalogueModelID != "" {
-		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET catalogue_model_id=$2::UUID,passenger_seats=$3,working_ac=$4,condition_notes=$5,inspection_revision=inspection_revision+1 WHERE driver_id=$1::UUID`, driver, body.CatalogueModelID, body.PassengerSeats, body.WorkingAC, strings.TrimSpace(body.ConditionNotes))
+		_, err = tx.Exec(ctx.Request.Context(), `UPDATE driver_vehicles SET catalogue_model_id=$2::UUID,passenger_seats=$3,working_ac=$4,condition_notes=$5,vin=$6,inspection_revision=inspection_revision+1 WHERE driver_id=$1::UUID`, driver, body.CatalogueModelID, body.PassengerSeats, body.WorkingAC, strings.TrimSpace(body.ConditionNotes), body.VIN)
 		if err == nil {
 			_, err = tx.Exec(ctx.Request.Context(), `DELETE FROM driver_vehicle_categories WHERE driver_id=$1::UUID`, driver)
 		}

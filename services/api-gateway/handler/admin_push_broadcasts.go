@@ -61,7 +61,7 @@ func (a *adminAPI) sendPushBroadcast(c *gin.Context) {
 		ScheduledFor *time.Time `json:"scheduledFor"`
 		Reason       string     `json:"reason"`
 	}
-	if c.ShouldBindJSON(&body) != nil || body.Version < 1 || (body.Purpose != "announcement" && body.Purpose != "marketing") || len(strings.TrimSpace(body.Reason)) < 5 || len(body.Reason) > 1000 {
+	if c.ShouldBindJSON(&body) != nil || body.Version < 1 || (body.Purpose != "announcement" && body.Purpose != "marketing" && body.Purpose != "feedback") || len(strings.TrimSpace(body.Reason)) < 5 || len(body.Reason) > 1000 {
 		driverError(c, 400, "invalid_broadcast", "Choose a message purpose, version and change reason")
 		return
 	}
@@ -90,6 +90,10 @@ func (a *adminAPI) sendPushBroadcast(c *gin.Context) {
 	}
 	if audience != "Drivers" && audience != "Riders" && audience != "All users" {
 		driverError(c, 400, "invalid_audience", "Save the draft with Drivers, Riders or All users as audience")
+		return
+	}
+	if body.Purpose == "feedback" && audience != "Riders" {
+		driverError(c, 400, "invalid_audience", "Feedback messages require the Riders audience")
 		return
 	}
 	if len(title)+len(message) > 2500 {
@@ -259,7 +263,9 @@ func fanOutPushRecipient(ctx context.Context, pool *pgxpool.Pool, now time.Time)
 		if audience == "driver" {
 			err = messaging.AppendNotificationTx(ctx, tx, owner, "broadcast:"+broadcast, n)
 		} else {
-			if purpose == "marketing" {
+			if purpose == "feedback" {
+				n.Type = "feedback"
+			} else if purpose == "marketing" {
 				n.Type = "promotions"
 			} else {
 				n.Type = "account_alerts"

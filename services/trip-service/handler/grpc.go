@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/luxipha/heyGo_backend/services/trip-service/repo"
 	"github.com/luxipha/heyGo_backend/services/trip-service/service"
@@ -29,6 +30,14 @@ func NewgRPCHandler(srv *grpc.Server, svc service.TripService) {
 
 // PreviewTrip handles the PreviewTrip gRPC request
 func (h *gRPCHandler) PreviewTrip(ctx context.Context, req *pb.PreviewTripRequest) (*pb.PreviewTripResponse, error) {
+	var pricingAt []time.Time
+	if req.GetPickupAt() != "" {
+		at, err := time.Parse(time.RFC3339Nano, req.GetPickupAt())
+		if err != nil || !at.After(time.Now()) {
+			return nil, status.Error(codes.InvalidArgument, "invalid future pickupAt")
+		}
+		pricingAt = append(pricingAt, at)
+	}
 	pickup := req.GetPickup()
 	destination := req.GetDestination()
 
@@ -46,7 +55,7 @@ func (h *gRPCHandler) PreviewTrip(ctx context.Context, req *pb.PreviewTripReques
 		return nil, status.Errorf(codes.Internal, "failed to get route: %v", err)
 	}
 
-	fares, err := h.svc.GenerateTripFares(ctx, req.GetRiderID(), route, pickupCoords, destinationCoords)
+	fares, err := h.svc.GenerateTripFares(ctx, req.GetRiderID(), route, pickupCoords, destinationCoords, pricingAt...)
 	if err != nil {
 		if errors.Is(err, repo.ErrPricingUnavailable) {
 			return nil, riderTripError(repo.ErrPricingUnavailable)
@@ -71,11 +80,17 @@ func (h *gRPCHandler) CreateTrip(ctx context.Context, req *pb.CreateTripRequest)
 
 	trip, err := h.svc.CreateTrip(ctx, fare)
 	if err != nil {
+		if errors.Is(err, repo.ErrScheduledConflict) {
+			return nil, riderTripError(err)
+		}
 		if errors.Is(err, repo.ErrFareExpired) || errors.Is(err, repo.ErrFareForeign) || errors.Is(err, repo.ErrFareInvalid) || errors.Is(err, repo.ErrDebtChanged) {
 			return nil, riderTripError(err)
 		}
 		if errors.Is(err, repo.ErrActiveRiderTrip) {
 			return nil, status.Error(codes.AlreadyExists, "rider already has an active trip")
+		}
+		if errors.Is(err, repo.ErrRiderContactUnverified) {
+			return nil, riderTripError(err)
 		}
 		if errors.Is(err, repo.ErrRiderRestricted) {
 			return nil, riderTripError(repo.ErrRiderRestricted)
@@ -96,6 +111,8 @@ func (h *gRPCHandler) CreateTrip(ctx context.Context, req *pb.CreateTripRequest)
 func riderTripError(err error) error {
 	code, reason := codes.Unavailable, "trip_service_unavailable"
 	switch {
+	case errors.Is(err, repo.ErrScheduledConflict):
+		code, reason = codes.FailedPrecondition, "scheduled_conflict"
 	case errors.Is(err, repo.ErrFareInvalid):
 		code, reason = codes.NotFound, "fare_invalid"
 	case errors.Is(err, repo.ErrFareForeign):
@@ -104,6 +121,8 @@ func riderTripError(err error) error {
 		code, reason = codes.FailedPrecondition, "fare_expired"
 	case errors.Is(err, repo.ErrDebtChanged):
 		code, reason = codes.FailedPrecondition, "debt_changed"
+	case errors.Is(err, repo.ErrRiderContactUnverified):
+		code, reason = codes.PermissionDenied, "rider_contact_verification_required"
 	case errors.Is(err, repo.ErrRiderRestricted):
 		code, reason = codes.PermissionDenied, "rider_restricted"
 	case errors.Is(err, repo.ErrTripClassificationUnavailable) || errors.Is(err, repo.ErrPricingUnavailable):

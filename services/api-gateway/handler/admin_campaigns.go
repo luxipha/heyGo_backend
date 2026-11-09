@@ -13,9 +13,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/offers"
 )
 
 func registerAdminCampaignRoutes(g *gin.RouterGroup, a *adminAPI) {
+	g.GET("/promotions/campaigns/:campaignID/offer", a.offerRule)
+	g.POST("/promotions/campaigns/:campaignID/offer/disable", a.requireCSRF, a.disableOffer)
 	registerAdminPushBroadcastRoutes(g, a)
 	for _, kind := range []string{"promotion", "communication"} {
 		group := g.Group("/"+kind+"s", func(c *gin.Context) { c.Set("campaignKind", kind); c.Next() })
@@ -24,12 +27,16 @@ func registerAdminCampaignRoutes(g *gin.RouterGroup, a *adminAPI) {
 		group.POST("/campaigns", a.requireCSRF, a.createCampaignDraft)
 		group.PATCH("/campaigns/:campaignID", a.requireCSRF, a.updateCampaignDraft)
 		group.POST("/campaigns/:campaignID/activate", a.requireCSRF, func(c *gin.Context) {
+			if c.GetString("campaignKind") == "promotion" {
+				a.activateOffer(c)
+				return
+			}
 			driverError(c, http.StatusConflict, "campaign_activation_blocked", "Activation requires approved campaign rules and delivery/redemption integration")
 		})
 	}
 }
 
-const campaignJSON = `jsonb_build_object('id',d.id,'kind',d.kind,'name',d.name,'category',d.category,'audience',d.audience,'body',d.body,'budgetKobo',d.budget_kobo,'status',COALESCE((SELECT b.status FROM admin_push_broadcasts b WHERE b.campaign_id=d.id),d.status),'version',d.version,'createdBy',d.created_by,'updatedBy',d.updated_by,'createdAt',d.created_at,'updatedAt',d.updated_at)`
+const campaignJSON = `jsonb_build_object('id',d.id,'kind',d.kind,'name',d.name,'category',d.category,'audience',d.audience,'body',d.body,'budgetKobo',d.budget_kobo,'status',COALESCE((SELECT CASE WHEN NOT o.active THEN 'disabled' WHEN o.ends_at<=NOW() THEN 'expired' WHEN o.starts_at>NOW() THEN 'scheduled' ELSE 'active' END FROM rider_offers o WHERE o.id=d.id),(SELECT b.status FROM admin_push_broadcasts b WHERE b.campaign_id=d.id),d.status),'version',d.version,'createdBy',d.created_by,'updatedBy',d.updated_by,'createdAt',d.created_at,'updatedAt',d.updated_at)`
 
 var campaignCapabilities = gin.H{"createDraft": true, "editDraft": true, "activate": false, "send": false, "redeem": false, "reason": "Campaign rules and delivery/redemption integration await approval"}
 
@@ -65,7 +72,7 @@ func (a *adminAPI) listCampaignDrafts(c *gin.Context) {
 	err := a.pool.QueryRow(c.Request.Context(), `WITH page AS (SELECT d.* FROM admin_campaign_drafts d WHERE kind=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3), visible AS (SELECT * FROM page ORDER BY id LIMIT $4)
  SELECT jsonb_build_object('items',COALESCE((SELECT jsonb_agg(`+campaignJSON+` ORDER BY d.id) FROM visible d),'[]'::jsonb),
  'nextCursor',CASE WHEN (SELECT COUNT(*) FROM page)>$4 THEN (SELECT id::text FROM visible ORDER BY id DESC LIMIT 1) ELSE NULL END,
- 'summary',jsonb_build_object('drafts',(SELECT COUNT(*) FROM admin_campaign_drafts WHERE kind=$1 AND NOT EXISTS(SELECT 1 FROM admin_push_broadcasts b WHERE b.campaign_id=admin_campaign_drafts.id)),'draftBudgetKobo',(SELECT COALESCE(SUM(budget_kobo),0) FROM admin_campaign_drafts WHERE kind=$1),'active',0,'scheduled',(SELECT COUNT(*) FROM admin_push_broadcasts b JOIN admin_campaign_drafts campaign ON campaign.id=b.campaign_id WHERE campaign.kind=$1 AND b.status='scheduled'),'delivered',NULL,'redemptions',NULL),
+ 'summary',jsonb_build_object('drafts',(SELECT COUNT(*) FROM admin_campaign_drafts WHERE kind=$1 AND NOT EXISTS(SELECT 1 FROM admin_push_broadcasts b WHERE b.campaign_id=admin_campaign_drafts.id) AND NOT EXISTS(SELECT 1 FROM rider_offers o WHERE o.id=admin_campaign_drafts.id)),'draftBudgetKobo',(SELECT COALESCE(SUM(budget_kobo),0) FROM admin_campaign_drafts WHERE kind=$1),'active',(SELECT count(*) FROM rider_offers o WHERE o.active AND o.starts_at<=NOW() AND o.ends_at>NOW() AND $1='promotion'),'scheduled',(SELECT COUNT(*) FROM admin_push_broadcasts b JOIN admin_campaign_drafts campaign ON campaign.id=b.campaign_id WHERE campaign.kind=$1 AND b.status='scheduled'),'delivered',NULL,'redemptions',NULL),
  'asOf',NOW())`, c.GetString("campaignKind"), cursor, limit+1, limit).Scan(&data)
 	if err != nil {
 		driverError(c, 503, "campaigns_unavailable", "Campaign drafts are unavailable")
@@ -75,7 +82,7 @@ func (a *adminAPI) listCampaignDrafts(c *gin.Context) {
 		if c.GetString("campaignKind") == "communication" {
 			return gin.H{"createDraft": true, "editDraft": true, "activate": false, "send": true, "schedule": true, "redeem": false, "reason": "Push broadcasts support send and schedule. Other channels remain draft-only."}
 		}
-		return campaignCapabilities
+		return gin.H{"createDraft": true, "editDraft": true, "activate": offers.Enabled(), "redeem": offers.Enabled(), "send": false, "reason": "Rider Discount and Incentive campaigns support immediate-ride offers when enabled."}
 	}()}})
 }
 
@@ -165,7 +172,7 @@ func (a *adminAPI) saveCampaignDraft(c *gin.Context, create bool) {
 	if create {
 		err = tx.QueryRow(c.Request.Context(), `INSERT INTO admin_campaign_drafts AS d(id,kind,name,category,audience,body,budget_kobo,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8::uuid,$8::uuid) ON CONFLICT(id) DO NOTHING RETURNING `+campaignJSON, id, c.GetString("campaignKind"), b.Name, b.Category, b.Audience, b.Body, b.BudgetKobo, actor).Scan(&data)
 	} else {
-		err = tx.QueryRow(c.Request.Context(), `UPDATE admin_campaign_drafts AS d SET name=$3,category=$4,audience=$5,body=$6,budget_kobo=$7,updated_by=$8::uuid,version=version+1,updated_at=NOW() WHERE id=$1 AND kind=$2 AND version=$9 AND status='draft' AND NOT EXISTS(SELECT 1 FROM admin_push_broadcasts b WHERE b.campaign_id=d.id) RETURNING `+campaignJSON, id, c.GetString("campaignKind"), b.Name, b.Category, b.Audience, b.Body, b.BudgetKobo, actor, b.Version).Scan(&data)
+		err = tx.QueryRow(c.Request.Context(), `UPDATE admin_campaign_drafts AS d SET name=$3,category=$4,audience=$5,body=$6,budget_kobo=$7,updated_by=$8::uuid,version=version+1,updated_at=NOW() WHERE id=$1 AND kind=$2 AND version=$9 AND status='draft' AND NOT EXISTS(SELECT 1 FROM admin_push_broadcasts b WHERE b.campaign_id=d.id) AND NOT EXISTS(SELECT 1 FROM rider_offers o WHERE o.id=d.id) RETURNING `+campaignJSON, id, c.GetString("campaignKind"), b.Name, b.Category, b.Audience, b.Body, b.BudgetKobo, actor, b.Version).Scan(&data)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(c, 409, "campaign_conflict", "Draft already exists or changed; reload before saving")

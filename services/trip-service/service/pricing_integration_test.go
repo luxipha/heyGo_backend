@@ -81,6 +81,53 @@ func TestQuoteUsesPublishedMarketPricingAndPersistsVersion(t *testing.T) {
 	if err = pool.QueryRow(ctx, `SELECT pricing_version_id::TEXT FROM ride_fares WHERE id=$1::UUID`, fares[0].ID).Scan(&frozen); err != nil || frozen != pricing {
 		t.Fatalf("frozen=%s err=%v", frozen, err)
 	}
+
+	// Two later pickups straddling a published price change must quote different rates.
+	boundaryAt := time.Now().UTC().Add(4 * time.Hour).Truncate(time.Second)
+	futurePricing := uuid.NewString()
+	if _, err = pool.Exec(ctx, `UPDATE pricing_versions SET effective_until=$2 WHERE id=$1::uuid`, pricing, boundaryAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO pricing_versions(id,market_code,version,status,effective_from,created_by,approved_by,approved_at) VALUES($1::uuid,$2,2,'approved',$3,$4::uuid,$5::uuid,NOW())`, futurePricing, market, boundaryAt, creator, approver); err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range []string{"bike", "auto", "sedan", "suv"} {
+		if _, err = pool.Exec(ctx, `INSERT INTO pricing_package_rates(pricing_id,package_slug,base_kobo,per_km_kobo,per_minute_kobo) VALUES($1::uuid,$2,200,400,120)`, futurePricing, pkg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		at      time.Time
+		version string
+		amount  float64
+	}{
+		{boundaryAt.Add(-time.Second), pricing, 600},
+		{boundaryAt, futurePricing, 1200},
+		{boundaryAt.Add(time.Hour), futurePricing, 1200},
+	} {
+		quoted, e := service.GenerateTripFares(ctx, rider, route, &sharedtypes.Coordinate{Latitude: y + 0.0005, Longitude: x + 0.0005}, &sharedtypes.Coordinate{Latitude: y + 0.0006, Longitude: x + 0.0006}, tc.at)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if len(quoted) != 4 || quoted[0].PricingVersionID != tc.version || quoted[0].TotalFareInPaise != tc.amount {
+			t.Fatalf("pickup %v: %+v", tc.at, quoted)
+		}
+	}
+
+	if _, err = pool.Exec(ctx, `UPDATE users SET email=$2,email_verified=true,phone_e164=$3,phone_verified_at=NOW() WHERE id=$1::uuid`, rider, rider+"@example.test", "+999"+fmt.Sprintf("%012d", seed)); err != nil {
+		t.Fatal(err)
+	}
+	futureFares, e := service.GenerateTripFares(ctx, rider, route, &sharedtypes.Coordinate{Latitude: y + 0.0005, Longitude: x + 0.0005}, &sharedtypes.Coordinate{Latitude: y + 0.0006, Longitude: x + 0.0006}, boundaryAt)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = service.CreateTrip(ctx, futureFares[0]); e != repo.ErrFareExpired {
+		t.Fatalf("future pricing used for immediate trip: %v", e)
+	}
+	var retained string
+	if err = pool.QueryRow(ctx, `SELECT pricing_version_id::text FROM ride_fares WHERE id=$1::uuid`, fares[0].ID).Scan(&retained); err != nil || retained != pricing {
+		t.Fatal("old quote mutated", retained, err)
+	}
 	_, err = service.GenerateTripFares(ctx, rider, route, &sharedtypes.Coordinate{Latitude: 1, Longitude: 1}, nil)
 	if err != repo.ErrPricingUnavailable {
 		t.Fatalf("expected fail-closed quote, got %v", err)

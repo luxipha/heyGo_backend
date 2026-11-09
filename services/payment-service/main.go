@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
@@ -78,9 +79,6 @@ func main() {
 		RedirectURL:  env.GetString("MONNIFY_REDIRECT_URL", appURL+"?payment=pending"),
 	}
 
-	if paymentCfg.APIKey == "" || paymentCfg.SecretKey == "" || paymentCfg.ContractCode == "" {
-		logs.L().Fatal("MONNIFY_API_KEY, MONNIFY_SECRET_KEY, and MONNIFY_CONTRACT_CODE are required")
-	}
 	internalServiceToken := env.GetString("INTERNAL_SERVICE_TOKEN", "")
 	if internalServiceToken == "" {
 		logs.L().Fatal("INTERNAL_SERVICE_TOKEN is required")
@@ -106,7 +104,8 @@ func main() {
 	paymentRepo := repo.NewPostgresPaymentRepository(databasePool)
 	prometheus.MustRegister(repo.NewPaymentBacklogCollector(databasePool))
 
-	paymentProcessor := service.NewMonnifyClient(paymentCfg)
+	settingsKey, _ := hex.DecodeString(env.GetString("HEYGO_ADMIN_SETTINGS_KEY", ""))
+	paymentProcessor := &service.ConfiguredMonnify{Pool: databasePool, Key: settingsKey, Fallback: paymentCfg}
 	paymentService := service.NewPaymentService(paymentProcessor, paymentRepo)
 
 	tripConsumer := events.NewTripConsumer(bus, paymentService)
@@ -117,6 +116,9 @@ func main() {
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
 			for {
+				if err := handler.ReconcileTripPaymentsOnce(ctx, databasePool, paymentProcessor); err != nil && ctx.Err() == nil {
+					logs.L().Warn("Trip payment reconciliation pending")
+				}
 				if _, err := repo.DrainPaymentEvents(ctx, databasePool, bus.Producer, 100); err != nil && ctx.Err() == nil {
 					logs.L().Warn("Payment event recovery failed; pending rows retained")
 				}
@@ -153,11 +155,13 @@ func main() {
 	}
 	router := handler.NewHTTPHandlerWithTopups(paymentCfg.SecretKey, paymentService, bus,
 		&handler.OperatingTopupHandler{Pool: databasePool, InternalToken: internalServiceToken, MonnifyBaseURL: paymentCfg.BaseURL,
-			Initializer: paymentProcessor, Verifier: paymentProcessor, BankVerifier: paymentProcessor, RefundExecutor: paymentProcessor}, readiness)
+			Initializer: paymentProcessor, Verifier: paymentProcessor, BankVerifier: paymentProcessor, RefundExecutor: paymentProcessor, Configured: paymentProcessor, TripInitializer: paymentProcessor}, readiness)
 	root := http.NewServeMux()
 	root.HandleFunc("/payment/return", handler.PaymentReturn)
 	root.Handle("/internal/tasks/payment-events/drain", handler.PaymentEventDrainHandler(databasePool, bus.Producer,
-		sharedauth.NewPubSubPushAuthorizer(env.GetString("PUBSUB_PUSH_AUDIENCE", ""), env.GetString("PUBSUB_PUSH_SERVICE_ACCOUNT", ""))))
+		sharedauth.NewPubSubPushAuthorizer(env.GetString("PUBSUB_PUSH_AUDIENCE", ""), env.GetString("PUBSUB_PUSH_SERVICE_ACCOUNT", "")), func(ctx context.Context) error {
+			return handler.ReconcileTripPaymentsOnce(ctx, databasePool, paymentProcessor)
+		}))
 	if pushHandler != nil {
 		root.Handle("/internal/pubsub/", pushHandler)
 	}

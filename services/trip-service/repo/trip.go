@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/luxipha/heyGo_backend/shared/zonepricing"
 	"sync"
+	"time"
 
 	"github.com/luxipha/heyGo_backend/services/trip-service/types"
 	pbd "github.com/luxipha/heyGo_backend/shared/proto/trip"
@@ -21,7 +22,7 @@ type inMemoRepo struct {
 }
 
 type TripRepo interface {
-	PricingForQuote(ctx context.Context, pickupLatitude, pickupLongitude float64) (*QuotePricing, error)
+	PricingForQuote(ctx context.Context, pickupLatitude, pickupLongitude float64, at ...time.Time) (*QuotePricing, error)
 	Create(ctx context.Context, trip *types.TripModel) (*types.TripModel, error)
 	SaveRideFare(ctx context.Context, fare *types.RideFareModel) error
 	GetRideFareByID(ctx context.Context, fareID string) (*types.RideFareModel, error)
@@ -46,7 +47,7 @@ type QuotePricing struct {
 	Rates          []PackageRate
 }
 
-func (r *inMemoRepo) PricingForQuote(context.Context, float64, float64) (*QuotePricing, error) {
+func (r *inMemoRepo) PricingForQuote(context.Context, float64, float64, ...time.Time) (*QuotePricing, error) {
 	return nil, fmt.Errorf("published market pricing unavailable in memory repository")
 }
 

@@ -13,6 +13,16 @@ import (
 )
 
 type driverTripDetail struct {
+	ScheduledBookingID      *string         `json:"scheduledBookingId"`
+	ScheduledPickupAt       *time.Time      `json:"scheduledPickupAt"`
+	RidePreferences         json.RawMessage `json:"ridePreferences"`
+	PreferencesRevision     int64           `json:"preferencesRevision"`
+	GuestPhone              string          `json:"guestPhone,omitempty"`
+	GuestName               string          `json:"guestName"`
+	PickupNote              string          `json:"pickupNote"`
+	Stops                   json.RawMessage `json:"stops"`
+	RouteRevision           int64           `json:"routeRevision"`
+	Version                 int64           `json:"version"`
 	ID                      string          `json:"id"`
 	RiderID                 string          `json:"riderId"`
 	Status                  string          `json:"status"`
@@ -68,5 +78,17 @@ func (a *driverAPI) tripDetail(ctx *gin.Context) {
 		return
 	}
 	trip.Currency = "NGN"
+	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT ride_preferences,preferences_revision,guest_name,CASE WHEN status IN ('accepted','arrived','started') THEN guest_phone ELSE '' END,pickup_note,stops,route_revision,version FROM trips WHERE id=$1::uuid AND assigned_driver_id=$2::uuid`, trip.ID, driverID(ctx)).Scan(&trip.RidePreferences, &trip.PreferencesRevision, &trip.GuestName, &trip.GuestPhone, &trip.PickupNote, &trip.Stops, &trip.RouteRevision, &trip.Version); err != nil {
+		accountError(ctx)
+		return
+	}
+	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT (SELECT id::text FROM scheduled_rides WHERE trip_id=$1::uuid),(SELECT pickup_at FROM scheduled_rides WHERE trip_id=$1::uuid)`, trip.ID).Scan(&trip.ScheduledBookingID, &trip.ScheduledPickupAt); err != nil {
+		accountError(ctx)
+		return
+	}
+	if trip.Status != "accepted" && trip.Status != "arrived" && trip.Status != "started" {
+		trip.GuestName = ""
+	}
+	ctx.Header("Cache-Control", "no-store")
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: trip})
 }

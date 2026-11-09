@@ -45,6 +45,15 @@ func notificationForDriverEvent(kind string, raw json.RawMessage) *InboxNotifica
 	makeMessage := func(typ, title, body string) *InboxNotification {
 		return &InboxNotification{Type: typ, Title: title, Message: body, Data: raw}
 	}
+	if strings.HasPrefix(kind, "scheduled.event.") && str("audience") == "driver" {
+		if kind == "scheduled.event.offer" {
+			return makeMessage("dispatch", "Scheduled ride available", "A future ride is available in your service area. Open Scheduled rides to accept or decline.")
+		}
+		if kind == "scheduled.event.reminder" {
+			return makeMessage("dispatch", "Confirm readiness for your scheduled ride", "Go online and confirm you can reach the pickup on time.")
+		}
+		return makeMessage("dispatch", "Scheduled ride update", "A future ride offer or commitment has changed. Open Scheduled rides to review it.")
+	}
 	switch kind {
 	case "driver.document.updated":
 		label, status := humanizeNotificationValue(str("type")), humanizeNotificationValue(str("status"))
@@ -53,6 +62,13 @@ func notificationForDriverEvent(kind string, raw json.RawMessage) *InboxNotifica
 		}
 		if status == "" {
 			status = "updated"
+		}
+		if reupload, _ := data["reupload"].(bool); reupload {
+			body := "Please upload a new " + strings.ToLower(label) + "."
+			if reason := str("reason"); reason != "" {
+				body += " " + reason
+			}
+			return makeMessage("verification", "Upload your "+strings.ToLower(label)+" again", body)
 		}
 		body := label + " status: " + status + "."
 		if reason := str("reason"); reason != "" {

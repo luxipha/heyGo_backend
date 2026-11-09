@@ -63,10 +63,10 @@ func (a *driverAPI) noShowEligibility(ctx *gin.Context) {
 		return
 	}
 	var riderID, status, market string
-	var arrivedAt, cancelledAt *time.Time
+	var arrivedAt, cancelledAt, scheduledAt *time.Time
 	var cancelledByRider bool
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at,cancelled_at,COALESCE(cancellation_actor_id=rider_id,FALSE)
-		FROM trips WHERE id=$1::UUID AND assigned_driver_id=$2::UUID`, tripID, driverID(ctx)).Scan(&riderID, &status, &market, &arrivedAt, &cancelledAt, &cancelledByRider)
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at,cancelled_at,COALESCE(cancellation_actor_id=rider_id,FALSE),(SELECT pickup_at FROM scheduled_rides WHERE trip_id=trips.id)
+		FROM trips WHERE id=$1::UUID AND assigned_driver_id=$2::UUID`, tripID, driverID(ctx)).Scan(&riderID, &status, &market, &arrivedAt, &cancelledAt, &cancelledByRider, &scheduledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "trip_not_found", "Trip was not found")
 		return
@@ -112,7 +112,7 @@ func (a *driverAPI) noShowEligibility(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show eligibility is unavailable")
 		return
 	}
-	eligibleAt := arrivedAt.Add(time.Duration(waitMinutes) * time.Minute)
+	eligibleAt := scheduledNoShowDeadline(*arrivedAt, scheduledAt, waitMinutes)
 	if cancelledAt != nil && cancelledAt.Before(eligibleAt) {
 		ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"tripId": tripID, "eligible": false, "reason": "rider_cancelled_before_wait_period", "eligibleAt": eligibleAt}})
 		return
@@ -139,10 +139,10 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 	}
 	defer tx.Rollback(dbctx)
 	var rider, status, market string
-	var arrivedAt, cancelledAt *time.Time
+	var arrivedAt, cancelledAt, scheduledAt *time.Time
 	var cancelledByRider bool
-	err = tx.QueryRow(dbctx, `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at,cancelled_at,COALESCE(cancellation_actor_id=rider_id,FALSE) FROM trips
-		WHERE id=$1::UUID AND assigned_driver_id=$2::UUID FOR UPDATE`, tripID, driver).Scan(&rider, &status, &market, &arrivedAt, &cancelledAt, &cancelledByRider)
+	err = tx.QueryRow(dbctx, `SELECT rider_id::TEXT,status,COALESCE(market_code,''),arrived_at,cancelled_at,COALESCE(cancellation_actor_id=rider_id,FALSE),(SELECT pickup_at FROM scheduled_rides WHERE trip_id=trips.id) FROM trips
+		WHERE id=$1::UUID AND assigned_driver_id=$2::UUID FOR UPDATE`, tripID, driver).Scan(&rider, &status, &market, &arrivedAt, &cancelledAt, &cancelledByRider, &scheduledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "trip_not_found", "Trip was not found")
 		return
@@ -178,7 +178,7 @@ func (a *driverAPI) submitNoShowClaim(ctx *gin.Context) {
 		driverError(ctx, http.StatusServiceUnavailable, "no_show_unavailable", "No-show claim could not be submitted")
 		return
 	}
-	eligibleAt := arrivedAt.Add(time.Duration(waitMinutes) * time.Minute)
+	eligibleAt := scheduledNoShowDeadline(*arrivedAt, scheduledAt, waitMinutes)
 	if cancelledAt != nil && cancelledAt.Before(eligibleAt) {
 		driverError(ctx, http.StatusConflict, "rider_cancelled_before_wait_period", "Rider cancellation occurred before the configured wait period")
 		return

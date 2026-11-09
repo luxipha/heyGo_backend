@@ -12,7 +12,7 @@ import (
 
 // PaymentEventDrainHandler requires the pinned Scheduler identity even though
 // payment-service has public ingress for provider webhooks.
-func PaymentEventDrainHandler(pool *pgxpool.Pool, publisher repo.PaymentEventPublisher, authorize func(context.Context, string) error) http.Handler {
+func PaymentEventDrainHandler(pool *pgxpool.Pool, publisher repo.PaymentEventPublisher, authorize func(context.Context, string) error, additional ...func(context.Context) error) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -29,6 +29,12 @@ func PaymentEventDrainHandler(pool *pgxpool.Pool, publisher repo.PaymentEventPub
 		if _, err := repo.DrainPaymentEvents(ctx, pool, publisher, 100); err != nil {
 			http.Error(w, "payment event recovery unavailable", http.StatusServiceUnavailable)
 			return
+		}
+		for _, job := range additional {
+			if job(ctx) != nil {
+				http.Error(w, "payment reconciliation unavailable", http.StatusServiceUnavailable)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})

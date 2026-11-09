@@ -207,3 +207,84 @@ func TestAdminPushBroadcastSchedulingAndFanout(t *testing.T) {
 		t.Fatal("marketing must default off")
 	}
 }
+
+// Recipient selection must recheck a user deleted while the broadcast is queued.
+// The row lock prevents a stale SELECT snapshot from violating the recipient FK.
+func TestBroadcastSkipsConcurrentlyDeletedRecipient(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := shareddb.NewPostgresPool(ctx, shareddb.Config{URL: dsn, MaxConns: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = shareddb.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	staff, rider, campaign := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err = pool.Exec(ctx, `INSERT INTO admin_users(id,username,password_hash) VALUES($1::uuid,$1,'test')`, staff); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles,active) VALUES($1::uuid,$1,$1,ARRAY['rider'],true)`, rider); err != nil {
+		t.Fatal(err)
+	}
+	router := campaignTestRouter(&adminAPI{pool: pool}, staff)
+	w := campaignTestCall(router, "POST", "/admin/communications/campaigns", map[string]any{"id": campaign, "name": "Deletion race", "category": "Push", "audience": "Riders", "body": "Test message", "reason": "Testing concurrent deletion"}, true, "super_admin")
+	if w.Code != 201 {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	deleting, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleting.Rollback(context.Background())
+	if _, err = deleting.Exec(ctx, `DELETE FROM users WHERE id=$1::uuid`, rider); err != nil {
+		t.Fatal(err)
+	}
+	type response struct {
+		code int
+		body string
+	}
+	done := make(chan response, 1)
+	go func() {
+		result := campaignTestCall(router, "POST", "/admin/communications/campaigns/"+campaign+"/send", map[string]any{"version": 1, "purpose": "feedback", "reason": "Testing concurrent deletion"}, true, "super_admin")
+		done <- response{result.Code, result.Body.String()}
+	}()
+	// Wait for the request to reach recipient selection while deletion holds its row.
+	for {
+		var blocked bool
+		err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query LIKE 'INSERT INTO admin_push_recipients%' AND wait_event_type='Lock')`).Scan(&blocked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("request did not wait for deletion: %d %s", result.code, result.body)
+		case <-ctx.Done():
+			t.Fatal("recipient selection did not acquire its row lock")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err = deleting.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.code != 200 {
+			t.Fatalf("queue after deletion: %d %s", result.code, result.body)
+		}
+	case <-ctx.Done():
+		t.Fatal("broadcast did not finish after deletion")
+	}
+	var count int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM admin_push_recipients WHERE user_id=$1::uuid`, rider).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("deleted recipient count=%d err=%v", count, err)
+	}
+}

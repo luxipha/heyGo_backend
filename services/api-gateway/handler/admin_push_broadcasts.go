@@ -135,7 +135,7 @@ func (a *adminAPI) sendPushBroadcast(c *gin.Context) {
 	}
 	_, err = tx.Exec(c.Request.Context(), `INSERT INTO admin_push_broadcasts(id,campaign_id,source_version,audience,purpose,title,body,scheduled_for,run_at,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::UUID)`, broadcast, id, version, audience, body.Purpose, title, message, body.ScheduledFor, runAt, status, currentAdmin(c).ID)
 	if err == nil {
-		_, err = tx.Exec(c.Request.Context(), `INSERT INTO admin_push_recipients(broadcast_id,user_id,audience) SELECT $1,id,CASE WHEN $2='Riders' THEN 'rider' WHEN roles @> ARRAY['driver'] THEN 'driver' ELSE 'rider' END FROM users WHERE active AND (($2='Drivers' AND roles @> ARRAY['driver']) OR ($2='Riders' AND roles @> ARRAY['rider']) OR ($2='All users' AND roles && ARRAY['driver','rider']))`, broadcast, audience)
+		_, err = tx.Exec(c.Request.Context(), `INSERT INTO admin_push_recipients(broadcast_id,user_id,audience) SELECT $1,id,CASE WHEN $2='Riders' THEN 'rider' WHEN roles @> ARRAY['driver'] THEN 'driver' ELSE 'rider' END FROM users WHERE active AND (($2='Drivers' AND roles @> ARRAY['driver']) OR ($2='Riders' AND roles @> ARRAY['rider']) OR ($2='All users' AND roles && ARRAY['driver','rider'])) ORDER BY id FOR KEY SHARE`, broadcast, audience)
 	}
 	if err == nil {
 		_, err = tx.Exec(c.Request.Context(), `UPDATE admin_campaign_drafts SET version=version+1,updated_at=NOW(),updated_by=$2::UUID WHERE id=$1`, id, currentAdmin(c).ID)

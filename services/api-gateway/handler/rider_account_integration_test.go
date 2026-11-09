@@ -128,8 +128,8 @@ func TestRiderAccountPersistencePrivacyAndOwnership(t *testing.T) {
 	if w := call(owner, "PUT", "/rider/saved-places/Home", `{"placeId":"stable-place-b","provider":"google","version":0}`); w.Code != 409 {
 		t.Fatal("stale saved-place edit applied")
 	}
-	if w := call(owner, "GET", "/rider/saved-places", ""); strings.Contains(w.Body.String(), "Provider address") {
-		t.Fatal("provider address was persisted")
+	if w := call(owner, "GET", "/rider/saved-places", ""); !strings.Contains(w.Body.String(), "Provider address") || !strings.Contains(w.Body.String(), `"metadataState":"resolved"`) {
+		t.Fatalf("saved-place display metadata missing: %s", w.Body.String())
 	}
 	t.Setenv("RIDE_AGENT_URL", "")
 	if w := call(owner, "PUT", "/rider/saved-places/Work", placeBody); w.Code != 503 {

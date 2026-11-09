@@ -36,6 +36,11 @@ type WebhookHandler struct {
 }
 
 type OperatingTopupHandler struct {
+	Configured      *service.ConfiguredMonnify
+	TripInitializer interface {
+		CreatePaymentSession(context.Context, string, int64, string, map[string]string) (*types.ProviderSession, error)
+		RecoverPaymentSession(context.Context, string, int64, string) (*types.ProviderSession, error)
+	}
 	// Exact provider origin gates unsigned sandbox callbacks; live always requires HMAC.
 	MonnifyBaseURL string
 	Pool           *pgxpool.Pool
@@ -91,7 +96,11 @@ func NewHTTPHandlerWithTopups(secret string, svc repo.Service, bus *pubsub.Clien
 		c.JSON(http.StatusOK, gin.H{"status": "ready", "service": "payment-service"})
 	})
 	r.POST("/webhooks/moniepoint", h.HandleMoniepoint)
+	r.POST("/webhooks/monnify", h.HandleMoniepoint)
 	if topups != nil {
+		r.POST("/internal/monnify/test", h.testMonnify)
+		r.POST("/internal/trip-payments/checkout", h.createTripCheckout)
+		r.POST("/internal/trip-payments/refresh", h.refreshTripPayment)
 		r.POST("/internal/operating-topups", h.createOperatingTopup)
 		r.POST("/internal/no-show-debt-payments", h.createNoShowDebtPayment)
 		r.POST("/internal/refund-bank-accounts/verify", h.verifyRefundBankAccount)
@@ -108,9 +117,30 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
+	var configEvent monnifyWebhook
+	if json.Unmarshal(body, &configEvent) != nil {
+		c.JSON(400, gin.H{"error": "invalid webhook payload"})
+		return
+	}
+	secret, base := h.secret, ""
+	if h.topups != nil {
+		base = h.topups.MonnifyBaseURL
+	}
+	if h.topups != nil && h.topups.Configured != nil {
+		ref := configEvent.EventData.PaymentReference
+		if ref == "" {
+			ref = configEvent.EventData.TransactionReference
+		}
+		cfg, e := h.topups.Configured.Config(c.Request.Context(), ref)
+		if e != nil {
+			c.JSON(503, gin.H{"error": "payment configuration unavailable"})
+			return
+		}
+		secret, base = cfg.SecretKey, cfg.BaseURL
+	}
 	signature := c.GetHeader("monnify-signature")
-	unsignedSandbox := signature == "" && h.topups != nil && h.topups.MonnifyBaseURL == "https://sandbox.monnify.com"
-	if !unsignedSandbox && !ValidMonnifySignature(body, signature, h.secret) {
+	unsignedSandbox := signature == "" && h.topups != nil && base == "https://sandbox.monnify.com"
+	if !unsignedSandbox && !ValidMonnifySignature(body, signature, secret) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook signature"})
 		return
 	}
@@ -119,6 +149,16 @@ func (h *WebhookHandler) HandleMoniepoint(c *gin.Context) {
 	if err := json.Unmarshal(body, &event); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook payload"})
 		return
+	}
+	if h.topups != nil && h.topups.Pool != nil && event.EventType != "SUCCESSFUL_REFUND" && event.EventType != "FAILED_REFUND" {
+		var exists bool
+		if e := h.topups.Pool.QueryRow(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM rider_trip_payments WHERE payment_reference=$1)`, event.EventData.PaymentReference).Scan(&exists); e != nil {
+			c.JSON(503, gin.H{"error": "payment lookup unavailable"})
+			return
+		} else if exists {
+			h.verifyAndPostTripPayment(c, event.EventData.PaymentReference)
+			return
+		}
 	}
 	if unsignedSandbox && !h.verifySandboxNotification(c, &event) {
 		return

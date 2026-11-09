@@ -172,6 +172,9 @@ func (m *monnifyClient) CreatePaymentSession(ctx context.Context, paymentReferen
 		return nil, fmt.Errorf("payment reference is required")
 	}
 	customerEmail := metadata["riderID"]
+	if metadata["customerEmail"] != "" {
+		customerEmail = metadata["customerEmail"]
+	}
 	if !strings.Contains(customerEmail, "@") {
 		customerEmail += "@rider.heygo.invalid"
 	}

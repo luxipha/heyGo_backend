@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/luxipha/heyGo_backend/shared/offers"
 	"github.com/luxipha/heyGo_backend/shared/referrals"
+	"github.com/luxipha/heyGo_backend/shared/rideridentity"
+	"github.com/luxipha/heyGo_backend/shared/scheduling"
 	"strings"
 	"time"
 
@@ -28,12 +31,19 @@ var ErrFareForeign = errors.New("fare_foreign")
 var ErrFareInvalid = errors.New("fare_invalid")
 var ErrDebtChanged = errors.New("debt_changed")
 var ErrActiveRiderTrip = errors.New("rider already has an active trip")
+var ErrScheduledConflict = errors.New("ride would conflict with an upcoming scheduled booking")
+var ErrRiderContactUnverified = rideridentity.ErrContactVerificationRequired
+
 var ErrRiderRestricted = errors.New("rider is restricted from requesting new trips")
 var ErrPricingUnavailable = errors.New("published pricing is unavailable or market classification is ambiguous")
 
 func NewPostgresRepository(pool *pgxpool.Pool) TripRepo { return &postgresTripRepo{pool: pool} }
 
-func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longitude float64) (*QuotePricing, error) {
+func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longitude float64, at ...time.Time) (*QuotePricing, error) {
+	pricingAt := time.Now().UTC()
+	if len(at) > 0 {
+		pricingAt = at[0]
+	}
 	var market string
 	err := r.pool.QueryRow(ctx, `SELECT CASE WHEN COUNT(*)=1 THEN MIN(code) ELSE NULL END
 		FROM trip_geofences WHERE kind='market' AND status='approved'
@@ -45,7 +55,7 @@ func (r *postgresTripRepo) PricingForQuote(ctx context.Context, latitude, longit
 	var id string
 	err = r.pool.QueryRow(ctx, `SELECT CASE WHEN COUNT(*)=1 THEN MIN(id::TEXT) ELSE NULL END
 		FROM pricing_versions WHERE market_code=$1 AND status='approved'
-		AND effective_from<=NOW() AND (effective_until IS NULL OR effective_until>NOW())`, market).Scan(&id)
+		AND effective_from<=$2 AND (effective_until IS NULL OR effective_until>$2)`, market, pricingAt).Scan(&id)
 	if err != nil || id == "" {
 		return nil, ErrPricingUnavailable
 	}
@@ -113,13 +123,36 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 		if err != nil {
 			return nil, err
 		}
-		if existing.RiderID != trip.RiderID || existing.RideFare == nil || existing.RideFare.ID != trip.RideFare.ID {
+		if existing.RiderID != trip.RiderID || existing.RideFare == nil {
 			return nil, ErrFareInvalid
+		}
+		if existing.RideFare.ID != trip.RideFare.ID {
+			var amended bool
+			if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trip_amendment_quotes WHERE trip_id=$1::uuid AND old_fare_id=$2::uuid AND rider_id=$3::uuid AND applied_at IS NOT NULL)`, existing.ID, trip.RideFare.ID, trip.RiderID).Scan(&amended); err != nil || !amended {
+				return nil, ErrFareInvalid
+			}
 		}
 		return existing, nil
 	}
-	if consumedAt != nil {
+	if err := rideridentity.Require(ctx, tx, trip.RiderID); err != nil {
+		return nil, err
+	}
+	bookingID := scheduling.DispatchBooking(ctx)
+	var preferred *string
+	if bookingID != "" {
+		if err := tx.QueryRow(ctx, `SELECT CASE WHEN ready_at IS NOT NULL THEN driver_id::text ELSE NULL END FROM scheduled_rides WHERE id=$1::uuid AND fare_id=$2::uuid AND rider_id=$3::uuid AND status IN('open','reserved') AND dispatch_at<=NOW() AND pickup_at>NOW()-INTERVAL '5 minutes' FOR UPDATE`, bookingID, trip.RideFare.ID, trip.RiderID).Scan(&preferred); err != nil {
+			return nil, ErrFareInvalid
+		}
+	}
+	if consumedAt != nil && bookingID == "" {
 		return nil, ErrFareInvalid
+	}
+	var overlaps bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM scheduled_rides s WHERE s.rider_id=$1::uuid AND s.status IN('open','reserved','dispatched') AND s.id IS DISTINCT FROM NULLIF($2,'')::uuid AND s.ends_at>NOW() AND s.readiness_at<=NOW()+make_interval(secs=>COALESCE((SELECT GREATEST(0,LEAST(86400,(route->'routes'->0->>'duration')::double precision))+900 FROM ride_fares WHERE id=$3::uuid),86400)))`, trip.RiderID, bookingID, trip.RideFare.ID).Scan(&overlaps); err != nil {
+		return nil, err
+	}
+	if overlaps {
+		return nil, ErrScheduledConflict
 	}
 	// A previously issued quote may not start a new trip after its category is
 	// deactivated. Already consumed quotes return their original trip above.
@@ -129,6 +162,17 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 	}
 	if !categoryActive {
 		return nil, ErrPricingUnavailable
+	}
+	// A future-period preview cannot be used to start a cheaper immediate ride.
+	// Scheduled dispatch keeps its previously locked booking fare.
+	if bookingID == "" {
+		var applicable bool
+		if err := tx.QueryRow(ctx, `SELECT f.pricing_version_id IS NULL OR EXISTS(SELECT 1 FROM pricing_versions pv WHERE pv.id=f.pricing_version_id AND pv.status='approved' AND pv.effective_from<=NOW() AND (pv.effective_until IS NULL OR pv.effective_until>NOW())) FROM ride_fares f WHERE f.id=$1::uuid`, trip.RideFare.ID).Scan(&applicable); err != nil {
+			return nil, err
+		}
+		if !applicable {
+			return nil, ErrFareExpired
+		}
 	}
 	if !expires.After(time.Now()) {
 		return nil, ErrFareExpired
@@ -171,6 +215,12 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 	if _, err := tx.Exec(ctx, `UPDATE ride_fares SET consumed_trip_id=$2::UUID,consumed_at=NOW() WHERE id=$1::UUID`, trip.RideFare.ID, trip.ID); err != nil {
 		return nil, err
 	}
+	if err := offers.Reserve(ctx, tx, trip.ID, trip.RideFare.ID, trip.RiderID, bookingID != ""); err != nil {
+		if errors.Is(err, offers.ErrUnavailable) {
+			return nil, ErrFareExpired
+		}
+		return nil, fmt.Errorf("reserve rider offer: %w", err)
+	}
 	if trip.RideFare.NoShowDebtKobo > 0 {
 		var fareCreatedAt time.Time
 		if err := tx.QueryRow(ctx, `SELECT created_at FROM ride_fares WHERE id=$1::UUID AND rider_id=$2::UUID`, trip.RideFare.ID, trip.RiderID).Scan(&fareCreatedAt); err != nil {
@@ -211,6 +261,14 @@ func (r *postgresTripRepo) Create(ctx context.Context, trip *types.TripModel) (*
 			VALUES($1::UUID,$2::UUID,$3::UUID,$4,'pending')`, trip.ID, d.id, d.beneficiary, d.amount); err != nil {
 				return nil, fmt.Errorf("reserve rider no-show debt: %w", err)
 			}
+		}
+	}
+	if bookingID != "" {
+		if _, err := tx.Exec(ctx, `UPDATE scheduled_rides SET status='dispatched',trip_id=$2::uuid,driver_id=$3::uuid,version=version+1,updated_at=NOW() WHERE id=$1::uuid`, bookingID, trip.ID, preferred); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE trips SET preferred_driver_id=$2::uuid WHERE id=$1::uuid`, trip.ID, preferred); err != nil {
+			return nil, err
 		}
 	}
 	if err := enqueueTripEvent(ctx, tx, trip, contracts.TripEventCreated); err != nil {
@@ -343,7 +401,7 @@ func (r *postgresTripRepo) Start(ctx context.Context, tripID, actorID string) (*
 		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `UPDATE trips SET status='started',started_at=NOW(),updated_at=NOW(),version=version+1 WHERE id=$1::UUID AND assigned_driver_id=$2::UUID AND status IN ('accepted','arrived')`, tripID, actorID)
+	result, err := tx.Exec(ctx, `UPDATE trips SET status='started',started_at=NOW(),updated_at=NOW(),version=version+1 WHERE id=$1::UUID AND assigned_driver_id=$2::UUID AND status IN ('accepted','arrived') AND NOT EXISTS(SELECT 1 FROM scheduled_rides s WHERE s.trip_id=trips.id AND s.pickup_at>NOW())`, tripID, actorID)
 	if err != nil {
 		return nil, false, fmt.Errorf("start trip: %w", err)
 	}
@@ -435,11 +493,14 @@ func (r *postgresTripRepo) Complete(ctx context.Context, tripID, actorID string)
 		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `UPDATE trips SET status='completed',completed_at=NOW(),updated_at=NOW(),version=version+1 WHERE id=$1::UUID AND assigned_driver_id=$2::UUID AND status='started'`, tripID, actorID)
+	result, err := tx.Exec(ctx, `UPDATE trips SET status='completed',completed_at=NOW(),updated_at=NOW(),version=version+1 WHERE id=$1::UUID AND assigned_driver_id=$2::UUID AND status='started' AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(stops) stop WHERE stop->>'completedAt' IS NULL)`, tripID, actorID)
 	if err != nil {
 		return nil, false, fmt.Errorf("complete trip: %w", err)
 	}
 	if result.RowsAffected() == 1 {
+		if err := offers.Complete(ctx, tx, tripID); err != nil {
+			return nil, false, fmt.Errorf("apply offer credit: %w", err)
+		}
 		rideCredit, err := referrals.SpendRideCredit(ctx, tx, tripID)
 		if err != nil {
 			return nil, false, fmt.Errorf("apply ride credit: %w", err)

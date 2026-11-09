@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/luxipha/heyGo_backend/shared/geo"
+	"github.com/luxipha/heyGo_backend/shared/offers"
 	tripproto "github.com/luxipha/heyGo_backend/shared/proto/trip"
 	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"math"
@@ -88,6 +89,11 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 
 	authenticated := r.Group("/", middleware, authMiddleware.Authenticate, idempotencyMiddleware(pool))
 	registerReferralRoutes(authenticated, pool)
+	registerRiderTripPayments(authenticated, pool)
+	registerRiderWalletRoutes(authenticated, pool)
+	registerRiderOffers(authenticated, pool)
+	registerFeatureInterest(authenticated, pool)
+	registerScheduledRoutes(authenticated, pool)
 	authenticated.GET("/auth/me", func(ctx *gin.Context) { currentUserHandler(ctx, pool) })
 	authenticated.POST("/auth/register", func(ctx *gin.Context) { registerRoleHandler(ctx, users) })
 	authenticated.GET("/driver/referral", func(ctx *gin.Context) { getDriverHeroReferral(ctx, pool) })
@@ -96,6 +102,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 		registerPhoneSessionRoutes(authenticated, pool)
 		registerRiderIdentityRoutes(authenticated, pool, phoneAuth)
 		registerDriverPhoneRoutes(authenticated, pool, phoneAuth)
+		registerRiderPhoneRoutes(authenticated, pool, phoneAuth)
 	}
 	registerDeviceRoutes(authenticated, pool)
 	registerDriverRoutes(authenticated, pool, files)
@@ -130,6 +137,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	})
 	authenticated.POST("/trips/:tripID/rating", func(ctx *gin.Context) { publishLifecycleCommand(ctx, bus, contracts.TripCmdRate) })
 	registerTripChatRoutes(authenticated, pool)
+	registerRiderTripOptions(authenticated, pool)
 	authenticated.GET("/ws/riders", gatewayauth.RequireRole("rider"), func(ctx *gin.Context) {
 		ridersWSHandler(ctx, bus, connMgr, eventStore)
 	})
@@ -333,23 +341,45 @@ func previewTripHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 		return
 	}
 
+	if err := payload.ValidatePickupTime(time.Now()); err != nil {
+		driverError(ctx, 400, "invalid_pickup_time", err.Error())
+		return
+	}
+	note, noteOK := normalizePickupNote(payload.PickupNote)
+	if !noteOK {
+		driverError(ctx, 400, "invalid_pickup_note", "Pickup notes allow at most 500 characters without control characters")
+		return
+	}
 	var pickupMeta, destinationMeta any
 	if payload.SchemaVersion != 0 && payload.SchemaVersion != 1 {
 		driverError(ctx, 400, "invalid_schema_version", "Unsupported ride schema")
 		return
 	}
 	if payload.SchemaVersion == 1 {
-		if payload.DestinationPlaceID == "" {
-			driverError(ctx, 400, "destination_unconfirmed", "Resolve and confirm a destination before previewing")
+		if payload.DestinationSource != "" && payload.DestinationSource != "pin" {
+			driverError(ctx, 400, "invalid_destination_source", "Use pin for a coordinate destination or omit destinationSource for a place result")
 			return
 		}
-		reply, err := callRideAgent(ctx.Request.Context(), agent.Request{SchemaVersion: 1, PlaceID: payload.DestinationPlaceID})
-		if err != nil || reply.Place == nil {
-			driverError(ctx, 503, "places_unavailable", "Destination resolution is unavailable")
-			return
+		if payload.DestinationSource == "pin" {
+			place, err := pinnedPreviewDestination(payload)
+			if err != nil {
+				driverError(ctx, 400, "invalid_pinned_destination", err.Error())
+				return
+			}
+			destinationMeta = place
+		} else {
+			if payload.DestinationPlaceID == "" {
+				driverError(ctx, 400, "destination_unconfirmed", "Resolve and confirm a destination before previewing")
+				return
+			}
+			reply, err := callRideAgent(ctx.Request.Context(), agent.Request{SchemaVersion: 1, PlaceID: payload.DestinationPlaceID})
+			if err != nil || reply.Place == nil {
+				driverError(ctx, 503, "places_unavailable", "Destination resolution is unavailable")
+				return
+			}
+			destinationMeta = reply.Place
+			payload.Destination = sharedtypes.Coordinate{Latitude: reply.Place.Location.Latitude, Longitude: reply.Place.Location.Longitude}
 		}
-		destinationMeta = reply.Place
-		payload.Destination = sharedtypes.Coordinate{Latitude: reply.Place.Location.Latitude, Longitude: reply.Place.Location.Longitude}
 		pickupMeta = map[string]any{"provider": "device", "name": "Current location", "location": payload.Pickup}
 		if payload.SourceTripID != "" && payload.PickupPlaceID == "" {
 			if _, err := uuid.Parse(payload.SourceTripID); err != nil {
@@ -428,6 +458,9 @@ func previewTripHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 		data["route"] = normalized
 	}
 	fares, _ := data["rideFares"].([]any)
+	etaCtx, etaCancel := context.WithTimeout(ctx.Request.Context(), 4*time.Second)
+	defer etaCancel()
+	etaRoutes := &previewRouteCache{router: geo.DatabaseRoutes{Pool: pool}, routes: make(map[[4]float64]*geo.RouteResponse)}
 	for _, rawFare := range fares {
 		fare, ok := rawFare.(map[string]any)
 		if !ok {
@@ -448,11 +481,32 @@ func previewTripHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 		fare["currency"] = "NGN"
 		fare["expiresAt"] = expiresAt
 		fare["previewId"] = previewID
-		fare["availability"] = map[string]any{"status": "not_checked", "pickupEtaSeconds": nil}
+		if err := enrichFareCategory(ctx.Request.Context(), pool, fareID, user.ID, fare); err != nil {
+			driverError(ctx, 503, "category_unavailable", "Ride category details are unavailable")
+			return
+		}
+		fare["availability"] = previewPickupETA(etaCtx, pool, etaRoutes, fareID, user.ID)
 		data["previewId"] = previewID
 		data["currency"] = "NGN"
 		fare["noShowDebtKobo"] = debt
 		fare["amountDueKobo"] = fareAmount + debt
+		fare["offerDiscountKobo"] = int64(0)
+		if offers.Enabled() {
+			proposal, err := offers.Quote(ctx.Request.Context(), pool, fareID, user.ID, payload.ForScheduled)
+			if err != nil {
+				driverError(ctx, 503, "offers_unavailable", "Offer eligibility could not be checked. Please refresh.")
+				return
+			}
+			fare["offerDiscountKobo"] = proposal.Discount
+			fare["amountDueKobo"] = fareAmount + debt - proposal.Discount
+			fare["goCoinsOnCompletion"] = proposal.Coins
+			fare["expiresAt"] = proposal.Expires
+		}
+		if _, err := pool.Exec(ctx.Request.Context(), `UPDATE ride_fares SET pickup_note=$3 WHERE id=$1::uuid AND rider_id=$2::uuid AND consumed_at IS NULL`, fareID, user.ID, note); err != nil {
+			accountError(ctx)
+			return
+		}
+		fare["pickupNote"] = note
 	}
 	if payload.SchemaVersion == 1 {
 		pickupJSON, _ := json.Marshal(pickupMeta)
@@ -513,21 +567,25 @@ func publicTripError(ctx *gin.Context, err error) bool {
 			code = 404
 		case "fare_expired":
 			code = 410
-		case "fare_foreign", "rider_restricted":
+		case "fare_foreign", "rider_restricted", "rider_contact_verification_required":
 			code = 403
-		case "debt_changed":
+		case "debt_changed", "scheduled_conflict":
 			code = 409
 		case "market_unavailable":
 			code = 409
 		}
 		message := "Ride requests are temporarily unavailable."
 		switch info.Reason {
+		case "scheduled_conflict":
+			message = "This ride may overlap your scheduled pickup. Review your upcoming booking first."
 		case "fare_invalid":
 			message = "This ride option is invalid. Refresh your ride options."
 		case "fare_expired":
 			message = "This ride preview expired. Refresh your ride options."
 		case "fare_foreign":
 			message = "This ride option belongs to another account."
+		case "rider_contact_verification_required":
+			message = "Verify both your email and phone before booking a ride."
 		case "rider_restricted":
 			message = "Ride requests are currently restricted for your account."
 		case "market_unavailable":

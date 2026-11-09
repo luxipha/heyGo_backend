@@ -16,29 +16,46 @@ import (
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/driverstate"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"github.com/luxipha/heyGo_backend/shared/tripstate"
 )
 
 type riderHomeDB interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
-type riderHomeAPI struct{ pool riderHomeDB }
+type riderHomeAPI struct {
+	pool   riderHomeDB
+	router geo.RouteService
+}
 
 type riderTripSnapshot struct {
-	ID               string          `json:"id"`
-	Status           string          `json:"status"`
-	Version          int64           `json:"version"`
-	PackageSlug      string          `json:"packageSlug"`
-	FareKobo         int64           `json:"fareKobo"`
-	NoShowDebtKobo   int64           `json:"noShowDebtKobo"`
-	AmountDueKobo    int64           `json:"amountDueKobo"`
-	RideCreditKobo   int64           `json:"rideCreditKobo"`
-	Currency         string          `json:"currency"`
-	Route            json.RawMessage `json:"route"`
-	Pickup           json.RawMessage `json:"pickup"`
-	Destination      json.RawMessage `json:"destination"`
-	PickupPlace      json.RawMessage `json:"pickupPlace"`
-	DestinationPlace json.RawMessage `json:"destinationPlace"`
+	OfferDiscountKobo   int64               `json:"offerDiscountKobo"`
+	DestinationETA      riderDestinationETA `json:"destinationEta"`
+	ScheduledBookingID  *string             `json:"scheduledBookingId"`
+	ScheduledPickupAt   *time.Time          `json:"scheduledPickupAt"`
+	GoCoinsEarned       int64               `json:"goCoinsEarned"`
+	GoCoinsPromised     int64               `json:"goCoinsPromised"`
+	RidePreferences     json.RawMessage     `json:"ridePreferences"`
+	PreferencesRevision int64               `json:"preferencesRevision"`
+	GuestName           string              `json:"guestName"`
+	GuestPhone          string              `json:"guestPhone"`
+	PickupNote          string              `json:"pickupNote"`
+	Stops               json.RawMessage     `json:"stops"`
+	RouteRevision       int64               `json:"routeRevision"`
+	ID                  string              `json:"id"`
+	Status              string              `json:"status"`
+	Version             int64               `json:"version"`
+	PackageSlug         string              `json:"packageSlug"`
+	FareKobo            int64               `json:"fareKobo"`
+	NoShowDebtKobo      int64               `json:"noShowDebtKobo"`
+	AmountDueKobo       int64               `json:"amountDueKobo"`
+	RideCreditKobo      int64               `json:"rideCreditKobo"`
+	Currency            string              `json:"currency"`
+	Route               json.RawMessage     `json:"route"`
+	Pickup              json.RawMessage     `json:"pickup"`
+	Destination         json.RawMessage     `json:"destination"`
+	PickupPlace         json.RawMessage     `json:"pickupPlace"`
+	DestinationPlace    json.RawMessage     `json:"destinationPlace"`
 
 	MatchingDeadline *time.Time      `json:"matchingDeadline"`
 	MatchingOutcome  *string         `json:"matchingOutcome"`
@@ -53,6 +70,7 @@ type riderTripSnapshot struct {
 	CompletedAt        *time.Time      `json:"completedAt"`
 	CancelledAt        *time.Time      `json:"cancelledAt"`
 	CancellationReason *string         `json:"cancellationReason"`
+	CancellationActor  *string         `json:"cancellationActor"`
 }
 
 func registerRiderHomeRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool) {
@@ -63,6 +81,7 @@ func registerRiderHomeRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool)
 	rider := authenticated.Group("/rider", gatewayauth.RequireRole("rider"))
 	rider.GET("/trips/active", a.activeTrip)
 	rider.GET("/trips/:tripID", a.tripDetail)
+	rider.GET("/trips/:tripID/driver-contact", a.driverContact)
 	rider.GET("/availability", a.availability)
 	rider.GET("/fares/:fareID/trip", a.fareTrip)
 }
@@ -82,20 +101,24 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
 	}
 	var t riderTripSnapshot
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.version,f.package_slug,
- ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo-t.ride_credit_kobo,t.ride_credit_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.matching_deadline,t.matching_outcome,
+ ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo-t.ride_credit_kobo-CASE WHEN t.status='completed' THEN 0 ELSE LEAST(t.offer_discount_kobo,ROUND(f.total_fare_minor)::bigint) END,t.ride_credit_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.matching_deadline,t.matching_outcome,
  (SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'status',a.status,'expiresAt',a.expires_at,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',CASE WHEN a.status='accepted' THEN COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) ELSE NULL END) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND a.status IN ('offered','accepted') ORDER BY a.attempt DESC LIMIT 1),
  CASE WHEN f.pickup IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.pickup::geometry),'longitude',ST_X(f.pickup::geometry)) END,
  CASE WHEN f.destination IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.destination::geometry),'longitude',ST_X(f.destination::geometry)) END,
  CASE WHEN t.status IN ('accepted','arrived','started','completed') AND d.id IS NOT NULL
  THEN jsonb_build_object('id',d.id,'name',d.name,'profilePic',d.profile_pic,'carPlate',COALESCE(t.accepted_vehicle_snapshot->>'plate',d.car_plate),
+ 'joinedAt',d.created_at,'joinedAtBasis','driver_registration',
+ 'ratingAverage',(SELECT ROUND(AVG(r.rating),2) FROM trip_ratings r JOIN trips rated ON rated.id=r.trip_id WHERE r.subject_id=d.id AND r.actor_id=rated.rider_id AND rated.assigned_driver_id=d.id AND rated.status='completed'),
+ 'ratingCount',(SELECT COUNT(*) FROM trip_ratings r JOIN trips rated ON rated.id=r.trip_id WHERE r.subject_id=d.id AND r.actor_id=rated.rider_id AND rated.assigned_driver_id=d.id AND rated.status='completed'),
  'location',CASE WHEN t.status IN ('accepted','arrived','started') AND l.recorded_at>=NOW()-INTERVAL '2 minutes' THEN jsonb_build_object('latitude',ST_Y(l.location::geometry),'longitude',ST_X(l.location::geometry),'recordedAt',l.recorded_at) ELSE NULL END)
- ELSE 'null'::jsonb END,s.status,t.created_at,t.updated_at,t.arrived_at,t.started_at,t.completed_at,t.cancelled_at,t.cancellation_reason
+ ELSE 'null'::jsonb END,s.status,t.created_at,t.updated_at,t.arrived_at,t.started_at,t.completed_at,t.cancelled_at,t.cancellation_reason,
+ CASE WHEN t.status<>'cancelled' THEN NULL WHEN t.cancellation_actor_id=t.rider_id THEN 'rider' WHEN t.cancellation_actor_id=t.assigned_driver_id THEN 'driver' WHEN t.cancellation_actor_id IS NULL THEN 'system' ELSE 'unknown' END,t.ride_preferences,t.preferences_revision,t.guest_name,t.guest_phone,t.pickup_note,t.stops,t.route_revision,LEAST(t.offer_discount_kobo,ROUND(f.total_fare_minor)::bigint)
  FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id
  LEFT JOIN drivers d ON d.id=t.assigned_driver_id
  LEFT JOIN driver_live_locations l ON l.driver_id=d.id
  LEFT JOIN trip_settlements s ON s.trip_id=t.id
  WHERE t.rider_id=$1::UUID AND `+where+` ORDER BY t.created_at DESC,t.id DESC LIMIT 1`, args...).Scan(
-		&t.ID, &t.Status, &t.Version, &t.PackageSlug, &t.FareKobo, &t.NoShowDebtKobo, &t.AmountDueKobo, &t.RideCreditKobo, &t.Route, &t.PickupPlace, &t.DestinationPlace, &t.MatchingDeadline, &t.MatchingOutcome, &t.Assignment, &t.Pickup, &t.Destination, &t.Driver, &t.SettlementStatus, &t.CreatedAt, &t.UpdatedAt, &t.ArrivedAt, &t.StartedAt, &t.CompletedAt, &t.CancelledAt, &t.CancellationReason)
+		&t.ID, &t.Status, &t.Version, &t.PackageSlug, &t.FareKobo, &t.NoShowDebtKobo, &t.AmountDueKobo, &t.RideCreditKobo, &t.Route, &t.PickupPlace, &t.DestinationPlace, &t.MatchingDeadline, &t.MatchingOutcome, &t.Assignment, &t.Pickup, &t.Destination, &t.Driver, &t.SettlementStatus, &t.CreatedAt, &t.UpdatedAt, &t.ArrivedAt, &t.StartedAt, &t.CompletedAt, &t.CancelledAt, &t.CancellationReason, &t.CancellationActor, &t.RidePreferences, &t.PreferencesRevision, &t.GuestName, &t.GuestPhone, &t.PickupNote, &t.Stops, &t.RouteRevision, &t.OfferDiscountKobo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -103,6 +126,21 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
 		return nil, err
 	}
 	t.Currency = "NGN"
+	// Only active pickup/in-trip reads incur routing; terminal history does not.
+	router := a.router
+	if pool, ok := a.pool.(*pgxpool.Pool); ok {
+		if router == nil {
+			router = geo.DatabaseRoutes{Pool: pool}
+		}
+		if err := pool.QueryRow(ctx.Request.Context(), `SELECT (SELECT id::text FROM scheduled_rides WHERE trip_id=$1::uuid),(SELECT pickup_at FROM scheduled_rides WHERE trip_id=$1::uuid)`, t.ID).Scan(&t.ScheduledBookingID, &t.ScheduledPickupAt); err != nil {
+			return nil, err
+		}
+		if err := pool.QueryRow(ctx.Request.Context(), `SELECT t.gocoin_earn_coins,COALESCE((SELECT delta FROM gocoin_entries WHERE trip_id=t.id AND kind='ride_reward'),0) FROM trips t WHERE t.id=$1::uuid AND t.rider_id=$2::uuid`, t.ID, user.ID).Scan(&t.GoCoinsPromised, &t.GoCoinsEarned); err != nil {
+			return nil, err
+		}
+		enrichAssignedPickupETA(ctx.Request.Context(), a.pool, router, &t)
+	}
+	enrichDestinationETA(ctx.Request.Context(), a.pool, router, &t)
 	return &t, nil
 }
 func (a *riderHomeAPI) activeTrip(ctx *gin.Context) {

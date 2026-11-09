@@ -23,7 +23,7 @@ type tripService struct {
 type TripService interface {
 	CreateTrip(ctx context.Context, fare *types.RideFareModel) (*types.TripModel, error)
 	GetRoute(ctx context.Context, pickup, destination *sharedtypes.Coordinate) (*types.OSRMApiResponse, error)
-	GenerateTripFares(ctx context.Context, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate) ([]*types.RideFareModel, error)
+	GenerateTripFares(ctx context.Context, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate, at ...time.Time) ([]*types.RideFareModel, error)
 	GetAndValidateRideFare(ctx context.Context, fareID, riderID string) (*types.RideFareModel, error)
 	AcceptRide(ctx context.Context, tripID string, driver *trip.TripDriver) (*types.TripModel, error)
 	GetTripByID(ctx context.Context, tripID string) (*types.TripModel, error)
@@ -82,11 +82,11 @@ func (s *tripService) GetRoute(ctx context.Context, pickup, destination *sharedt
 
 // GenerateTripFares uses only published pickup-market rates and freezes the
 // selected pricing version on each short-lived fare quote.
-func (s *tripService) GenerateTripFares(ctx context.Context, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate) ([]*types.RideFareModel, error) {
+func (s *tripService) GenerateTripFares(ctx context.Context, riderID string, route *types.OSRMApiResponse, pickup, destination *sharedtypes.Coordinate, at ...time.Time) ([]*types.RideFareModel, error) {
 	if pickup == nil || route == nil || len(route.Routes) == 0 {
 		return nil, repo.ErrPricingUnavailable
 	}
-	pricing, err := s.repo.PricingForQuote(ctx, pickup.Latitude, pickup.Longitude)
+	pricing, err := s.repo.PricingForQuote(ctx, pickup.Latitude, pickup.Longitude, at...)
 	if err != nil {
 		return nil, err
 	}

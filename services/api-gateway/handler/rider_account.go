@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,8 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/storage"
 	"os"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 )
 
@@ -21,6 +24,8 @@ type riderAccountAPI struct {
 	pool        *pgxpool.Pool
 	files       storage.ObjectStore
 	deliveryKey []byte
+	placeMu     sync.Mutex
+	placeCache  map[string]savedPlaceCacheEntry
 }
 
 func registerRiderAccountRoutes(g *gin.RouterGroup, pool *pgxpool.Pool, files storage.ObjectStore) {
@@ -76,7 +81,57 @@ func (a *riderAccountAPI) savedPlaces(c *gin.Context) {
 		accountError(c)
 		return
 	}
-	c.JSON(200, contracts.APIResponse{Data: gin.H{"items": json.RawMessage(data)}})
+	var items []map[string]any
+	if json.Unmarshal(data, &items) != nil {
+		accountError(c)
+		return
+	}
+	lookupCtx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	for _, item := range items {
+		provider, _ := item["provider"].(string)
+		id, _ := item["placeId"].(string)
+		place := a.savedPlaceMetadata(lookupCtx, riderAccountOwner(c), provider, id)
+		if place != nil {
+			item["metadataState"] = "resolved"
+			item["place"] = place
+			item["address"] = place.Address
+		}
+	}
+	c.JSON(200, contracts.APIResponse{Data: gin.H{"items": items}})
+}
+
+type savedPlaceCacheEntry struct {
+	Place     agent.Place
+	ExpiresAt time.Time
+}
+
+// Short-lived, bounded display cache. Stable IDs remain the only persisted data;
+// booking continues to resolve the place authoritatively. Never reuse metadata
+// across providers or owners, and never serve an expired entry as current.
+func (a *riderAccountAPI) savedPlaceMetadata(ctx context.Context, owner, provider, id string) *agent.Place {
+	key := owner + "\x00" + provider + "\x00" + id
+	a.placeMu.Lock()
+	entry, ok := a.placeCache[key]
+	a.placeMu.Unlock()
+	if ok && time.Now().Before(entry.ExpiresAt) {
+		place := entry.Place
+		return &place
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	result, err := callRideAgent(ctx, agent.Request{SchemaVersion: 1, PlaceID: id})
+	if err != nil || result.State != "resolved" || result.Place == nil || result.Place.Provider != provider || result.Place.ID != id {
+		return nil
+	}
+	a.placeMu.Lock()
+	if a.placeCache == nil || len(a.placeCache) >= 256 {
+		a.placeCache = make(map[string]savedPlaceCacheEntry)
+	}
+	a.placeCache[key] = savedPlaceCacheEntry{Place: *result.Place, ExpiresAt: time.Now().Add(5 * time.Minute)}
+	a.placeMu.Unlock()
+	return result.Place
 }
 func (a *riderAccountAPI) putSavedPlace(c *gin.Context) {
 	label := strings.TrimSpace(c.Param("label"))

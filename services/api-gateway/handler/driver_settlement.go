@@ -7,14 +7,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luxipha/heyGo_backend/shared/contracts"
-	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"github.com/luxipha/heyGo_backend/shared/observe/correlation"
 )
 
 type tripSettlementData struct {
+	CollectionMethod   string     `json:"collectionMethod"`
+	ProviderVerified   bool       `json:"providerVerified"`
 	TripID             string     `json:"tripId"`
 	Status             string     `json:"status"`
 	ExpectedAmountKobo int64      `json:"expectedAmountKobo"`
@@ -35,9 +37,9 @@ func (a *driverAPI) tripSettlement(ctx *gin.Context) {
 	}
 	var result tripSettlementData
 	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT s.trip_id::TEXT,s.status,s.expected_amount_kobo,s.fare_amount_kobo,s.no_show_debt_kobo,s.created_at,s.updated_at,s.resolved_at,
-		(SELECT note FROM trip_settlement_actions WHERE trip_id=s.trip_id AND action='disputed' ORDER BY id DESC LIMIT 1)
+		(SELECT note FROM trip_settlement_actions WHERE trip_id=s.trip_id AND action='disputed' ORDER BY id DESC LIMIT 1),s.collection_method,EXISTS(SELECT 1 FROM rider_trip_payments p WHERE p.trip_id=s.trip_id AND p.status='success')
 		FROM trip_settlements s WHERE s.trip_id=$1::UUID AND s.driver_id=$2::UUID`, tripID, driverID(ctx)).Scan(
-		&result.TripID, &result.Status, &result.ExpectedAmountKobo, &result.FareAmountKobo, &result.NoShowDebtKobo, &result.CreatedAt, &result.UpdatedAt, &result.ResolvedAt, &result.DriverNote,
+		&result.TripID, &result.Status, &result.ExpectedAmountKobo, &result.FareAmountKobo, &result.NoShowDebtKobo, &result.CreatedAt, &result.UpdatedAt, &result.ResolvedAt, &result.DriverNote, &result.CollectionMethod, &result.ProviderVerified,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "settlement_not_found", "Settlement is not available for this trip")
@@ -87,16 +89,20 @@ func (a *driverAPI) mutateTripSettlement(ctx *gin.Context, action, note string) 
 		return
 	}
 	defer tx.Rollback(dbctx)
-	var riderID, status string
+	var riderID, status, collectionMethod string
 	var amount, noShowDebtKobo int64
-	err = tx.QueryRow(dbctx, `SELECT rider_id::TEXT,status,expected_amount_kobo,no_show_debt_kobo FROM trip_settlements
-		WHERE trip_id=$1::UUID AND driver_id=$2::UUID FOR UPDATE`, tripID, driverID).Scan(&riderID, &status, &amount, &noShowDebtKobo)
+	err = tx.QueryRow(dbctx, `SELECT rider_id::TEXT,status,expected_amount_kobo,no_show_debt_kobo,collection_method FROM trip_settlements
+		WHERE trip_id=$1::UUID AND driver_id=$2::UUID FOR UPDATE`, tripID, driverID).Scan(&riderID, &status, &amount, &noShowDebtKobo, &collectionMethod)
 	if errors.Is(err, pgx.ErrNoRows) {
 		driverError(ctx, http.StatusNotFound, "settlement_not_found", "Settlement is not available for this trip")
 		return
 	}
 	if err != nil {
 		driverError(ctx, http.StatusServiceUnavailable, "settlement_unavailable", "Settlement is unavailable")
+		return
+	}
+	if collectionMethod == "monnify" && status == "pending" {
+		driverError(ctx, 409, "provider_collection_in_progress", "The Rider is paying through Monnify. Receipt is confirmed by the payment provider.")
 		return
 	}
 	if status == action {

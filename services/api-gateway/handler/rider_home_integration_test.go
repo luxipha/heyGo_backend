@@ -16,6 +16,7 @@ import (
 	gatewayauth "github.com/luxipha/heyGo_backend/services/api-gateway/auth"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	shareddb "github.com/luxipha/heyGo_backend/shared/db"
+	"github.com/luxipha/heyGo_backend/shared/geo"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 )
 
@@ -88,6 +89,41 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 	fare, trip := uuid.NewString(), uuid.NewString()
 	exec(`INSERT INTO ride_fares(id,rider_id,package_slug,total_fare_minor,route,pickup,destination) VALUES($1::UUID,$2::UUID,'sedan',10000,'{}',ST_SetSRID(ST_MakePoint(3.9,6.9),4326)::geography,ST_SetSRID(ST_MakePoint(3.91,6.91),4326)::geography)`, fare, rider)
 	exec(`INSERT INTO trips(id,rider_id,ride_fare_id,assigned_driver_id,status) VALUES($1::UUID,$2::UUID,$3::UUID,$4::UUID,'assigned')`, trip, rider, fare, driver)
+	var driverPhone string
+	if err := tx.QueryRow(ctx, `SELECT phone_e164 FROM users WHERE id=$1::uuid`, driver).Scan(&driverPhone); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"pending", "assigned", "accepted", "arrived", "started", "completed", "cancelled"} {
+		exec(`UPDATE trips SET status=$2 WHERE id=$1::uuid`, trip, state)
+		rec := call("/rider/trips/"+trip+"/driver-contact", rider, api.driverContact, trip)
+		allowed := state == "accepted" || state == "arrived" || state == "started"
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), driverPhone) != allowed || rec.Header().Get("Cache-Control") != "private, no-store" {
+			t.Fatalf("contact %s: %d %s", state, rec.Code, rec.Body.String())
+		}
+		if foreign := call("/rider/trips/"+trip+"/driver-contact", other, api.driverContact, trip); foreign.Code != 404 || strings.Contains(foreign.Body.String(), driverPhone) {
+			t.Fatalf("foreign contact disclosed: %s", foreign.Body.String())
+		}
+	}
+	exec(`UPDATE trips SET status='accepted' WHERE id=$1::uuid`, trip)
+	for _, change := range []string{"phone_verified_at=NULL", "phone_e164=NULL", "active=FALSE"} {
+		exec(`UPDATE users SET `+change+` WHERE id=$1::uuid`, driver)
+		rec := call("/rider/trips/"+trip+"/driver-contact", rider, api.driverContact, trip)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"contact":null`) {
+			t.Fatalf("unavailable contact %s: %s", change, rec.Body.String())
+		}
+		exec(`UPDATE users SET active=TRUE,phone_verified_at=NOW(),phone_e164=$2 WHERE id=$1::uuid`, driver, driverPhone)
+	}
+	if rec := call("/rider/trips/"+uuid.NewString()+"/driver-contact", rider, api.driverContact, uuid.NewString()); rec.Code != 404 {
+		t.Fatal("missing trip contact", rec.Code)
+	}
+	exec(`UPDATE trips SET status='assigned' WHERE id=$1::uuid`, trip)
+	category := map[string]any{}
+	if err := enrichFareCategory(ctx, tx, fare, rider, category); err != nil || category["displayName"] != "Sedan" || category["passengers"] != 4 {
+		t.Fatalf("fare catalogue fields: %v err=%v", category, err)
+	}
+	if err := enrichFareCategory(ctx, tx, fare, other, map[string]any{}); err == nil {
+		t.Fatal("foreign fare category enrichment allowed")
+	}
 	for _, status := range []string{"pending", "assigned", "accepted", "arrived", "started"} {
 		exec(`UPDATE trips SET status=$2 WHERE id=$1::UUID`, trip, status)
 		response := call("/rider/trips/active", rider, api.activeTrip, "")
@@ -113,6 +149,36 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 			t.Fatalf("unscoped location: %s", payload)
 		}
 	}
+	// A started trip exposes destination arrival independently of amendment quotes.
+	etaRouter := &destinationETARouter{}
+	api.router = etaRouter
+	etaResponse := call("/rider/trips/active", rider, api.activeTrip, "")
+	var etaPayload struct {
+		Data struct {
+			Trip struct {
+				DestinationETA riderDestinationETA `json:"destinationEta"`
+			} `json:"trip"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(etaResponse.Body.Bytes(), &etaPayload) != nil || etaResponse.Code != 200 || etaPayload.Data.Trip.DestinationETA.Status != "estimated" || etaPayload.Data.Trip.DestinationETA.EstimatedArrivalAt == nil {
+		t.Fatalf("active destination ETA: %s", etaResponse.Body.String())
+	}
+	etaCalls := len(etaRouter.points)
+	if foreign := call("/rider/trips/"+trip, other, api.tripDetail, trip); foreign.Code != 404 || len(etaRouter.points) != etaCalls {
+		t.Fatal("foreign trip triggered ETA lookup", foreign.Body.String())
+	}
+	exec(`UPDATE driver_live_locations SET recorded_at=NOW()-INTERVAL '3 minutes' WHERE driver_id=$1::uuid`, driver)
+	staleETA := call("/rider/trips/"+trip, rider, api.tripDetail, trip)
+	var detailETAPayload struct {
+		Data struct {
+			DestinationETA riderDestinationETA `json:"destinationEta"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(staleETA.Body.Bytes(), &detailETAPayload) != nil || staleETA.Code != 200 || detailETAPayload.Data.DestinationETA.Status != "unavailable" || len(etaRouter.points) != etaCalls {
+		t.Fatalf("stale GPS ETA: %s", staleETA.Body.String())
+	}
+	exec(`UPDATE driver_live_locations SET recorded_at=NOW() WHERE driver_id=$1::uuid`, driver)
+	api.router = nil
 	var before, after int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_events WHERE recipient_id=$1::UUID`, rider).Scan(&before); err != nil {
 		t.Fatal(err)
@@ -162,6 +228,10 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 		t.Fatal("owned snapshot unavailable or leaks earnings")
 	}
 	exec(`UPDATE trips SET status='completed' WHERE id=$1::UUID`, trip)
+	exec(`INSERT INTO trip_ratings(trip_id,actor_id,subject_id,rating) VALUES($1::uuid,$2::uuid,$3::uuid,4)`, trip, rider, driver)
+	if rec := call("/rider/trips/"+trip, rider, api.tripDetail, trip); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ratingAverage": 4`) && !strings.Contains(rec.Body.String(), `"ratingAverage":4`) || !strings.Contains(rec.Body.String(), `driver_registration`) {
+		t.Fatalf("public driver summary missing: %s", rec.Body.String())
+	}
 	exec(`INSERT INTO trip_settlements(trip_id,driver_id,rider_id,expected_amount_kobo,status) VALUES($1::UUID,$2::UUID,$3::UUID,10000,'pending')`, trip, driver, rider)
 	if rec := call("/rider/trips/active", rider, api.activeTrip, ""); !strings.Contains(rec.Body.String(), trip) {
 		t.Fatal("pending settlement not recovered")
@@ -184,6 +254,29 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 	}
 	exec(`UPDATE driver_vehicles SET review_status='approved',approval_status='approved',approved_at=NOW()+INTERVAL '1 second' WHERE driver_id=$1::uuid`, driver)
 	count(1)
+	exec(`UPDATE ride_fares SET pricing_market_code=$2 WHERE id=$1::uuid`, fare, market)
+	router := &riderETATestRouter{}
+	if eta := previewPickupETA(ctx, tx, router, fare, rider); eta.Seconds == nil || *eta.Seconds != 120 || router.calls != 1 {
+		t.Fatalf("preview ETA: %+v calls=%d", eta, router.calls)
+	}
+	if eta := previewPickupETA(ctx, tx, router, fare, other); eta.Seconds != nil {
+		t.Fatal("foreign fare disclosed availability")
+	}
+	exec(`UPDATE driver_live_locations SET recorded_at=NOW()-INTERVAL '3 minutes' WHERE driver_id=$1::uuid`, driver)
+	if eta := previewPickupETA(ctx, tx, router, fare, rider); eta.Seconds != nil {
+		t.Fatal("stale driver yielded preview ETA")
+	}
+	exec(`UPDATE driver_live_locations SET recorded_at=NOW() WHERE driver_id=$1::uuid`, driver)
+	assigned := &riderTripSnapshot{ID: trip, Status: "accepted", Assignment: json.RawMessage(`{"attempt":1}`)}
+	enrichAssignedPickupETA(ctx, tx, router, assigned)
+	if !strings.Contains(string(assigned.Assignment), `"pickupEtaSeconds":120`) {
+		t.Fatalf("assignment ETA: %s", assigned.Assignment)
+	}
+	assigned.Status = "arrived"
+	enrichAssignedPickupETA(ctx, tx, router, assigned)
+	if !strings.Contains(string(assigned.Assignment), `"pickupEtaSeconds":0`) {
+		t.Fatalf("arrival ETA: %s", assigned.Assignment)
+	}
 	for _, change := range []struct{ name, exclude, restore string }{
 		{"balance", `UPDATE driver_operating_accounts SET balance_kobo=0 WHERE driver_id=$1::UUID`, `UPDATE driver_operating_accounts SET balance_kobo=1 WHERE driver_id=$1::UUID`},
 		{"presence", `UPDATE driver_socket_sessions SET expires_at=NOW()-INTERVAL '1 minute' WHERE driver_id=$1::UUID`, `UPDATE driver_socket_sessions SET expires_at=NOW()+INTERVAL '1 hour' WHERE driver_id=$1::UUID`},
@@ -195,7 +288,15 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 		{"market", `UPDATE drivers SET online_market_code='OTHER' WHERE id=$1::UUID`, `UPDATE drivers SET online_market_code='` + market + `' WHERE id=$1::UUID`},
 		{"radius", `UPDATE drivers SET location=ST_SetSRID(ST_MakePoint(3.8,6.8),4326)::geography WHERE id=$1::UUID`, `UPDATE drivers SET location=ST_SetSRID(ST_MakePoint(3.9,6.9),4326)::geography WHERE id=$1::UUID`},
 	} {
-		t.Run(change.name, func(t *testing.T) { exec(change.exclude, driver); count(0); exec(change.restore, driver); count(1) })
+		t.Run(change.name, func(t *testing.T) {
+			exec(change.exclude, driver)
+			count(0)
+			if eta := previewPickupETA(ctx, tx, router, fare, rider); eta.Seconds != nil {
+				t.Fatalf("ineligible driver included in ETA (%s)", change.name)
+			}
+			exec(change.restore, driver)
+			count(1)
+		})
 	}
 	for _, path := range []string{"/rider/availability?latitude=NaN&longitude=3.9&packageSlug=sedan", "/rider/availability?latitude=6.9&longitude=3.9&packageSlug=unknown"} {
 		if rec := call(path, rider, api.availability, ""); rec.Code != 400 {
@@ -205,11 +306,28 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 	if rec := call("/rider/availability?latitude=0&longitude=0&packageSlug=sedan", rider, api.availability, ""); rec.Code != 409 {
 		t.Fatal("outside market should be unavailable")
 	}
+	for _, item := range []struct {
+		actor any
+		want  string
+	}{{rider, "rider"}, {driver, "driver"}, {nil, "system"}} {
+		exec(`UPDATE trips SET status='cancelled',cancellation_actor_id=$2::uuid WHERE id=$1::uuid`, trip, item.actor)
+		rec := call("/rider/trips/"+trip, rider, api.tripDetail, trip)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"cancellationActor":"`+item.want+`"`) {
+			t.Fatalf("cancellation actor %s: %s", item.want, rec.Body.String())
+		}
+	}
 }
 
 type riderHandoffDB struct {
 	riderHomeDB
 	beforeSnapshot func()
+}
+
+type riderETATestRouter struct{ calls int }
+
+func (r *riderETATestRouter) Route(context.Context, geo.Coordinate, geo.Coordinate) (*geo.RouteResponse, error) {
+	r.calls++
+	return &geo.RouteResponse{Provider: "test", Routes: []geo.Route{{Duration: 120}}}, nil
 }
 
 func (d *riderHandoffDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {

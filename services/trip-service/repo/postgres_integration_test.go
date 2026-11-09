@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/luxipha/heyGo_backend/shared/geo"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,6 +73,32 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 		loadedFare.Destination == nil || loadedFare.Destination.Latitude != 6.50 || loadedFare.Destination.Longitude != 3.40 {
 		t.Fatalf("loaded fare=%#v err=%v", loadedFare, err)
 	}
+
+	// Contact readiness is authoritative even for an otherwise valid owned fare.
+	riderPhone := fmt.Sprintf("+23480%08d", uint64(uuid.MustParse(riderID).ID())%100000000)
+	if _, e := pool.Exec(ctx, `UPDATE users SET phone_e164=$2 WHERE id=$1::uuid`, riderID, riderPhone); e != nil {
+		t.Fatal(e)
+	}
+	for _, change := range []string{
+		"email_verified=FALSE,phone_verified_at=NULL",
+		"email=$2,email_verified=TRUE,phone_verified_at=NULL",
+		"email_verified=FALSE,phone_verified_at=NOW()",
+		"email='',email_verified=TRUE,phone_e164='invalid',phone_verified_at=NOW()",
+	} {
+		args := []any{riderID}
+		if strings.Contains(change, "$2") {
+			args = append(args, riderID+"@example.test")
+		}
+		if _, e := pool.Exec(ctx, `UPDATE users SET `+change+` WHERE id=$1::uuid`, args...); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: fare}); !errors.Is(e, ErrRiderContactUnverified) {
+			t.Fatalf("contact gate %s: %v", change, e)
+		}
+	}
+	if _, e := pool.Exec(ctx, `UPDATE users SET email=$2,email_verified=TRUE,phone_e164=$3,phone_verified_at=NOW() WHERE id=$1::uuid`, riderID, riderID+"@example.test", riderPhone); e != nil {
+		t.Fatal(e)
+	}
 	created, err := repository.Create(ctx, &triptypes.TripModel{ID: tripID, RiderID: riderID, Status: "pending", RideFare: fare})
 	if err != nil {
 		t.Fatalf("create trip: %v", err)
@@ -113,9 +141,16 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE ride_fares SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1::UUID`, fareID); err != nil {
 		t.Fatal(err)
 	}
+	// Recovering an existing trip is not a new booking and remains available.
+	if _, e := pool.Exec(ctx, `UPDATE users SET email_verified=FALSE,phone_verified_at=NULL WHERE id=$1::uuid`, riderID); e != nil {
+		t.Fatal(e)
+	}
 	retried, err := repository.Create(ctx, &triptypes.TripModel{ID: uuid.NewString(), RiderID: riderID, Status: "pending", RideFare: fare})
 	if err != nil || retried.ID != tripID {
 		t.Fatalf("single-use recovery trip=%v err=%v", retried, err)
+	}
+	if _, e := pool.Exec(ctx, `UPDATE users SET email_verified=TRUE,phone_verified_at=NOW() WHERE id=$1::uuid`, riderID); e != nil {
+		t.Fatal(e)
 	}
 	newFare := func() *triptypes.RideFareModel {
 		copy := *fare
@@ -145,8 +180,12 @@ func TestPostgresTripRepositoryPersistsFareAndTrip(t *testing.T) {
 	if !errors.Is(err, ErrFareExpired) {
 		t.Fatalf("expired fare: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE trips SET status='cancelled' WHERE id=$1::UUID`, tripID); err != nil {
-		t.Fatal(err)
+	if _, changed, err := repository.Cancel(ctx, tripID, riderID, "Changed plans"); err != nil || !changed {
+		t.Fatalf("cancel: changed=%v err=%v", changed, err)
+	}
+	var cancellationActor string
+	if err := pool.QueryRow(ctx, `SELECT payload->'trip'->>'cancellationActor' FROM trip_event_outbox WHERE trip_id=$1::uuid AND topic='trip.event.cancelled' AND recipient_id=$2::uuid`, tripID, riderID).Scan(&cancellationActor); err != nil || cancellationActor != "rider" {
+		t.Fatalf("cancel event actor=%s err=%v", cancellationActor, err)
 	}
 	var wg sync.WaitGroup
 	results := make(chan error, 2)

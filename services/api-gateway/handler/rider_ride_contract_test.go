@@ -43,7 +43,7 @@ func TestRiderMutationsRequireConfirmation(t *testing.T) {
 	}
 }
 func TestRiderQuoteErrorsRemainDistinguishable(t *testing.T) {
-	for reason, want := range map[string]int{"fare_invalid": 404, "fare_foreign": 403, "fare_expired": 410, "rider_restricted": 403, "debt_changed": 409, "market_unavailable": 409, "trip_service_unavailable": 503} {
+	for reason, want := range map[string]int{"fare_invalid": 404, "fare_foreign": 403, "fare_expired": 410, "rider_restricted": 403, "rider_contact_verification_required": 403, "debt_changed": 409, "market_unavailable": 409, "trip_service_unavailable": 503} {
 		s, err := status.New(codes.FailedPrecondition, reason).WithDetails(&errdetails.ErrorInfo{Domain: "heygo.rider", Reason: reason})
 		if err != nil {
 			t.Fatal(err)

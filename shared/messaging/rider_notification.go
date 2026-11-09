@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
+	"strings"
 )
 
 // Rider notification data is an allowlisted navigation hint, never event data.
@@ -23,6 +24,20 @@ func riderNotificationForEvent(kind string, raw json.RawMessage) *InboxNotificat
 		id, _ = t["id"].(string)
 	}
 	target, category, title := "trip", "ride_updates", "Ride updated"
+	if strings.HasPrefix(kind, "scheduled.event.") {
+		if p["audience"] != "rider" {
+			return nil
+		}
+		booking, _ := p["bookingId"].(string)
+		if uuid.Validate(booking) != nil {
+			return nil
+		}
+		data, _ := json.Marshal(map[string]any{"version": 1, "target": map[string]string{"kind": "scheduled_ride", "id": booking}})
+		if kind == "scheduled.event.rider_reminder" {
+			return &InboxNotification{Type: "ride_updates", Title: "Your scheduled ride is coming up", Message: "Open your booking to check the pickup time and Driver status.", Data: data}
+		}
+		return &InboxNotification{Type: "ride_updates", Title: "Scheduled ride updated", Message: "Open HeyGo to review your upcoming ride.", Data: data}
+	}
 	switch kind {
 	case contracts.TripEventCreated:
 		title = "Ride requested"
@@ -89,6 +104,10 @@ func (s *EventStore) createRiderNotificationTx(ctx context.Context, tx pgx.Tx, r
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM support_cases c JOIN users u ON u.id=c.opened_by WHERE c.id=$1::UUID AND c.opened_by=$2::UUID AND c.audience='rider' AND u.active AND u.roles @> ARRAY['rider'])`, hint.Target.ID, recipient).Scan(&owned); err != nil {
 			return err
 		}
+	} else if hint.Target.Kind == "scheduled_ride" {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM scheduled_rides WHERE id=$1::uuid AND rider_id=$2::uuid)`, hint.Target.ID, recipient).Scan(&owned); err != nil {
+			return err
+		}
 	} else {
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM trips t JOIN users u ON u.id=t.rider_id WHERE t.id=$1::UUID AND t.rider_id=$2::UUID AND u.active AND u.roles @> ARRAY['rider'])`, hint.Target.ID, recipient).Scan(&owned); err != nil {
 			return err
@@ -120,7 +139,7 @@ func AppendRiderBroadcastTx(ctx context.Context, tx pgx.Tx, recipient, broadcast
 	if !owned {
 		return fmt.Errorf("broadcast recipient not owned")
 	}
-	if n.Type != "account_alerts" && n.Type != "promotions" {
+	if n.Type != "account_alerts" && n.Type != "promotions" && n.Type != "feedback" {
 		return fmt.Errorf("unsupported broadcast notification type")
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::UUID::TEXT,0))`, recipient); err != nil {

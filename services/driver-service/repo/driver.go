@@ -135,6 +135,32 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 	if tripStatus != "pending" {
 		return nil, ErrTripAlreadyMatched
 	}
+	var pickupNote string
+	var scheduledID *string
+	var scheduledAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT t.pickup_note,s.id::text,s.pickup_at FROM trips t LEFT JOIN scheduled_rides s ON s.trip_id=t.id WHERE t.id=$1::uuid`, tripID).Scan(&pickupNote, &scheduledID, &scheduledAt); err != nil {
+		return nil, err
+	}
+	var offerSource map[string]any
+	if err := json.Unmarshal(payload, &offerSource); err != nil {
+		return nil, err
+	}
+	if offerSource == nil {
+		return nil, fmt.Errorf("invalid trip offer payload")
+	}
+	if trip, ok := offerSource["trip"].(map[string]any); ok {
+		trip["pickupNote"] = pickupNote
+		if scheduledID != nil {
+			trip["scheduledBookingId"] = *scheduledID
+			trip["scheduledPickupAt"] = scheduledAt
+		}
+	} else {
+		offerSource["pickupNote"] = pickupNote
+	}
+	payload, err = json.Marshal(offerSource)
+	if err != nil {
+		return nil, err
+	}
 	if !deadline.After(time.Now()) {
 		if err := finishMatching(ctx, tx, tripID, "timeout"); err != nil {
 			return nil, err
@@ -149,8 +175,8 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 	err = tx.QueryRow(ctx, `SELECT d.id::TEXT,d.name,d.profile_pic,d.car_plate,d.package_slug,ST_Y(d.location::geometry),ST_X(d.location::geometry),ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)
 	FROM drivers d JOIN users u ON u.id=d.id JOIN driver_eligibility e ON e.driver_id=d.id
 	JOIN driver_live_locations l ON l.driver_id=d.id JOIN trips t ON t.id=$5::UUID
-	WHERE `+driverstate.AvailabilityPredicate("t.market_code", "$1", "ST_SetSRID(ST_MakePoint($3,$2),4326)::geography", "$4")+` AND driver_ride_preference_matches(d.id,t.id) AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
-	ORDER BY ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-LEAST(GREATEST(COALESCE(u.provider_trust_score,100)-100,0)*2,$6),d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID, trustDistanceAdvantageMeters).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
+	WHERE `+driverstate.AvailabilityPredicateForTrip("t.market_code", "$1", "ST_SetSRID(ST_MakePoint($3,$2),4326)::geography", "$4", "t.id")+` AND driver_ride_preference_matches(d.id,t.id) AND NOT EXISTS(SELECT 1 FROM driver_assignments a WHERE a.trip_id=$5::UUID AND a.driver_id=d.id)
+	ORDER BY CASE WHEN d.id=t.preferred_driver_id THEN 0 ELSE 1 END,ST_Distance(d.location,ST_SetSRID(ST_MakePoint($3,$2),4326)::geography)-LEAST(GREATEST(COALESCE(u.provider_trust_score,100)-100,0)*2,$6),d.last_seen_at DESC FOR UPDATE OF d SKIP LOCKED LIMIT 1`, packageSlug, lat, lng, radius, tripID, trustDistanceAdvantageMeters).Scan(&c.Driver.Id, &c.Driver.Name, &c.Driver.ProfilePic, &c.Driver.CarPlate, &c.Driver.PackageSlug, &c.Driver.Location.Latitude, &c.Driver.Location.Longitude, &c.Distance)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := finishMatching(ctx, tx, tripID, "no_drivers"); err != nil {
 			return nil, err
@@ -226,7 +252,7 @@ func mergeNoShowDebtOfferFields(source, tripJSON []byte) ([]byte, error) {
 	}
 	debt, hasDebt := sourceTrip["noShowDebtKobo"]
 	due, hasDue := sourceTrip["amountDueKobo"]
-	if !hasDebt && !hasDue {
+	if !hasDebt && !hasDue && sourceTrip["pickupNote"] == nil && sourceTrip["scheduledBookingId"] == nil {
 		return tripJSON, nil
 	}
 	var destination map[string]json.RawMessage
@@ -244,6 +270,14 @@ func mergeNoShowDebtOfferFields(source, tripJSON []byte) ([]byte, error) {
 	if hasDue {
 		selected["amountDueKobo"] = due
 		destination["amountDueKobo"] = due
+	}
+	if note, ok := sourceTrip["pickupNote"]; ok {
+		destination["pickupNote"] = note
+	}
+	for _, key := range []string{"scheduledBookingId", "scheduledPickupAt"} {
+		if v, ok := sourceTrip[key]; ok {
+			destination[key] = v
+		}
 	}
 	selectedJSON, err := json.Marshal(selected)
 	if err != nil {

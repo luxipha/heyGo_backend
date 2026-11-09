@@ -74,10 +74,12 @@ func (x *Coordinate) GetLongitude() float64 {
 }
 
 type PreviewTripRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RiderID       string                 `protobuf:"bytes,1,opt,name=riderID,proto3" json:"riderID,omitempty"`
-	Pickup        *Coordinate            `protobuf:"bytes,2,opt,name=pickup,proto3" json:"pickup,omitempty"`
-	Destination   *Coordinate            `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	RiderID     string                 `protobuf:"bytes,1,opt,name=riderID,proto3" json:"riderID,omitempty"`
+	Pickup      *Coordinate            `protobuf:"bytes,2,opt,name=pickup,proto3" json:"pickup,omitempty"`
+	Destination *Coordinate            `protobuf:"bytes,3,opt,name=destination,proto3" json:"destination,omitempty"`
+	// RFC3339 pickup time for a scheduled preview; empty for immediate rides.
+	PickupAt      string `protobuf:"bytes,4,opt,name=pickupAt,proto3" json:"pickupAt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -131,6 +133,13 @@ func (x *PreviewTripRequest) GetDestination() *Coordinate {
 		return x.Destination
 	}
 	return nil
+}
+
+func (x *PreviewTripRequest) GetPickupAt() string {
+	if x != nil {
+		return x.PickupAt
+	}
+	return ""
 }
 
 type Geometry struct {
@@ -654,11 +663,12 @@ const file_trip_proto_rawDesc = "" +
 	"\n" +
 	"Coordinate\x12\x1a\n" +
 	"\blatitude\x18\x01 \x01(\x01R\blatitude\x12\x1c\n" +
-	"\tlongitude\x18\x02 \x01(\x01R\tlongitude\"\x8c\x01\n" +
+	"\tlongitude\x18\x02 \x01(\x01R\tlongitude\"\xa8\x01\n" +
 	"\x12PreviewTripRequest\x12\x18\n" +
 	"\ariderID\x18\x01 \x01(\tR\ariderID\x12(\n" +
 	"\x06pickup\x18\x02 \x01(\v2\x10.trip.CoordinateR\x06pickup\x122\n" +
-	"\vdestination\x18\x03 \x01(\v2\x10.trip.CoordinateR\vdestination\">\n" +
+	"\vdestination\x18\x03 \x01(\v2\x10.trip.CoordinateR\vdestination\x12\x1a\n" +
+	"\bpickupAt\x18\x04 \x01(\tR\bpickupAt\">\n" +
 	"\bGeometry\x122\n" +
 	"\vcoordinates\x18\x01 \x03(\v2\x10.trip.CoordinateR\vcoordinates\"\xd5\x01\n" +
 	"\x05Route\x12*\n" +

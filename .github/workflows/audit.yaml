@@ -55,6 +55,13 @@ jobs:
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Run isolated offer integration tests
+        env:
+          OFFERS_TEST_DATABASE_URL: postgres://heygo:heygo-test@localhost:5432/heygo_offers_test?sslmode=disable
+        run: |
+          docker exec "${{ job.services.postgres.id }}" createdb -U heygo heygo_offers_test
+          go test -race ./shared/offers
+
       - name: Validate HeyGo automation
         run: python3 tools/skills/test_tools.py
 

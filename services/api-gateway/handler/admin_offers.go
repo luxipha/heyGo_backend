@@ -88,14 +88,21 @@ func (a *adminAPI) activateOffer(c *gin.Context) {
 			return
 		}
 	}
+	if b.Zones == nil {
+		b.Zones = []string{}
+	}
+	if zonesOK, e := offers.ApprovedZones(c.Request.Context(), tx, b.Zones, b.Markets, b.Ends); e != nil || !zonesOK {
+		driverError(c, 400, "invalid_zone", "Zones must be approved regions or airports inside the offer's markets and effective until the offer ends.")
+		return
+	}
 	b.ID = id.String()
 	b.Active = true
-	_, e = tx.Exec(c.Request.Context(), `INSERT INTO rider_offers(id,title,message,kind,discount_kobo,multiplier,code,starts_at,ends_at,market_codes,category_slugs,airport_only,start_hour,end_hour,timezone,budget_kobo,max_uses,per_rider_limit,created_by)VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::uuid)`, id, b.Title, b.Message, b.Kind, b.Discount, b.Multiplier, b.Code, b.Starts, b.Ends, b.Markets, b.Categories, b.AirportOnly, b.StartHour, b.EndHour, b.Timezone, b.Budget, b.MaxUses, b.PerRider, currentAdmin(c).ID)
+	_, e = tx.Exec(c.Request.Context(), `INSERT INTO rider_offers(id,title,message,kind,discount_kobo,multiplier,code,starts_at,ends_at,market_codes,category_slugs,airport_only,start_hour,end_hour,timezone,budget_kobo,max_uses,per_rider_limit,created_by,zone_ids)VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::uuid,$20::text[]::uuid[])`, id, b.Title, b.Message, b.Kind, b.Discount, b.Multiplier, b.Code, b.Starts, b.Ends, b.Markets, b.Categories, b.AirportOnly, b.StartHour, b.EndHour, b.Timezone, b.Budget, b.MaxUses, b.PerRider, currentAdmin(c).ID, b.Zones)
 	if e != nil {
 		driverError(c, 409, "offer_conflict", "This draft is already published or its code is in use.")
 		return
 	}
-	if e = adminAudit(c, tx, "promotion.activated", id.String(), gin.H{"reason": b.Reason, "kind": b.Kind, "budgetKobo": b.Budget, "hasCode": b.Code != ""}); e == nil {
+	if e = adminAudit(c, tx, "promotion.activated", "", gin.H{"campaignId": id.String(), "reason": b.Reason, "kind": b.Kind, "budgetKobo": b.Budget, "hasCode": b.Code != "", "zoneIds": b.Zones}); e == nil {
 		e = tx.Commit(c.Request.Context())
 	}
 	if e != nil {
@@ -127,7 +134,7 @@ func (a *adminAPI) disableOffer(c *gin.Context) {
 		driverError(c, 404, "offer_not_found", "Offer not found.")
 		return
 	}
-	if e = adminAudit(c, tx, "promotion.disabled", id.String(), gin.H{"reason": b.Reason}); e == nil {
+	if e = adminAudit(c, tx, "promotion.disabled", "", gin.H{"campaignId": id.String(), "reason": b.Reason}); e == nil {
 		e = tx.Commit(c.Request.Context())
 	}
 	if e != nil {

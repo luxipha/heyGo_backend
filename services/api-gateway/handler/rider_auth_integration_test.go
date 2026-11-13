@@ -101,6 +101,12 @@ func TestRiderAuthEnrollmentRotationAndRevocation(t *testing.T) {
 				_, _ = pool.Exec(cleanup, `DELETE FROM auth_otp_challenges WHERE channel=$1 AND destination=$2`, channel, destination)
 			}()
 			for login := 0; login < 2; login++ {
+				if login > 0 {
+					// A real person waits out the resend cooldown between sign-ins.
+					if _, err := pool.Exec(context.Background(), `UPDATE auth_otp_challenges SET created_at=created_at-INTERVAL '2 minutes' WHERE channel=$1 AND destination=$2`, channel, destination); err != nil {
+						t.Fatal(err)
+					}
+				}
 				status, requested := call(http.MethodPost, "/auth/"+channel+"/otp/request", "", map[string]string{channel: destination})
 				requireStatus(http.StatusAccepted, status, "OTP request")
 				challenge := requested["data"].(map[string]any)["challengeId"].(string)

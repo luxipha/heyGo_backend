@@ -165,10 +165,17 @@ func TestDriverPINRecovery(t *testing.T) {
 		call("/reset", gin.H{"challengeId": phoneID, "code": bad, "newPin": "8888"}, 401)
 	}
 	call("/reset", gin.H{"challengeId": phoneID, "code": phoneCode, "newPin": "8888"}, 401)
+	// A real person waits out the 60-second resend cooldown between requests.
+	waitOutCooldown := func() {
+		exec(`UPDATE auth_otp_challenges SET created_at=created_at-INTERVAL '2 minutes' WHERE channel='phone' AND destination=$1`, phone)
+	}
+	waitOutCooldown()
 	expired := request("phone", phone)
 	exec(`UPDATE auth_otp_challenges SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1::uuid`, expired)
 	call("/reset", gin.H{"challengeId": expired, "code": sender.code, "newPin": "8888"}, 401)
 	// Durable request limit is shared with normal OTP requests for the destination.
+	waitOutCooldown()
 	request("phone", phone)
+	waitOutCooldown()
 	call("/request", gin.H{"channel": "phone", "destination": phone}, 429)
 }

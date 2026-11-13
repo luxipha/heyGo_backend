@@ -43,7 +43,7 @@ func Quote(ctx context.Context, pool *pgxpool.Pool, fare, rider string, schedule
 	if err != pgx.ErrNoRows {
 		return out, err
 	}
-	rows, err := tx.Query(ctx, `SELECT `+Columns+` FROM rider_offers WHERE active AND starts_at<=NOW() AND ends_at>NOW() AND $1=ANY(market_codes) AND $2=ANY(category_slugs) AND (NOT airport_only OR $3) AND (code IS NULL OR EXISTS(SELECT 1 FROM rider_offer_claims c WHERE c.offer_id=rider_offers.id AND c.rider_id=$4::uuid)) ORDER BY id`, market, category, airport, rider)
+	rows, err := tx.Query(ctx, `SELECT `+Columns+` FROM rider_offers WHERE active AND starts_at<=NOW() AND ends_at>NOW() AND $1=ANY(market_codes) AND $2=ANY(category_slugs) AND (NOT airport_only OR $3) AND `+ZoneScopeSQL("$5")+` AND (code IS NULL OR EXISTS(SELECT 1 FROM rider_offer_claims c WHERE c.offer_id=rider_offers.id AND c.rider_id=$4::uuid)) ORDER BY id`, market, category, airport, rider, fare)
 	if err != nil {
 		return out, err
 	}

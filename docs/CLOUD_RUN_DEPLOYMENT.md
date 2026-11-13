@@ -98,4 +98,4 @@ readiness checks PostgreSQL and Pub/Sub, not candidate Trip/Driver behavior.
 Require cloud-staging auth/matching/trip/payment/recovery evidence before
 production promotion. Apply migration 064 before Payment Service and verify the
 authenticated payment-event recovery Scheduler job. See
-[PAYMENT_EVENT_RECOVERY.md](PAYMENT_EVENT_RECOVERY.md).
+[archived payment-event recovery notes](https://github.com/luxipha/heyGo_backend/blob/98f4e8c88349b93b296d75d70e46691df762bac9/docs/PAYMENT_EVENT_RECOVERY.md).

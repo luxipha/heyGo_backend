@@ -10,6 +10,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"math"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/luxipha/heyGo_backend/services/ride-agent-gateway/agent"
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/driverstate"
+	"github.com/luxipha/heyGo_backend/shared/httpmiddleware"
 	"github.com/luxipha/heyGo_backend/shared/messaging"
 	"github.com/luxipha/heyGo_backend/shared/messaging/pubsub"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
@@ -39,6 +41,9 @@ import (
 // NewHTTPHandler initializes the HTTP handler with routes and middleware
 func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, authMiddleware *gatewayauth.Middleware, users gatewayauth.UserStore, pool *pgxpool.Pool, files storage.ObjectStore, allowedOrigins []string, phoneAuth PhoneAuthConfig, readiness func(context.Context) error, eventStores ...*messaging.EventStore) *gin.Engine {
 	r := gin.New()
+	// No implicit trust-all forwarding headers. Cloud Run adds one trusted hop.
+	_ = r.SetTrustedProxies(nil)
+	r.Use(httpmiddleware.ClientIPMiddleware(os.Getenv("K_SERVICE") != ""))
 	r.Use(stripCredentialQuery, gin.Recovery())
 	eventStore := messaging.NewEventStore(pool)
 	if len(eventStores) > 0 && eventStores[0] != nil {

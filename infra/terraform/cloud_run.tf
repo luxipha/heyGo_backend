@@ -13,11 +13,12 @@ locals {
     INTERNAL_SERVICE_TOKEN = "internal-service-token"
   }
   payment_service_secrets = {
-    DATABASE_URL           = "database-url"
-    INTERNAL_SERVICE_TOKEN = "internal-service-token"
-    MONNIFY_API_KEY        = "monnify-api-key"
-    MONNIFY_SECRET_KEY     = "monnify-secret-key"
-    MONNIFY_CONTRACT_CODE  = "monnify-contract-code"
+    HEYGO_ADMIN_SETTINGS_KEY = "admin-settings-key"
+    DATABASE_URL             = "database-url"
+    INTERNAL_SERVICE_TOKEN   = "internal-service-token"
+    MONNIFY_API_KEY          = "monnify-api-key"
+    MONNIFY_SECRET_KEY       = "monnify-secret-key"
+    MONNIFY_CONTRACT_CODE    = "monnify-contract-code"
   }
   trip_service_secrets = {
     DATABASE_URL           = "database-url"

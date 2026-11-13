@@ -134,14 +134,11 @@ func (a *riderIdentityAPI) requestContact(c *gin.Context, purpose string) {
 		driverError(c, 409, "contact_unavailable", "This contact cannot be linked")
 		return
 	}
-	var count int
-	if err = tx.QueryRow(c.Request.Context(), `SELECT COUNT(*) FROM rider_contact_challenges WHERE rider_id=$1::UUID AND created_at>NOW()-INTERVAL '10 minutes'`, riderAccountOwner(c)).Scan(&count); err != nil {
-		accountError(c)
-		return
+	destinations := []string{dest}
+	if channel == "phone" {
+		destinations = append(destinations, current)
 	}
-	if count >= otpRequestsPerTenMinutes {
-		c.Header("Retry-After", "600")
-		driverError(c, 429, "otp_rate_limited", "Please wait before requesting another code")
+	if !reserveOTPBudget(c, tx, channel, riderAccountOwner(c), destinations...) {
 		return
 	}
 	newCode, err := newOTPCode()

@@ -134,6 +134,10 @@ func TestReviewOTPRealSessionScopeAndRevocation(t *testing.T) {
 		t.Fatal("Normal delivery changed")
 	}
 	auth.emailSender = nil
+	// A real person waits out the 60-second resend cooldown between requests.
+	if _, e = pool.Exec(ctx, `UPDATE auth_otp_challenges SET created_at=created_at-INTERVAL '2 minutes' WHERE channel='email' AND destination=$1`, email); e != nil {
+		t.Fatal(e)
+	}
 	pending := req("POST", "/request", fmt.Sprintf(`{"email":%q}`, email), "")
 	if pending.Code != 202 {
 		t.Fatal("Pending challenge failed")
@@ -155,6 +159,9 @@ func TestReviewOTPRealSessionScopeAndRevocation(t *testing.T) {
 	}
 	if req("PUT", "/settings", settings(true, 2), "").Code != 200 {
 		t.Fatal("Re-enable failed")
+	}
+	if _, e = pool.Exec(ctx, `UPDATE auth_otp_challenges SET created_at=created_at-INTERVAL '2 minutes' WHERE channel='email' AND destination=$1`, email); e != nil {
+		t.Fatal(e)
 	}
 	attempt := req("POST", "/request", fmt.Sprintf(`{"email":%q}`, email), "")
 	if attempt.Code != 202 {

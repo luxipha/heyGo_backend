@@ -49,7 +49,7 @@ func adminAuditTarget(action, driverID string, details any) (string, string) {
 		{"heroPaymentId", "hero_payment"}, {"heroId", "hero"}, {"simulationParticipantId", "simulation_participant"}, {"simulationRunId", "simulation_run"}, {"targetStaffId", "staff"}, {"incidentId", "incident"}, {"refundId", "refund"}, {"caseId", "support_case"},
 		{"geofenceId", "geofence"}, {"policyId", "policy"}, {"ruleId", "statutory_rule"},
 		{"claimId", "no_show_claim"}, {"inspectionId", "inspection"}, {"documentId", "document"},
-		{"tripId", "trip"}, {"requestId", "request"},
+		{"tripId", "trip"}, {"requestId", "request"}, {"campaignId", "campaign"},
 	} {
 		if value, ok := input[candidate.key].(string); ok && value != "" {
 			return candidate.kind, value

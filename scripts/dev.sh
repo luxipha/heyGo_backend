@@ -57,6 +57,10 @@ fi
 # Run a single service in the foreground so its logs stream to this terminal.
 run_one() {
 	svc="$1"
+	case "$svc" in
+		driver-service) GRPC_ADDR="${DRIVER_GRPC_ADDR:-${GRPC_ADDR:-:9100}}"; export GRPC_ADDR ;;
+		trip-service) GRPC_ADDR="${TRIP_GRPC_ADDR:-${GRPC_ADDR:-:9000}}"; export GRPC_ADDR ;;
+	esac
 	if [ -n "$watch" ]; then
 		if ! command -v air >/dev/null 2>&1; then
 			echo "error: air not found. Install it with:" >&2
@@ -89,7 +93,11 @@ for svc in $SERVICES; do
 	fi
 	echo "building $svc..."
 	go build -o "$DEV_DIR/bin/$svc" "./services/$svc"
-	nohup "$DEV_DIR/bin/$svc" > "$DEV_DIR/$svc.log" 2>&1 &
+	case "$svc" in
+		driver-service) GRPC_ADDR="${DRIVER_GRPC_ADDR:-:9100}" nohup "$DEV_DIR/bin/$svc" > "$DEV_DIR/$svc.log" 2>&1 & ;;
+		trip-service) GRPC_ADDR="${TRIP_GRPC_ADDR:-:9000}" nohup "$DEV_DIR/bin/$svc" > "$DEV_DIR/$svc.log" 2>&1 & ;;
+		*) nohup "$DEV_DIR/bin/$svc" > "$DEV_DIR/$svc.log" 2>&1 & ;;
+	esac
 	echo $! > "$pid_file"
 	echo "started $svc (pid $!) -> .dev/$svc.log"
 done
@@ -97,6 +105,6 @@ done
 echo
 echo "api-gateway  http://localhost:8080/health"
 echo "payment      http://localhost:9200/health"
-echo "trip (gRPC)  localhost:9000    driver (gRPC)  localhost:9100"
+echo "trip (gRPC)  ${TRIP_GRPC_ADDR:-localhost:9000}    driver (gRPC)  ${DRIVER_GRPC_ADDR:-localhost:9100}"
 echo
 echo "stop with: ./scripts/dev-stop.sh"

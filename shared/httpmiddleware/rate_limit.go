@@ -14,17 +14,18 @@ type visitor struct {
 	reset time.Time
 }
 type RateLimiter struct {
-	mu       sync.Mutex
-	limit    int
-	window   time.Duration
-	visitors map[string]visitor
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	visitors  map[string]visitor
+	nextSweep time.Time
 }
 
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 	return &RateLimiter{limit: limit, window: window, visitors: make(map[string]visitor)}
 }
 
-func (l *RateLimiter) Middleware(ctx *gin.Context) { l.MiddlewareForKey(ctx, "ip:"+ctx.ClientIP()) }
+func (l *RateLimiter) Middleware(ctx *gin.Context) { l.MiddlewareForKey(ctx, "ip:"+ClientIP(ctx)) }
 
 // MiddlewareForKey accepts only a trusted server-derived identity, never raw client input.
 func (l *RateLimiter) MiddlewareForKey(ctx *gin.Context, key string) {
@@ -34,6 +35,14 @@ func (l *RateLimiter) MiddlewareForKey(ctx *gin.Context, key string) {
 	}
 	now := time.Now()
 	l.mu.Lock()
+	if !now.Before(l.nextSweep) {
+		for k, v := range l.visitors {
+			if !now.Before(v.reset) {
+				delete(l.visitors, k)
+			}
+		}
+		l.nextSweep = now.Add(l.window)
+	}
 	entry := l.visitors[key]
 	if entry.reset.Before(now) {
 		entry = visitor{reset: now.Add(l.window)}

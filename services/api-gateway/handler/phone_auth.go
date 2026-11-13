@@ -33,6 +33,28 @@ const otpLifetime = 5 * time.Minute
 const otpMaxAttempts = 5
 const otpRequestsPerTenMinutes = 3
 
+// Per-destination request limits for sign-in and PIN-recovery codes. Every
+// accepted request sends a billable SMS or an email, so a person who keeps
+// asking without using the code must be stopped well before the old ceiling
+// (3 per 10 minutes, about 430 per day).
+const (
+	otpResendCooldown   = 60 * time.Second
+	otpRequestsPerHour  = 5
+	otpRequestsPerDay   = 10
+	otpRetryAfterHour   = 60 * 60
+	otpRetryAfterDay    = 24 * 60 * 60
+	otpRetryAfterWindow = 10 * 60
+)
+
+type otpQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// otpRequestAllowance includes all send paths, including consumed and failed sends.
+func otpRequestAllowance(ctx context.Context, q otpQuerier, channel, destination string) (bool, int, string, error) {
+	return otpBudgetAllowance(ctx, q, channel, destination, "", 1)
+}
+
 type SMSSender interface {
 	SendOTP(context.Context, string, string) error
 }
@@ -256,20 +278,18 @@ func (a *phoneAuthAPI) requestPurposeChallenge(ctx *gin.Context, channel, destin
 		return
 	}
 	defer tx.Rollback(ctx.Request.Context())
-	// Serialize requests for one destination so concurrent calls cannot bypass
-	// the durable rate limit.
-	if _, err := tx.Exec(ctx.Request.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, channel+":"+destination); err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
-		return
+	ownerID := ""
+	if owner != nil {
+		ownerID = *owner
+		// Linking/contact requests lock the user before taking budget locks.
+		// Recovery inserts also reference that user, so use the same order.
+		var lockedOwner string
+		if err := tx.QueryRow(ctx.Request.Context(), `SELECT id::text FROM users WHERE id=$1::uuid AND active FOR UPDATE`, ownerID).Scan(&lockedOwner); err != nil {
+			driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Verification is temporarily unavailable")
+			return
+		}
 	}
-	var recent int
-	if err := tx.QueryRow(ctx.Request.Context(), `SELECT COUNT(*) FROM auth_otp_challenges WHERE channel=$1 AND destination=$2 AND created_at>NOW()-INTERVAL '10 minutes'`, channel, destination).Scan(&recent); err != nil {
-		driverError(ctx, http.StatusServiceUnavailable, "authentication_unavailable", "Sign-in is temporarily unavailable")
-		return
-	}
-	if recent >= otpRequestsPerTenMinutes {
-		ctx.Header("Retry-After", "600")
-		driverError(ctx, http.StatusTooManyRequests, "otp_rate_limited", "Please wait before requesting another code")
+	if !reserveOTPBudget(ctx, tx, channel, ownerID, destination) {
 		return
 	}
 	code, err := newOTPCode()
@@ -297,7 +317,7 @@ func (a *phoneAuthAPI) requestPurposeChallenge(ctx *gin.Context, channel, destin
 		return
 	}
 	if err := send(ctx.Request.Context(), destination, code); err != nil {
-		_, _ = a.pool.Exec(ctx.Request.Context(), `DELETE FROM auth_otp_challenges WHERE id=$1::UUID AND consumed_at IS NULL`, id)
+		// Keep the challenge for durable accounting: a timeout can follow provider acceptance.
 		driverError(ctx, http.StatusBadGateway, channel+"_delivery_failed", "The sign-in code could not be sent")
 		return
 	}

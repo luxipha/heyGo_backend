@@ -15,7 +15,7 @@ import (
 func gatewayRequestLimiter(pool *pgxpool.Pool) gin.HandlerFunc {
 	limiter := httpmiddleware.NewRateLimiter(120, time.Minute)
 	return func(c *gin.Context) {
-		key := "ip:" + c.ClientIP()
+		key := "ip:" + httpmiddleware.ClientIP(c)
 		parts := strings.Fields(c.GetHeader("Authorization"))
 		if pool != nil && len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && len(parts[1]) <= 4096 {
 			var id string

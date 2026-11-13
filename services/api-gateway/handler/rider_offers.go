@@ -18,7 +18,7 @@ func registerRiderOffers(g *gin.RouterGroup, pool *pgxpool.Pool) {
 type riderOffersAPI struct{ pool *pgxpool.Pool }
 
 func publicOffer(r offers.Rule) gin.H {
-	return gin.H{"id": r.ID, "title": r.Title, "message": r.Message, "kind": r.Kind, "discountKobo": r.Discount, "multiplier": r.Multiplier, "startsAt": r.Starts, "endsAt": r.Ends, "markets": r.Markets, "categories": r.Categories, "airportOnly": r.AirportOnly, "startHour": r.StartHour, "endHour": r.EndHour, "timezone": r.Timezone, "requiresCode": r.Code != "", "immediateRidesOnly": true}
+	return gin.H{"id": r.ID, "title": r.Title, "message": r.Message, "kind": r.Kind, "discountKobo": r.Discount, "multiplier": r.Multiplier, "startsAt": r.Starts, "endsAt": r.Ends, "markets": r.Markets, "categories": r.Categories, "airportOnly": r.AirportOnly, "zoneScoped": len(r.Zones) > 0, "startHour": r.StartHour, "endHour": r.EndHour, "timezone": r.Timezone, "requiresCode": r.Code != "", "immediateRidesOnly": true}
 }
 func (a *riderOffersAPI) list(c *gin.Context) {
 	if !offers.Enabled() {

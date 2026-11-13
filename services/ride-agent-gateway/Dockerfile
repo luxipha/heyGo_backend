@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26.10-bookworm AS builder
+FROM golang:1.26.11-bookworm AS builder
 # Set working directory
 WORKDIR /app
 # Copy go mod and sum files

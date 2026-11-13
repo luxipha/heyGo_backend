@@ -69,7 +69,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Schema checks share this deadline with connection setup and account
+	// creation. Allow for the round trips through a remote Cloud SQL proxy.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	pool, err := db.NewPostgresPool(ctx, db.Config{URL: databaseURL, MaxConnIdleTime: time.Minute, MaxConns: 2, MinConns: 0})
 	if err != nil {

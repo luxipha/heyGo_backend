@@ -58,7 +58,7 @@ Cloudflare Browser Integrity Check (`bic`) can return 403 to Python/curl even wh
 
 ## FCM sender
 
-Production uses keyless ADC with `FCM_AUTH_MODE=adc` and `FCM_PROJECT_ID=heygo-c5ae1`. Preserve these variables and the API service identity on future releases. Sender IAM, validation job and rollback details: [FCM production configuration](FCM_PRODUCTION_CONFIGURATION.md). No Firebase JSON key is required.
+Production uses keyless ADC with `FCM_AUTH_MODE=adc` and `FCM_PROJECT_ID=heygo-c5ae1`. Preserve these variables and the API service identity on future releases. Sender IAM, validation job and rollback details: [archived FCM production configuration](https://github.com/luxipha/heyGo_backend/blob/98f4e8c88349b93b296d75d70e46691df762bac9/docs/FCM_PRODUCTION_CONFIGURATION.md). No Firebase JSON key is required.
 
 ## Git reconciliation and CI release
 

@@ -67,11 +67,6 @@ func (a *riderPhoneAPI) request(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(c.Request.Context())
-	// Serialize both account and destination requests; enforce a durable resend cooldown.
-	if _, err = tx.Exec(c.Request.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "rider-phone:"+phone); err != nil {
-		phoneLinkFailure(c)
-		return
-	}
 	var current string
 	var verified bool
 	if err = tx.QueryRow(c.Request.Context(), `SELECT COALESCE(phone_e164,''),phone_verified_at IS NOT NULL FROM users WHERE id=$1::uuid AND active AND 'rider'=ANY(roles) FOR UPDATE`, riderAccountOwner(c)).Scan(&current, &verified); err != nil {
@@ -91,15 +86,7 @@ func (a *riderPhoneAPI) request(c *gin.Context) {
 		driverError(c, 409, "phone_in_use", "This number cannot be linked. Contact Support if it belongs to you.")
 		return
 	}
-	var recent int
-	var cooldown bool
-	if err = tx.QueryRow(c.Request.Context(), `SELECT COUNT(*) FILTER(WHERE created_at>NOW()-INTERVAL '10 minutes'),COALESCE(BOOL_OR(created_at>NOW()-INTERVAL '60 seconds'),FALSE) FROM rider_phone_challenges WHERE (rider_id=$1::uuid OR destination=$2) AND created_at>NOW()-INTERVAL '10 minutes'`, riderAccountOwner(c), phone).Scan(&recent, &cooldown); err != nil {
-		phoneLinkFailure(c)
-		return
-	}
-	if cooldown || recent >= otpRequestsPerTenMinutes {
-		c.Header("Retry-After", "60")
-		driverError(c, 429, "otp_rate_limited", "Wait before requesting another code")
+	if !reserveOTPBudget(c, tx, "phone", riderAccountOwner(c), phone) {
 		return
 	}
 	code, err := newOTPCode()

@@ -67,6 +67,13 @@ func Reserve(ctx context.Context, tx pgx.Tx, trip, fare, rider string, scheduled
 		if !WithinWindow(r, time.Now()) || !contains(r.Markets, market) || !contains(r.Categories, category) || (r.AirportOnly && !airport) {
 			return ErrUnavailable
 		}
+		var inZone bool
+		if e = tx.QueryRow(ctx, `SELECT `+ZoneScopeSQL("$2")+` FROM rider_offers WHERE id=$1::uuid`, id, fare).Scan(&inZone); e != nil {
+			return e
+		}
+		if !inZone {
+			return ErrUnavailable
+		}
 		if r.Code != "" {
 			var claimed bool
 			if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM rider_offer_claims WHERE offer_id=$1::uuid AND rider_id=$2::uuid)`, id, rider).Scan(&claimed); e != nil {

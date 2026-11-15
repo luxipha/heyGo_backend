@@ -18,6 +18,9 @@ import (
 )
 
 func registerAdminReviewRoutes(group *gin.RouterGroup, a *adminAPI) {
+	group.GET("/onboarding/drivers", a.listOnboardingDrivers)
+	group.GET("/onboarding/summary", a.onboardingSummary)
+	group.GET("/onboarding/drivers/:driverID", a.onboardingDriver)
 	phoneLimiter := httpmiddleware.NewRateLimiter(10, time.Minute)
 	group.POST("/drivers/:driverID/phone/request", a.requireCSRF, phoneLimiter.Middleware, func(c *gin.Context) { a.phoneAssist(c, false) })
 	group.POST("/drivers/:driverID/phone/confirm", a.requireCSRF, phoneLimiter.Middleware, func(c *gin.Context) { a.phoneAssist(c, true) })

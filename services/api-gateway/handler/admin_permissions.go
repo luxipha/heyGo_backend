@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	permissionOnboardingRead     = "onboarding.read"
 	permissionDriverRead         = "drivers.read"
 	permissionDriverContact      = "drivers.contact.read"
 	permissionDriverWrite        = "drivers.review"
@@ -38,12 +39,13 @@ const (
 )
 
 var rolePermissions = map[string][]string{
+	"onboarding":  {permissionOnboardingRead},
 	"operations":  {permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionTripRead, permissionRiderRead, permissionLive},
 	"compliance":  {permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionTripRead, permissionRiderRead},
 	"support":     {permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionTripRead, permissionRiderRead, permissionRiderFlags},
 	"finance":     {permissionFinanceRead, permissionFinanceWrite, permissionLedgerRead, permissionTripRead, permissionRiderRead},
 	"safety":      {permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionLive},
-	"super_admin": {permissionSimulationManage, permissionPromotionRead, permissionPromotionWrite, permissionCommunicationRead, permissionCommunicationWrite, permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionLedgerRead, permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionFinanceWrite, permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionSettings, permissionStaff, permissionAudit, permissionLive},
+	"super_admin": {permissionOnboardingRead, permissionSimulationManage, permissionPromotionRead, permissionPromotionWrite, permissionCommunicationRead, permissionCommunicationWrite, permissionDriverRead, permissionDriverContact, permissionDriverWrite, permissionLedgerRead, permissionGeofenceRead, permissionGeofenceWrite, permissionFinanceRead, permissionFinanceWrite, permissionSupportRead, permissionSupportContact, permissionSupportWrite, permissionSafetyRead, permissionSafetyWrite, permissionTripRead, permissionRiderRead, permissionRiderRestrict, permissionRiderFlags, permissionSettings, permissionStaff, permissionAudit, permissionLive},
 }
 
 func roleValue(role *string) string {
@@ -78,6 +80,10 @@ func adminRoutePermission(method, path string) string {
 	}
 	read := method == http.MethodGet
 	switch {
+	case path == "/admin/onboarding/drivers" || path == "/admin/onboarding/summary" || path == "/admin/onboarding/drivers/:driverID":
+		if read {
+			return permissionOnboardingRead
+		}
 	case strings.HasPrefix(path, "/admin/settings/monnify"):
 		return permissionSettings
 	case strings.HasPrefix(path, "/admin/scheduling/"):

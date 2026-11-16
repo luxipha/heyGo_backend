@@ -6,8 +6,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 import argparse,datetime,ftplib,hashlib,io,json,ssl
 
-p=argparse.ArgumentParser();p.add_argument('--publish',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--publish',action='store_true');p.add_argument('--dist',type=Path,help='Reviewed artifact directory; defaults to apps/admin/dist');args=p.parse_args()
 backend=Path(__file__).resolve().parents[1];dist=backend.parent/'apps/admin/dist'
+if args.dist is not None:dist=args.dist.resolve()
 account={};current=None;control=None
 for line in (backend/'keys.md').read_text().splitlines():
     if ':' not in line:continue

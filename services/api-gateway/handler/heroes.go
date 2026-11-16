@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/mail"
@@ -118,31 +117,20 @@ func (a *heroesAPI) code(c *gin.Context) {
 
 func (a *heroesAPI) me(c *gin.Context) {
 	var id, name, email, code string
-	var total, onboarded, rankQualified, rankMinimumTrips int
+	var total, onboarded int
 	var needsName bool
-	var ranks json.RawMessage
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT h.id::text,h.name,h.email,h.referral_code,h.profile_completed_at IS NULL,(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id),(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id AND r.onboarded_at IS NOT NULL),(SELECT ranks FROM heroes_policies ORDER BY version DESC LIMIT 1),(SELECT count(*) FROM hero_rank_drivers rd WHERE rd.hero_id=h.id AND rd.qualifies),(SELECT rank_minimum_trips FROM heroes_policies ORDER BY version DESC LIMIT 1)FROM heroes_accounts h WHERE h.id=$1::uuid`, heroID(c)).Scan(&id, &name, &email, &code, &needsName, &total, &onboarded, &ranks, &rankQualified, &rankMinimumTrips)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT h.id::text,h.name,h.email,h.referral_code,h.profile_completed_at IS NULL,(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id),(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id AND r.onboarded_at IS NOT NULL)FROM heroes_accounts h WHERE h.id=$1::uuid`, heroID(c)).Scan(&id, &name, &email, &code, &needsName, &total, &onboarded)
 	if err != nil {
 		heroFailure(c)
 		return
 	}
-	var thresholds map[string]int
-	if json.Unmarshal(ranks, &thresholds) != nil {
+	progress, err := readHeroRankProgress(c.Request.Context(), a.pool, id)
+	if err != nil {
 		heroFailure(c)
 		return
 	}
-	rank := "E"
-	var next any
-	for _, r := range []string{"E", "D", "C", "B", "A"} {
-		if threshold, ok := thresholds[r]; ok {
-			if rankQualified >= threshold {
-				rank = r
-			} else if next == nil {
-				next = gin.H{"rank": r, "target": threshold, "remaining": threshold - rankQualified}
-			}
-		}
-	}
-	heroData(c, gin.H{"id": id, "name": name, "needsName": needsName, "email": email, "code": code, "referralLink": strings.TrimRight(env.GetString("HEROES_PUBLIC_URL", "https://hero.heygo.ng"), "/") + "/r/" + code, "referred": total, "onboarded": onboarded, "rankQualifiedDrivers": rankQualified, "rankMinimumTrips": rankMinimumTrips, "rank": rank, "nextRank": next})
+	rank, next, rankQualified, rankMinimumTrips := resolveHeroRank(progress)
+	heroData(c, gin.H{"id": id, "name": name, "needsName": needsName, "email": email, "code": code, "referralLink": strings.TrimRight(env.GetString("HEROES_PUBLIC_URL", "https://hero.heygo.ng"), "/") + "/r/" + code, "referred": total, "onboarded": onboarded, "rankQualifiedDrivers": rankQualified, "rankMinimumTrips": rankMinimumTrips, "rank": rank, "nextRank": next, "rankRequirements": progress})
 }
 func (a *heroesAPI) addDriver(c *gin.Context) {
 	var b struct {
@@ -260,7 +248,13 @@ func (a *heroesAPI) wallet(c *gin.Context) {
 	heroData(c, gin.H{"balanceKobo": balance - paid, "earnedKobo": balance, "paidKobo": paid, "bankAccount": bank, "payments": payments, "pendingKobo": pending, "currency": "NGN", "entries": items})
 }
 func (a *heroesAPI) leaderboard(c *gin.Context) {
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT h.id::text,split_part(h.name,' ',1),count(r.driver_id)FROM heroes_accounts h JOIN hero_rank_drivers r ON r.hero_id=h.id WHERE r.qualifies AND h.active GROUP BY h.id ORDER BY count(r.driver_id)DESC,h.created_at,h.id LIMIT 50`)
+	rows, err := a.pool.Query(c.Request.Context(), `WITH standings AS (
+ SELECT hero_id,max(CASE WHEN qualified_drivers>=required_drivers THEN CASE rank WHEN 'E' THEN 0 WHEN 'D' THEN 1 WHEN 'C' THEN 2 WHEN 'B' THEN 3 WHEN 'A' THEN 4 END ELSE 0 END) AS level FROM hero_rank_progress GROUP BY hero_id
+)SELECT h.id::text,split_part(h.name,' ',1),p.qualified_drivers,
+ (ARRAY['E','D','C','B','A'])[s.level+1],p.rank,p.minimum_trips,p.required_drivers
+ FROM standings s JOIN heroes_accounts h ON h.id=s.hero_id
+ JOIN LATERAL(SELECT * FROM hero_rank_progress p WHERE p.hero_id=h.id AND p.rank=(ARRAY['E','D','C','B','A'])[least(s.level+2,5)] UNION ALL SELECT * FROM hero_rank_progress p WHERE p.hero_id=h.id AND p.rank='E' AND NOT EXISTS(SELECT 1 FROM hero_rank_progress q WHERE q.hero_id=h.id AND q.rank='D') LIMIT 1)p ON true
+ WHERE h.active AND (s.level>0 OR p.qualified_drivers>0) ORDER BY s.level DESC,p.qualified_drivers DESC,h.created_at,h.id LIMIT 50`)
 	if err != nil {
 		heroFailure(c)
 		return
@@ -268,13 +262,14 @@ func (a *heroesAPI) leaderboard(c *gin.Context) {
 	defer rows.Close()
 	items := make([]gin.H, 0)
 	for rows.Next() {
-		var id, name string
+		var id, name, rank, progressRank string
+		var minimumTrips, requiredDrivers int
 		var count int
-		if rows.Scan(&id, &name, &count) != nil {
+		if rows.Scan(&id, &name, &count, &rank, &progressRank, &minimumTrips, &requiredDrivers) != nil {
 			heroFailure(c)
 			return
 		}
-		items = append(items, gin.H{"name": name, "onboarded": count, "qualifiedDrivers": count, "position": len(items) + 1, "isYou": id == heroID(c)})
+		items = append(items, gin.H{"rank": rank, "progressRank": progressRank, "minimumTrips": minimumTrips, "requiredDrivers": requiredDrivers, "name": name, "onboarded": count, "qualifiedDrivers": count, "position": len(items) + 1, "isYou": id == heroID(c)})
 	}
 	if rows.Err() != nil {
 		heroFailure(c)

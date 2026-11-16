@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	paymentservice "github.com/luxipha/heyGo_backend/services/payment-service/service"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/env"
 	"github.com/luxipha/heyGo_backend/shared/observe/logs"
 	"github.com/luxipha/heyGo_backend/shared/referrals"
@@ -19,12 +19,12 @@ import (
 var heroTransferAmountPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]{1,2})?$`)
 
 type heroTransferResponse struct {
-	Data paymentservice.TransferResult `json:"data"`
+	Data contracts.TransferResult `json:"data"`
 }
 
 // Confirm only a status query whose reference, amount, currency and destination
 // match the immutable local payout. A 2xx initiation response is never settlement.
-func applyHeroTransferStatus(ctx context.Context, pool *pgxpool.Pool, id string, result paymentservice.TransferResult, key []byte) error {
+func applyHeroTransferStatus(ctx context.Context, pool *pgxpool.Pool, id string, result contracts.TransferResult, key []byte) error {
 	var hero string
 	if err := pool.QueryRow(ctx, `SELECT hero_id::text FROM hero_stage_payouts WHERE id=$1::uuid`, id).Scan(&hero); err != nil {
 		return err

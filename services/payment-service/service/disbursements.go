@@ -4,20 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"net/http"
 	"net/url"
 	"strings"
 )
 
-type TransferResult struct {
-	Amount                   json.Number `json:"amount"`
-	Reference                string      `json:"reference"`
-	Currency                 string      `json:"currency"`
-	Status                   string      `json:"status"`
-	TransactionReference     string      `json:"transactionReference"`
-	DestinationAccountNumber string      `json:"destinationAccountNumber"`
-	DestinationBankCode      string      `json:"destinationBankCode"`
-}
+type TransferResult = contracts.TransferResult
 
 func (m *monnifyClient) transferRequest(ctx context.Context, method, path string, payload any) (*TransferResult, error) {
 	token, err := m.accessToken(ctx)

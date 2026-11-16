@@ -134,6 +134,7 @@ func main() {
 		handler.StartPrivacyJobs(ctx, pool, files)
 		handler.StartSOSLocationPurge(ctx, pool)
 		handler.StartRefundJobs(ctx, pool)
+		handler.StartHeroStagePayoutJobs(ctx, pool)
 		handler.StartNotificationPushJobs(ctx, pool)
 		handler.StartDriverDocumentReminderJobs(ctx, pool)
 		handler.StartPushBroadcastJobs(ctx, pool)
@@ -183,6 +184,10 @@ func main() {
 			if err := handler.RunScheduledRidesOnce(r.Context(), pool, 100); err != nil {
 				logs.L().Warnw("Scheduled ride maintenance failed", "error", err)
 				http.Error(w, "maintenance unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err := handler.RunHeroStagePayoutJobsOnce(r.Context(), pool); err != nil {
+				http.Error(w, "Hero payout maintenance unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			if err := heroes.ProcessRewards(r.Context(), pool); err != nil {

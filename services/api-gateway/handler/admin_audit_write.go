@@ -18,7 +18,7 @@ var auditSafeFields = map[string]bool{
 	"emailVerified": true, "emailVerificationPending": true,
 	"invitationPending": true, "version": true,
 	"enabled": true, "sortOrder": true, "assignedAdminId": true,
-	"restricted": true, "kind": true,
+	"restricted": true, "kind": true, "rankMinimumTrips": true,
 	"resendEnabled": true, "smtpEnabled": true, "primaryProvider": true, "fallbackEnabled": true, "passwordChanged": true,
 	"amountKobo": true, "maxRequestKobo": true, "maxDailyKobo": true,
 }
@@ -46,7 +46,7 @@ func adminAuditTarget(action, driverID string, details any) (string, string) {
 	raw, _ := json.Marshal(details)
 	_ = json.Unmarshal(raw, &input)
 	for _, candidate := range []struct{ key, kind string }{
-		{"heroPaymentId", "hero_payment"}, {"heroId", "hero"}, {"simulationParticipantId", "simulation_participant"}, {"simulationRunId", "simulation_run"}, {"targetStaffId", "staff"}, {"incidentId", "incident"}, {"refundId", "refund"}, {"caseId", "support_case"},
+		{"payoutId", "hero_payout"}, {"heroPaymentId", "hero_payment"}, {"heroId", "hero"}, {"simulationParticipantId", "simulation_participant"}, {"simulationRunId", "simulation_run"}, {"targetStaffId", "staff"}, {"incidentId", "incident"}, {"refundId", "refund"}, {"caseId", "support_case"},
 		{"geofenceId", "geofence"}, {"policyId", "policy"}, {"ruleId", "statutory_rule"},
 		{"claimId", "no_show_claim"}, {"inspectionId", "inspection"}, {"documentId", "document"},
 		{"tripId", "trip"}, {"requestId", "request"}, {"campaignId", "campaign"},

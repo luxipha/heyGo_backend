@@ -194,8 +194,12 @@ func (a *adminAPI) getReferralSettings(c *gin.Context) {
 }
 func (a *adminAPI) saveReferralSettings(c *gin.Context) {
 	var s referrals.Settings
-	if c.ShouldBindJSON(&s) != nil || s.Validate() != nil {
+	if c.ShouldBindJSON(&s) != nil {
 		driverError(c, 400, "invalid_referral_settings", "Check reward rules and banner text.")
+		return
+	}
+	if err := s.Validate(); err != nil {
+		driverError(c, 400, "invalid_referral_settings", err.Error())
 		return
 	}
 	ctx := c.Request.Context()
@@ -233,7 +237,7 @@ func (a *adminAPI) referralRewards(c *gin.Context) {
 		driverError(c, 400, "invalid_status", "Invalid status")
 		return
 	}
-	rows, e := a.pool.Query(c.Request.Context(), `SELECT a.id::text,COALESCE(NULLIF(dp.display_name,''),NULLIF(rp.display_name,''),h.name,'Member'),COALESCE(NULLIF(idp.display_name,''),NULLIF(irp.display_name,''),'Member'),a.inviter_role,a.invitee_role,a.reward_kobo,a.trip_target,`+referrals.ProgressSQL+`,a.linked_at,a.qualified_at,a.credited_at,a.settings_version,a.deadline_at,COALESCE(a.inviter_id::text,a.hero_id::text) FROM referral_attributions a LEFT JOIN heroes_accounts h ON h.id=a.hero_id LEFT JOIN driver_profiles dp ON dp.driver_id=a.inviter_id LEFT JOIN rider_profiles rp ON rp.rider_id=a.inviter_id LEFT JOIN driver_profiles idp ON idp.driver_id=a.invitee_id LEFT JOIN rider_profiles irp ON irp.rider_id=a.invitee_id WHERE ($1='all' OR ($1='pending' AND a.qualified_at IS NOT NULL AND a.credited_at IS NULL) OR ($1='credited' AND a.credited_at IS NOT NULL) OR ($1='progress' AND a.qualified_at IS NULL)) ORDER BY a.linked_at DESC,a.id DESC LIMIT 51 OFFSET $2`, status, offset)
+	rows, e := a.pool.Query(c.Request.Context(), `SELECT a.id::text,COALESCE(NULLIF(dp.display_name,''),NULLIF(rp.display_name,''),h.name,'Member'),COALESCE(NULLIF(idp.display_name,''),NULLIF(irp.display_name,''),'Member'),a.inviter_role,a.invitee_role,a.reward_kobo,a.trip_target,`+referrals.ProgressSQL+`,a.linked_at,a.qualified_at,a.credited_at,a.settings_version,a.deadline_at,COALESCE(a.inviter_id::text,a.hero_id::text) FROM referral_attributions a LEFT JOIN heroes_accounts h ON h.id=a.hero_id LEFT JOIN driver_profiles dp ON dp.driver_id=a.inviter_id LEFT JOIN rider_profiles rp ON rp.rider_id=a.inviter_id LEFT JOIN driver_profiles idp ON idp.driver_id=a.invitee_id LEFT JOIN rider_profiles irp ON irp.rider_id=a.invitee_id WHERE NOT EXISTS(SELECT 1 FROM hero_referral_stages hs WHERE hs.referral_id=a.id) AND ($1='all' OR ($1='pending' AND a.qualified_at IS NOT NULL AND a.credited_at IS NULL) OR ($1='credited' AND a.credited_at IS NOT NULL) OR ($1='progress' AND a.qualified_at IS NULL)) ORDER BY a.linked_at DESC,a.id DESC LIMIT 51 OFFSET $2`, status, offset)
 	if e != nil {
 		referralError(c, e)
 		return

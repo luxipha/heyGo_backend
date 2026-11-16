@@ -7,15 +7,16 @@ import (
 )
 
 type heroesPolicy struct {
-	Version    int64          `json:"version"`
-	Enabled    bool           `json:"enabled"`
-	TripTarget int            `json:"tripTarget"`
-	RewardKobo int64          `json:"rewardKobo"`
-	Ranks      map[string]int `json:"ranks"`
+	RankMinimumTrips int            `json:"rankMinimumTrips"`
+	Version          int64          `json:"version"`
+	Enabled          bool           `json:"enabled"`
+	TripTarget       int            `json:"tripTarget"`
+	RewardKobo       int64          `json:"rewardKobo"`
+	Ranks            map[string]int `json:"ranks"`
 }
 
 func validHeroesPolicy(p heroesPolicy) bool {
-	if p.TripTarget < 1 || p.TripTarget > 10000 || p.RewardKobo < 0 || p.RewardKobo > 100000000 || p.Enabled && p.RewardKobo == 0 {
+	if p.RankMinimumTrips < 0 || p.RankMinimumTrips > 10000 || p.TripTarget < 1 || p.TripTarget > 10000 || p.RewardKobo < 0 || p.RewardKobo > 100000000 || p.Enabled && p.RewardKobo == 0 {
 		return false
 	}
 	if len(p.Ranks) != 1 && len(p.Ranks) != 5 {
@@ -40,7 +41,7 @@ func validHeroesPolicy(p heroesPolicy) bool {
 func (a *adminAPI) getHeroesPolicy(c *gin.Context) {
 	var p heroesPolicy
 	var ranks []byte
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT version,enabled,trip_target,reward_kobo,ranks FROM heroes_policies ORDER BY version DESC LIMIT 1`).Scan(&p.Version, &p.Enabled, &p.TripTarget, &p.RewardKobo, &ranks)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT version,enabled,trip_target,reward_kobo,ranks,rank_minimum_trips FROM heroes_policies ORDER BY version DESC LIMIT 1`).Scan(&p.Version, &p.Enabled, &p.TripTarget, &p.RewardKobo, &ranks, &p.RankMinimumTrips)
 	if err != nil || json.Unmarshal(ranks, &p.Ranks) != nil {
 		heroFailure(c)
 		return
@@ -50,7 +51,7 @@ func (a *adminAPI) getHeroesPolicy(c *gin.Context) {
 func (a *adminAPI) saveHeroesPolicy(c *gin.Context) {
 	var p heroesPolicy
 	if c.ShouldBindJSON(&p) != nil || !validHeroesPolicy(p) {
-		driverError(c, 400, "invalid_heroes_policy", "Set a valid reward, trip target and increasing E–A thresholds. E starts at zero.")
+		driverError(c, 400, "invalid_heroes_policy", "Set a valid reward, trip target and increasing E–A thresholds, and a minimum of 0–10,000 trips per qualifying driver. E starts at zero.")
 		return
 	}
 	tx, err := a.pool.Begin(c.Request.Context())
@@ -73,8 +74,8 @@ func (a *adminAPI) saveHeroesPolicy(c *gin.Context) {
 		return
 	}
 	ranks, _ := json.Marshal(p.Ranks)
-	if _, err = tx.Exec(c.Request.Context(), `INSERT INTO heroes_policies(id,enabled,trip_target,reward_kobo,ranks,created_by)VALUES($1::uuid,$2,$3,$4,$5::jsonb,$6::uuid)`, uuid.NewString(), p.Enabled, p.TripTarget, p.RewardKobo, string(ranks), currentAdmin(c).ID); err == nil {
-		err = adminAudit(c, tx, "heroes.policy.created", "", gin.H{"previousVersion": current, "enabled": p.Enabled, "tripTarget": p.TripTarget, "rewardKobo": p.RewardKobo})
+	if _, err = tx.Exec(c.Request.Context(), `INSERT INTO heroes_policies(id,enabled,trip_target,reward_kobo,ranks,created_by,rank_minimum_trips)VALUES($1::uuid,$2,$3,$4,$5::jsonb,$6::uuid,$7)`, uuid.NewString(), p.Enabled, p.TripTarget, p.RewardKobo, string(ranks), currentAdmin(c).ID, p.RankMinimumTrips); err == nil {
+		err = adminAudit(c, tx, "heroes.policy.created", "", gin.H{"rankMinimumTrips": p.RankMinimumTrips, "previousVersion": current, "enabled": p.Enabled, "tripTarget": p.TripTarget, "rewardKobo": p.RewardKobo})
 	}
 	if err == nil {
 		err = tx.Commit(c.Request.Context())

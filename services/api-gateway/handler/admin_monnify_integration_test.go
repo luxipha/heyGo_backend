@@ -50,13 +50,13 @@ func TestAdminMonnifyEncryptedSettingsAndCollectionGuard(t *testing.T) {
 		h(c)
 		return w
 	}
-	b := map[string]any{"version": s.Version, "enabled": true, "tripPaymentsEnabled": true, "environment": "sandbox", "apiKey": "test-api-private", "secretKey": "test-secret-private", "contractCode": "test-contract-private"}
+	b := map[string]any{"version": s.Version, "enabled": true, "tripPaymentsEnabled": true, "environment": "sandbox", "disbursementSourceAccount": "9999999999", "apiKey": "test-api-private", "secretKey": "test-secret-private", "contractCode": "test-contract-private"}
 	raw, _ := json.Marshal(b)
 	w := call(api.putMonnifySettings, "PUT", string(raw), staff, "")
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
-	if strings.Contains(w.Body.String(), "private") {
+	if strings.Contains(w.Body.String(), "private") || strings.Contains(w.Body.String(), "9999999999") {
 		t.Fatal("secret leaked")
 	}
 	saved, e := monnifysettings.Read(ctx, p, 0)
@@ -67,6 +67,9 @@ func TestAdminMonnifyEncryptedSettingsAndCollectionGuard(t *testing.T) {
 	if e != nil || opened != "test-api-private" {
 		t.Fatal("encrypted persistence", e)
 	}
+	if source, err := monnifysettings.Open(api.settingsKey, saved.DisbursementSource, "disbursement-source"); err != nil || source != "9999999999" {
+		t.Fatal("disbursement source encryption", err)
+	}
 	if w = call(api.putMonnifySettings, "PUT", string(raw), staff, ""); w.Code != 409 {
 		t.Fatal("stale update", w.Body.String())
 	}
@@ -74,6 +77,7 @@ func TestAdminMonnifyEncryptedSettingsAndCollectionGuard(t *testing.T) {
 	b["apiKey"] = ""
 	b["secretKey"] = ""
 	b["contractCode"] = ""
+	b["disbursementSourceAccount"] = ""
 	raw, _ = json.Marshal(b)
 	if w = call(api.putMonnifySettings, "PUT", string(raw), staff, ""); w.Code != 200 {
 		t.Fatal("blank retention", w.Body.String())
@@ -85,6 +89,9 @@ func TestAdminMonnifyEncryptedSettingsAndCollectionGuard(t *testing.T) {
 	opened, e = monnifysettings.Open(api.settingsKey, saved.APIKey, "api-key")
 	if e != nil || opened != "test-api-private" {
 		t.Fatal("blank replaced saved key", e)
+	}
+	if source, err := monnifysettings.Open(api.settingsKey, saved.DisbursementSource, "disbursement-source"); err != nil || source != "9999999999" {
+		t.Fatal("blank replaced payout source", err)
 	}
 	b["version"] = saved.Version
 	b["environment"] = "live"

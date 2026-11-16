@@ -63,6 +63,8 @@ func registerHeroesRoutes(r *gin.Engine, pool *pgxpool.Pool) *heroesAPI {
 	g.POST("/auth/logout", a.logout)
 	g.GET("/me", a.me)
 	g.POST("/profile", a.saveProfile)
+	g.GET("/banks", a.banks)
+	g.GET("/stages", a.stages)
 	g.GET("/drivers", a.drivers)
 	g.POST("/drivers", a.addDriver)
 	g.GET("/wallet", a.wallet)
@@ -116,10 +118,10 @@ func (a *heroesAPI) code(c *gin.Context) {
 
 func (a *heroesAPI) me(c *gin.Context) {
 	var id, name, email, code string
-	var total, onboarded int
+	var total, onboarded, rankQualified, rankMinimumTrips int
 	var needsName bool
 	var ranks json.RawMessage
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT h.id::text,h.name,h.email,h.referral_code,h.profile_completed_at IS NULL,(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id),(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id AND r.onboarded_at IS NOT NULL),(SELECT ranks FROM heroes_policies ORDER BY version DESC LIMIT 1)FROM heroes_accounts h WHERE h.id=$1::uuid`, heroID(c)).Scan(&id, &name, &email, &code, &needsName, &total, &onboarded, &ranks)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT h.id::text,h.name,h.email,h.referral_code,h.profile_completed_at IS NULL,(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id),(SELECT count(*)FROM heroes_all_referrals r WHERE r.hero_id=h.id AND r.onboarded_at IS NOT NULL),(SELECT ranks FROM heroes_policies ORDER BY version DESC LIMIT 1),(SELECT count(*) FROM hero_rank_drivers rd WHERE rd.hero_id=h.id AND rd.qualifies),(SELECT rank_minimum_trips FROM heroes_policies ORDER BY version DESC LIMIT 1)FROM heroes_accounts h WHERE h.id=$1::uuid`, heroID(c)).Scan(&id, &name, &email, &code, &needsName, &total, &onboarded, &ranks, &rankQualified, &rankMinimumTrips)
 	if err != nil {
 		heroFailure(c)
 		return
@@ -133,14 +135,14 @@ func (a *heroesAPI) me(c *gin.Context) {
 	var next any
 	for _, r := range []string{"E", "D", "C", "B", "A"} {
 		if threshold, ok := thresholds[r]; ok {
-			if onboarded >= threshold {
+			if rankQualified >= threshold {
 				rank = r
 			} else if next == nil {
-				next = gin.H{"rank": r, "target": threshold, "remaining": threshold - onboarded}
+				next = gin.H{"rank": r, "target": threshold, "remaining": threshold - rankQualified}
 			}
 		}
 	}
-	heroData(c, gin.H{"id": id, "name": name, "needsName": needsName, "email": email, "code": code, "referralLink": strings.TrimRight(env.GetString("HEROES_PUBLIC_URL", "https://hero.heygo.ng"), "/") + "/r/" + code, "referred": total, "onboarded": onboarded, "rank": rank, "nextRank": next})
+	heroData(c, gin.H{"id": id, "name": name, "needsName": needsName, "email": email, "code": code, "referralLink": strings.TrimRight(env.GetString("HEROES_PUBLIC_URL", "https://hero.heygo.ng"), "/") + "/r/" + code, "referred": total, "onboarded": onboarded, "rankQualifiedDrivers": rankQualified, "rankMinimumTrips": rankMinimumTrips, "rank": rank, "nextRank": next})
 }
 func (a *heroesAPI) addDriver(c *gin.Context) {
 	var b struct {
@@ -165,7 +167,7 @@ func (a *heroesAPI) addDriver(c *gin.Context) {
 	heroData(c, gin.H{"saved": true})
 }
 func (a *heroesAPI) drivers(c *gin.Context) {
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT r.id::text,COALESCE(NULLIF(l.name,''),NULLIF(dp.display_name,''),'Driver'),u.phone_e164,r.claimed_at,p.trip_target,p.reward_kobo,p.enabled,r.qualified_at IS NOT NULL,COALESCE(e.eligible_to_drive,false),(SELECT count(*)FROM trips t WHERE t.assigned_driver_id=r.driver_id AND t.status='completed' AND t.created_at>=r.claimed_at AND t.rider_id<>r.driver_id AND NOT EXISTS(SELECT 1 FROM simulation_participants s WHERE s.actor_user_id=t.rider_id)) FROM heroes_all_referrals r JOIN users u ON u.id=r.driver_id JOIN heroes_all_policies p ON p.id=r.policy_id LEFT JOIN heroes_driver_leads l ON l.hero_id=r.hero_id AND l.phone=u.phone_e164 LEFT JOIN driver_profiles dp ON dp.driver_id=u.id LEFT JOIN driver_eligibility e ON e.driver_id=u.id WHERE r.hero_id=$1::uuid ORDER BY r.claimed_at DESC LIMIT 200`, heroID(c))
+	rows, err := a.pool.Query(c.Request.Context(), `SELECT r.id::text,COALESCE(NULLIF(l.name,''),NULLIF(dp.display_name,''),'Driver'),u.phone_e164,r.claimed_at,p.trip_target,p.reward_kobo,p.enabled,r.qualified_at IS NOT NULL,COALESCE(e.eligible_to_drive,false),CASE WHEN a.id IS NOT NULL THEN `+referrals.ProgressSQL+` ELSE (SELECT count(*)FROM trips t WHERE t.assigned_driver_id=r.driver_id AND t.status='completed' AND t.created_at>=r.claimed_at AND t.rider_id<>r.driver_id AND NOT EXISTS(SELECT 1 FROM simulation_participants s WHERE s.actor_user_id=t.rider_id)) END FROM heroes_all_referrals r LEFT JOIN referral_attributions a ON a.id=r.id JOIN users u ON u.id=r.driver_id JOIN heroes_all_policies p ON p.id=r.policy_id LEFT JOIN heroes_driver_leads l ON l.hero_id=r.hero_id AND l.phone=u.phone_e164 LEFT JOIN driver_profiles dp ON dp.driver_id=u.id LEFT JOIN driver_eligibility e ON e.driver_id=u.id WHERE r.hero_id=$1::uuid ORDER BY r.claimed_at DESC LIMIT 200`, heroID(c))
 	if err != nil {
 		heroFailure(c)
 		return
@@ -219,7 +221,7 @@ func maskHeroPhone(phone string) string {
 }
 func (a *heroesAPI) wallet(c *gin.Context) {
 	var balance, pending, paid int64
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT sum(amount_kobo)FROM heroes_wallet_entries WHERE hero_id=$1::uuid),0),COALESCE((SELECT sum(p.reward_kobo)FROM heroes_all_referrals r JOIN heroes_all_policies p ON p.id=r.policy_id WHERE r.hero_id=$1::uuid AND r.qualified_at IS NULL AND p.enabled),0),COALESCE((SELECT sum(p.amount_kobo)FROM heroes_manual_payments p WHERE p.hero_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=p.id)),0)`, heroID(c)).Scan(&balance, &pending, &paid)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT sum(amount_kobo)FROM heroes_wallet_entries WHERE hero_id=$1::uuid),0),COALESCE((SELECT sum(p.reward_kobo)FROM heroes_all_referrals r JOIN heroes_all_policies p ON p.id=r.policy_id WHERE r.hero_id=$1::uuid AND r.qualified_at IS NULL AND p.enabled AND NOT EXISTS(SELECT 1 FROM hero_referral_stages s WHERE s.referral_id=r.id)),0)+COALESCE((SELECT sum(s.reward_kobo) FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE a.hero_id=$1::uuid AND s.credited_at IS NULL),0),COALESCE((SELECT sum(p.amount_kobo)FROM heroes_manual_payments p WHERE p.hero_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=p.id)),0)`, heroID(c)).Scan(&balance, &pending, &paid)
 	if err != nil {
 		heroFailure(c)
 		return
@@ -258,7 +260,7 @@ func (a *heroesAPI) wallet(c *gin.Context) {
 	heroData(c, gin.H{"balanceKobo": balance - paid, "earnedKobo": balance, "paidKobo": paid, "bankAccount": bank, "payments": payments, "pendingKobo": pending, "currency": "NGN", "entries": items})
 }
 func (a *heroesAPI) leaderboard(c *gin.Context) {
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT h.id::text,split_part(h.name,' ',1),count(r.id)FROM heroes_accounts h JOIN heroes_referrals r ON r.hero_id=h.id WHERE r.onboarded_at IS NOT NULL AND h.active GROUP BY h.id ORDER BY count(r.id)DESC,h.created_at,h.id LIMIT 50`)
+	rows, err := a.pool.Query(c.Request.Context(), `SELECT h.id::text,split_part(h.name,' ',1),count(r.driver_id)FROM heroes_accounts h JOIN hero_rank_drivers r ON r.hero_id=h.id WHERE r.qualifies AND h.active GROUP BY h.id ORDER BY count(r.driver_id)DESC,h.created_at,h.id LIMIT 50`)
 	if err != nil {
 		heroFailure(c)
 		return
@@ -272,7 +274,7 @@ func (a *heroesAPI) leaderboard(c *gin.Context) {
 			heroFailure(c)
 			return
 		}
-		items = append(items, gin.H{"name": name, "onboarded": count, "position": len(items) + 1, "isYou": id == heroID(c)})
+		items = append(items, gin.H{"name": name, "onboarded": count, "qualifiedDrivers": count, "position": len(items) + 1, "isYou": id == heroID(c)})
 	}
 	if rows.Err() != nil {
 		heroFailure(c)

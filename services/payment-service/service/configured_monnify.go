@@ -27,6 +27,7 @@ func (m *ConfiguredMonnify) Config(ctx context.Context, reference string) (*type
   UNION ALL SELECT monnify_config_version FROM driver_operating_topups WHERE provider_reference=$1 OR provider_transaction_reference=$1
   UNION ALL SELECT monnify_config_version FROM rider_no_show_debt_payments WHERE provider_reference=$1 OR provider_transaction_reference=$1
   UNION ALL SELECT monnify_config_version FROM payments WHERE payment_reference=$1 OR transaction_reference=$1
+  UNION ALL SELECT monnify_config_version FROM hero_stage_payouts WHERE reference=$1 OR transaction_reference=$1
   UNION ALL SELECT t.monnify_config_version FROM refund_requests r JOIN driver_operating_topups t ON t.id=r.topup_id WHERE r.refund_reference=$1 LIMIT 1`, reference).Scan(&version)
 		if e == nil {
 			known = true
@@ -72,6 +73,12 @@ func (m *ConfiguredMonnify) Config(ctx context.Context, reference string) (*type
 	config.ContractCode, e = monnifysettings.Open(m.Key, s.ContractCode, "contract-code")
 	if e != nil {
 		return nil, fmt.Errorf("Monnify settings cannot be decrypted")
+	}
+	if len(s.DisbursementSource) > 0 {
+		config.DisbursementSource, e = monnifysettings.Open(m.Key, s.DisbursementSource, "disbursement-source")
+		if e != nil {
+			return nil, fmt.Errorf("Monnify disbursement configuration cannot be decrypted")
+		}
 	}
 	return config, nil
 }

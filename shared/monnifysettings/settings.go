@@ -11,6 +11,7 @@ import (
 )
 
 type Settings struct {
+	DisbursementSource  []byte `json:"-"`
 	Version             int64  `json:"version"`
 	Enabled             bool   `json:"enabled"`
 	TripPaymentsEnabled bool   `json:"tripPaymentsEnabled"`
@@ -31,7 +32,7 @@ func Read(ctx context.Context, q Queryer, version int64) (Settings, error) {
 		where = "WHERE version=$1"
 		args = append(args, version)
 	}
-	e := q.QueryRow(ctx, `SELECT version,enabled,trip_payments_enabled,environment,api_key_ciphertext,secret_key_ciphertext,contract_code_ciphertext FROM admin_monnify_settings `+where, args...).Scan(&s.Version, &s.Enabled, &s.TripPaymentsEnabled, &s.Environment, &s.APIKey, &s.SecretKey, &s.ContractCode)
+	e := q.QueryRow(ctx, `SELECT version,enabled,trip_payments_enabled,environment,api_key_ciphertext,secret_key_ciphertext,contract_code_ciphertext,disbursement_source_ciphertext FROM admin_monnify_settings `+where, args...).Scan(&s.Version, &s.Enabled, &s.TripPaymentsEnabled, &s.Environment, &s.APIKey, &s.SecretKey, &s.ContractCode, &s.DisbursementSource)
 	if errors.Is(e, pgx.ErrNoRows) && version == 0 {
 		return s, nil
 	}

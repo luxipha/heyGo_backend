@@ -45,11 +45,12 @@ type PaymentIntent struct {
 
 // PaymentConfig holds the configuration for the payment service
 type PaymentConfig struct {
-	BaseURL      string `json:"baseURL"`
-	APIKey       string `json:"apiKey"`
-	SecretKey    string `json:"secretKey"`
-	ContractCode string `json:"contractCode"`
-	RedirectURL  string `json:"redirectURL"`
+	DisbursementSource string `json:"-"`
+	BaseURL            string `json:"baseURL"`
+	APIKey             string `json:"apiKey"`
+	SecretKey          string `json:"secretKey"`
+	ContractCode       string `json:"contractCode"`
+	RedirectURL        string `json:"redirectURL"`
 }
 
 type ProviderSession struct {

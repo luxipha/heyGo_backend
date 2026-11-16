@@ -55,7 +55,7 @@ jobs:
         run: |
           test "$IMAGE_TAG" = "$GITHUB_SHA"
           for workflow in audit.yaml cloud-run-images.yaml; do
-            conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$IMAGE_TAG&branch=main&event=push&per_page=10" --jq '.workflow_runs[0].conclusion')"
+            conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$IMAGE_TAG&branch=main&per_page=10" --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch")][0].conclusion')"
             test "$conclusion" = success
           done
 

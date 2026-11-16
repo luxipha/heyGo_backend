@@ -235,6 +235,8 @@ func (a *adminAPI) recordHeroPayment(c *gin.Context) {
 		return
 	}
 	b.Reference = strings.ToLower(strings.TrimSpace(b.Reference))
+	// Match PostgreSQL/pgx timestamp precision so identical retries stay idempotent.
+	b.PaidAt = b.PaidAt.Truncate(time.Microsecond)
 	_, e1 := uuid.Parse(id)
 	_, e2 := uuid.Parse(b.ID)
 	_, e3 := uuid.Parse(b.BankID)

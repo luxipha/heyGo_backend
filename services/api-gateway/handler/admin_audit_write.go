@@ -18,7 +18,7 @@ var auditSafeFields = map[string]bool{
 	"emailVerified": true, "emailVerificationPending": true,
 	"invitationPending": true, "version": true,
 	"enabled": true, "sortOrder": true, "assignedAdminId": true,
-	"restricted": true, "kind": true, "rankMinimumTrips": true,
+	"restricted": true, "kind": true, "rankMinimumTrips": true, "rankTripRequirements": true,
 	"resendEnabled": true, "smtpEnabled": true, "primaryProvider": true, "fallbackEnabled": true, "passwordChanged": true,
 	"amountKobo": true, "maxRequestKobo": true, "maxDailyKobo": true,
 }

@@ -144,8 +144,79 @@ func TestHeroRanksCountDriversMeetingTripMinimum(t *testing.T) {
 	}
 	check(2, 1, "D") // many trips still count as one driver
 	check(0, 2, "C")
+	// Different ranks evaluate different driver cohorts, not one shared minimum.
+	var version int64
+	if err = pool.QueryRow(ctx, `SELECT max(version) FROM heroes_policies`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	perRank := heroesPolicy{Version: version, TripTarget: 70, Ranks: map[string]int{"E": 0, "D": 1, "C": 2, "B": 3, "A": 4}, RankTripRequirements: map[string]int{"E": 0, "D": 1, "C": 3, "B": 5, "A": 7}}
+	saved := request("PUT", "/rank-policy", perRank)["data"].(map[string]any)
+	if saved["rankTripRequirements"].(map[string]any)["C"] != float64(3) {
+		t.Fatal("rank-specific setting not persisted", saved)
+	}
+	me := request("GET", "/heroes/me", nil)["data"].(map[string]any)
+	next := me["nextRank"].(map[string]any)
+	if me["rank"] != "D" || next["rank"] != "C" || next["minimumTrips"] != float64(3) || next["qualifiedDrivers"] != float64(1) || next["remaining"] != float64(1) {
+		t.Fatal("next-rank progress used the wrong trip requirement", me)
+	}
+	progress := me["rankRequirements"].([]any)
+	if len(progress) != 5 || progress[1].(map[string]any)["qualifiedDrivers"] != float64(2) || progress[2].(map[string]any)["qualifiedDrivers"] != float64(1) {
+		t.Fatal("different rank cohorts were flattened", progress)
+	}
+	// Editing only C's trip requirement promotes to C; B still needs 5 trips each.
+	perRank.Version = int64(saved["version"].(float64))
+	perRank.RankTripRequirements["C"] = 1
+	saved = request("PUT", "/rank-policy", perRank)["data"].(map[string]any)
+	me = request("GET", "/heroes/me", nil)["data"].(map[string]any)
+	next = me["nextRank"].(map[string]any)
+	if me["rank"] != "C" || next["rank"] != "B" || next["minimumTrips"] != float64(5) || next["qualifiedDrivers"] != float64(1) || next["remaining"] != float64(2) || me["onboarded"] != float64(2) {
+		t.Fatal("one rank's trip requirement affected other ranks", me)
+	}
+	leaders := request("GET", "/heroes/leaderboard", nil)["data"].([]any)
+	found := false
+	for _, item := range leaders {
+		leader := item.(map[string]any)
+		if leader["isYou"] == true {
+			found = true
+			if leader["rank"] != "C" || leader["progressRank"] != "B" || leader["minimumTrips"] != float64(5) || leader["qualifiedDrivers"] != float64(1) {
+				t.Fatal("leaderboard disagrees with rank-specific progress", leader)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("ranked Hero missing from leaderboard")
+	}
+
 	var reward int64
 	if err = pool.QueryRow(ctx, `SELECT reward_kobo FROM referral_attributions WHERE hero_id=$1::uuid`, hero).Scan(&reward); err != nil || reward != 700000 {
 		t.Fatal("rank setting changed captured payout", reward, err)
+	}
+}
+
+func TestHeroRankSpecificRequirementsValidation(t *testing.T) {
+	makePolicy := func() heroesPolicy {
+		return heroesPolicy{TripTarget: 70, Ranks: map[string]int{"E": 0, "D": 1, "C": 2, "B": 3, "A": 4}, RankTripRequirements: map[string]int{"E": 0, "D": 10, "C": 30, "B": 50, "A": 70}}
+	}
+	if !validHeroesPolicy(makePolicy()) {
+		t.Fatal("different requirements rejected")
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(map[string]int)
+	}{
+		{"missing rank", func(r map[string]int) { delete(r, "C") }},
+		{"unknown rank", func(r map[string]int) { r["X"] = 10 }},
+		{"negative trips", func(r map[string]int) { r["D"] = -1 }},
+		{"decreasing trips", func(r map[string]int) { r["C"] = 5 }},
+		{"trip limit", func(r map[string]int) { r["A"] = 10001 }},
+		{"starting rank", func(r map[string]int) { r["E"] = 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := makePolicy()
+			tc.edit(p.RankTripRequirements)
+			if validHeroesPolicy(p) {
+				t.Fatal("invalid rank requirements accepted")
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ const heroPaidSQL = `COALESCE((SELECT sum(p.amount_kobo) FROM heroes_manual_paym
 
 type heroBank struct {
 	ID            string    `json:"id"`
+	BankCode      string    `json:"bankCode"`
 	BankName      string    `json:"bankName"`
 	AccountName   string    `json:"accountName"`
 	MaskedNumber  string    `json:"maskedNumber"`
@@ -31,7 +33,8 @@ type heroBank struct {
 func (a *heroesAPI) readBank(c *gin.Context, id string, full bool) (*heroBank, error) {
 	var b heroBank
 	var number, name []byte
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT b.id::text,b.bank_name,b.account_name_ciphertext,b.account_number_ciphertext,b.account_number_masked,b.created_at FROM heroes_accounts h JOIN heroes_bank_accounts b ON b.id=h.payout_account_id AND b.hero_id=h.id WHERE h.id=$1::uuid`, id).Scan(&b.ID, &b.BankName, &name, &number, &b.MaskedNumber, &b.ProvidedAt)
+	var verified bool
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT b.id::text,b.bank_name,b.account_name_ciphertext,b.account_number_ciphertext,b.account_number_masked,b.created_at,b.bank_code,b.verified_at IS NOT NULL FROM heroes_accounts h JOIN heroes_bank_accounts b ON b.id=h.payout_account_id AND b.hero_id=h.id WHERE h.id=$1::uuid`, id).Scan(&b.ID, &b.BankName, &name, &number, &b.MaskedNumber, &b.ProvidedAt, &b.BankCode, &verified)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -46,11 +49,15 @@ func (a *heroesAPI) readBank(c *gin.Context, id string, full bool) (*heroBank, e
 		b.AccountNumber, err = openAdminValue(a.email.settingsKey, number, heroBankNumberPurpose)
 	}
 	b.Verification = "hero_provided"
+	if verified {
+		b.Verification = "monnify_verified"
+	}
 	return &b, err
 }
 func (a *heroesAPI) saveBank(c *gin.Context) {
 	var b struct {
 		BankName      string `json:"bankName"`
+		BankCode      string `json:"bankCode"`
 		AccountName   string `json:"accountName"`
 		AccountNumber string `json:"accountNumber"`
 	}
@@ -65,9 +72,33 @@ func (a *heroesAPI) saveBank(c *gin.Context) {
 	for _, r := range b.AccountNumber {
 		valid = valid && r >= '0' && r <= '9'
 	}
-	if !valid || b.BankName == "" || b.AccountName == "" || utf8.RuneCountInString(b.BankName) > 100 || utf8.RuneCountInString(b.AccountName) > 100 {
+	if !valid || b.BankName == "" || (b.BankCode == "" && b.AccountName == "") || utf8.RuneCountInString(b.BankName) > 100 || utf8.RuneCountInString(b.AccountName) > 100 {
 		driverError(c, 400, "invalid_bank", "Enter a bank, account name and 10-digit account number")
 		return
+	}
+	var verifiedAt *time.Time
+	b.BankCode = strings.TrimSpace(b.BankCode)
+	if b.BankCode != "" {
+		if len(b.BankCode) < 3 || len(b.BankCode) > 8 || strings.Trim(b.BankCode, "0123456789") != "" {
+			driverError(c, 400, "invalid_bank_code", "Select a valid bank")
+			return
+		}
+		var response struct {
+			Data struct {
+				AccountName string `json:"accountName"`
+				BankName    string `json:"bankName"`
+			} `json:"data"`
+		}
+		if err := paymentInternalRequest(c.Request.Context(), "/internal/refund-bank-accounts/verify", map[string]string{"accountNumber": b.AccountNumber, "bankCode": b.BankCode}, &response); err != nil || response.Data.AccountName == "" {
+			driverError(c, 422, "bank_unverified", "Bank details could not be verified. Check the account number and bank.")
+			return
+		}
+		b.AccountName = response.Data.AccountName
+		if response.Data.BankName != "" {
+			b.BankName = response.Data.BankName
+		}
+		now := time.Now()
+		verifiedAt = &now
 	}
 	number, err := sealAdminValue(a.email.settingsKey, b.AccountNumber, heroBankNumberPurpose)
 	if err != nil {
@@ -88,7 +119,7 @@ func (a *heroesAPI) saveBank(c *gin.Context) {
 	_, err = tx.Exec(c.Request.Context(), `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "hero-money:"+heroID(c))
 	id := uuid.NewString()
 	if err == nil {
-		_, err = tx.Exec(c.Request.Context(), `INSERT INTO heroes_bank_accounts(id,hero_id,bank_name,account_name_ciphertext,account_number_ciphertext,account_number_masked)VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, id, heroID(c), b.BankName, name, number, "******"+b.AccountNumber[6:])
+		_, err = tx.Exec(c.Request.Context(), `INSERT INTO heroes_bank_accounts(id,hero_id,bank_name,account_name_ciphertext,account_number_ciphertext,account_number_masked,bank_code,verified_at)VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8)`, id, heroID(c), b.BankName, name, number, "******"+b.AccountNumber[6:], b.BankCode, verifiedAt)
 	}
 	if err == nil {
 		_, err = tx.Exec(c.Request.Context(), `UPDATE heroes_accounts SET payout_account_id=$2::uuid WHERE id=$1::uuid`, heroID(c), id)
@@ -103,22 +134,22 @@ func (a *heroesAPI) saveBank(c *gin.Context) {
 	heroData(c, gin.H{"saved": true})
 }
 func (a *heroesAPI) payments(c *gin.Context, id string) ([]gin.H, error) {
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT p.id::text,p.amount_kobo,p.reference,p.paid_at,p.created_at,u.username,b.bank_name,b.account_number_masked,v.reason,v.created_at FROM heroes_manual_payments p JOIN admin_users u ON u.id=p.recorded_by JOIN heroes_bank_accounts b ON b.id=p.bank_account_id LEFT JOIN heroes_payment_reversals v ON v.payment_id=p.id WHERE p.hero_id=$1::uuid ORDER BY p.created_at DESC,p.id DESC LIMIT 100`, id)
+	rows, err := a.pool.Query(c.Request.Context(), `SELECT p.id::text,p.amount_kobo,p.reference,p.paid_at,p.created_at,COALESCE(u.username,'Monnify automatic payment'),b.bank_name,b.account_number_masked,v.reason,v.created_at,p.method FROM heroes_manual_payments p LEFT JOIN admin_users u ON u.id=p.recorded_by JOIN heroes_bank_accounts b ON b.id=p.bank_account_id LEFT JOIN heroes_payment_reversals v ON v.payment_id=p.id WHERE p.hero_id=$1::uuid ORDER BY p.created_at DESC,p.id DESC LIMIT 100`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []gin.H{}
 	for rows.Next() {
-		var pid, ref, by, bank, masked string
+		var pid, ref, by, bank, masked, method string
 		var amount int64
 		var paid, created time.Time
 		var reason *string
 		var reversedAt *time.Time
-		if err = rows.Scan(&pid, &amount, &ref, &paid, &created, &by, &bank, &masked, &reason, &reversedAt); err != nil {
+		if err = rows.Scan(&pid, &amount, &ref, &paid, &created, &by, &bank, &masked, &reason, &reversedAt, &method); err != nil {
 			return nil, err
 		}
-		items = append(items, gin.H{"id": pid, "amountKobo": amount, "reference": ref, "paidAt": paid, "recordedAt": created, "recordedBy": by, "bankName": bank, "maskedNumber": masked, "reversed": reason != nil, "reversalReason": reason, "reversedAt": reversedAt})
+		items = append(items, gin.H{"method": method, "id": pid, "amountKobo": amount, "reference": ref, "paidAt": paid, "recordedAt": created, "recordedBy": by, "bankName": bank, "maskedNumber": masked, "reversed": reason != nil, "reversalReason": reason, "reversedAt": reversedAt})
 	}
 	return items, rows.Err()
 }
@@ -197,6 +228,7 @@ func (a *adminAPI) recordHeroPayment(c *gin.Context) {
 		Reference string    `json:"reference"`
 		PaidAt    time.Time `json:"paidAt"`
 		BankID    string    `json:"bankAccountId"`
+		StageIDs  []string  `json:"stageIds"`
 	}
 	if c.ShouldBindJSON(&b) != nil {
 		driverError(c, 400, "invalid_payment", "Enter payment amount, date and reference")
@@ -227,6 +259,15 @@ func (a *adminAPI) recordHeroPayment(c *gin.Context) {
 	if err == nil {
 		if oldHero != id || oldRef != b.Reference || oldBank != b.BankID || oldAmount != b.Amount || !oldAt.Equal(b.PaidAt) {
 			driverError(c, 409, "payment_changed", "This request was already used for another payment")
+			return
+		}
+		var matches bool
+		if err = tx.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT array_agg(stage_id::text ORDER BY stage_id::text) FROM hero_stage_payment_allocations WHERE payment_id=$1::uuid),ARRAY[]::text[])=ARRAY(SELECT DISTINCT unnest($2::text[]) ORDER BY 1)`, b.ID, b.StageIDs).Scan(&matches); err != nil {
+			heroFailure(c)
+			return
+		}
+		if !matches {
+			driverError(c, 409, "payment_changed", "This request was already used for other stages")
 			return
 		}
 		heroData(c, gin.H{"recorded": true, "id": b.ID})
@@ -265,6 +306,12 @@ func (a *adminAPI) recordHeroPayment(c *gin.Context) {
 		return
 	}
 	if err == nil {
+		if err = referrals.AllocateStagePayment(c.Request.Context(), tx, id, b.ID, b.Amount, b.StageIDs); err != nil {
+			driverError(c, 409, "invalid_stage_payment", "Select unpaid credited stages matching the payment amount.")
+			return
+		}
+	}
+	if err == nil {
 		err = adminAudit(c, tx, "heroes.payment.recorded", "", gin.H{"heroId": id, "heroPaymentId": b.ID, "paymentId": b.ID, "amountKobo": b.Amount, "reference": b.Reference})
 	}
 	if err == nil {
@@ -290,7 +337,7 @@ func (a *adminAPI) reverseHeroPayment(c *gin.Context) {
 		return
 	}
 	var hero string
-	if err := a.pool.QueryRow(c.Request.Context(), `SELECT hero_id::text FROM heroes_manual_payments WHERE id=$1::uuid`, id).Scan(&hero); err != nil {
+	if err := a.pool.QueryRow(c.Request.Context(), `SELECT hero_id::text FROM heroes_manual_payments WHERE id=$1::uuid AND method='manual'`, id).Scan(&hero); err != nil {
 		driverError(c, 404, "payment_not_found", "Payment not found")
 		return
 	}

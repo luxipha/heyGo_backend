@@ -98,6 +98,7 @@ func NewHTTPHandlerWithTopups(secret string, svc repo.Service, bus *pubsub.Clien
 	r.POST("/webhooks/moniepoint", h.HandleMoniepoint)
 	r.POST("/webhooks/monnify", h.HandleMoniepoint)
 	if topups != nil {
+		r.POST("/internal/hero-transfers", h.heroTransfer)
 		r.POST("/internal/monnify/test", h.testMonnify)
 		r.POST("/internal/trip-payments/checkout", h.createTripCheckout)
 		r.POST("/internal/trip-payments/refresh", h.refreshTripPayment)

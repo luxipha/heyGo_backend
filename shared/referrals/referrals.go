@@ -24,10 +24,18 @@ var ErrConflict = errors.New("Your referrer is already confirmed")
 var ErrInvalid = errors.New("Referral code not found")
 var ErrStale = errors.New("Settings changed. Reload before saving")
 
+type Stage struct {
+	PayoutMode   string `json:"payoutMode,omitempty"`
+	TripTarget   int    `json:"tripTarget"`
+	RewardKobo   int64  `json:"rewardKobo"`
+	ApprovalMode string `json:"approvalMode"`
+}
+
 type Rule struct {
-	RewardKobo   int64 `json:"rewardKobo"`
-	TripTarget   int   `json:"tripTarget"`
-	DeadlineDays *int  `json:"deadlineDays"`
+	Stages       []Stage `json:"stages,omitempty"`
+	RewardKobo   int64   `json:"rewardKobo"`
+	TripTarget   int     `json:"tripTarget"`
+	DeadlineDays *int    `json:"deadlineDays"`
 }
 type Settings struct {
 	Version        int64           `json:"version"`
@@ -50,6 +58,23 @@ func (s Settings) Validate() error {
 		r, ok := s.Rules[key]
 		if !ok || r.RewardKobo < 0 || r.RewardKobo > 100000000 || r.TripTarget < 1 || r.TripTarget > 10000 || r.DeadlineDays != nil && (*r.DeadlineDays < 1 || *r.DeadlineDays > 3650) {
 			return fmt.Errorf("Invalid reward rule: %s", key)
+		}
+		if len(r.Stages) > 0 {
+			if key != "hero_driver" || len(r.Stages) > 20 {
+				return errors.New("Only Hero to Driver supports up to 20 stages")
+			}
+			last := 0
+			var total int64
+			for _, stage := range r.Stages {
+				if (stage.PayoutMode != "" && stage.PayoutMode != "manual" && stage.PayoutMode != "monnify") || stage.TripTarget <= last || stage.TripTarget > 10000 || stage.RewardKobo <= 0 || stage.RewardKobo > 100000000 || (stage.ApprovalMode != "manual" && stage.ApprovalMode != "automatic") {
+					return errors.New("Stages need increasing trip targets, positive rewards and a valid approval mode")
+				}
+				last = stage.TripTarget
+				total += stage.RewardKobo
+			}
+			if total > 100000000 || r.TripTarget != last || r.RewardKobo != total {
+				return errors.New("Hero reward and target must match stage totals")
+			}
 		}
 	}
 	for _, v := range []struct {
@@ -200,8 +225,20 @@ func Claim(ctx context.Context, tx pgx.Tx, userID, code, target string) error {
 	} else {
 		inviter = &r.ID
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO referral_attributions(id,invitee_id,inviter_id,hero_id,inviter_role,invitee_role,settings_version,reward_kobo,trip_target,deadline_at)VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10)`, uuid.NewString(), userID, inviter, hero, r.Role, target, s.Version, rule.RewardKobo, rule.TripTarget, deadline)
-	return err
+	referralID := uuid.NewString()
+	_, err = tx.Exec(ctx, `INSERT INTO referral_attributions(id,invitee_id,inviter_id,hero_id,inviter_role,invitee_role,settings_version,reward_kobo,trip_target,deadline_at)VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10)`, referralID, userID, inviter, hero, r.Role, target, s.Version, rule.RewardKobo, rule.TripTarget, deadline)
+	if err != nil {
+		return err
+	}
+	for i, stage := range rule.Stages {
+		if stage.PayoutMode == "" {
+			stage.PayoutMode = "manual"
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO hero_referral_stages(id,referral_id,position,trip_target,reward_kobo,approval_mode,payout_mode) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)`, uuid.NewString(), referralID, i+1, stage.TripTarget, stage.RewardKobo, stage.ApprovalMode, stage.PayoutMode); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func OwnCode(ctx context.Context, pool *pgxpool.Pool, user, role string) (string, error) {
 	if role != "driver" && role != "rider" {
@@ -230,7 +267,7 @@ func ProcessRewards(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 
-	rows, err := tx.Query(ctx, `SELECT a.id::text FROM referral_attributions a JOIN users u ON u.id=a.invitee_id LEFT JOIN driver_eligibility e ON e.driver_id=u.id WHERE a.qualified_at IS NULL AND a.reward_kobo>0 AND u.active AND a.invitee_role=ANY(u.roles) AND (a.invitee_role='rider' OR COALESCE(e.eligible_to_drive,false)) AND NOT EXISTS(SELECT 1 FROM simulation_participants sp WHERE sp.actor_user_id=u.id OR sp.actor_user_id=a.inviter_id) AND `+ProgressSQL+`>=a.trip_target ORDER BY a.linked_at LIMIT 100 FOR UPDATE OF a SKIP LOCKED`)
+	rows, err := tx.Query(ctx, `SELECT a.id::text FROM referral_attributions a JOIN users u ON u.id=a.invitee_id LEFT JOIN driver_eligibility e ON e.driver_id=u.id WHERE NOT EXISTS(SELECT 1 FROM hero_referral_stages hs WHERE hs.referral_id=a.id) AND a.qualified_at IS NULL AND a.reward_kobo>0 AND u.active AND a.invitee_role=ANY(u.roles) AND (a.invitee_role='rider' OR COALESCE(e.eligible_to_drive,false)) AND NOT EXISTS(SELECT 1 FROM simulation_participants sp WHERE sp.actor_user_id=u.id OR sp.actor_user_id=a.inviter_id) AND `+ProgressSQL+`>=a.trip_target ORDER BY a.linked_at LIMIT 100 FOR UPDATE OF a SKIP LOCKED`)
 	if err != nil {
 		return err
 	}
@@ -256,6 +293,9 @@ func ProcessRewards(ctx context.Context, pool *pgxpool.Pool) error {
 			return err
 		}
 	}
+	if err = ProcessStages(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -277,7 +317,7 @@ func Approve(ctx context.Context, tx pgx.Tx, ids []string, staff string) error {
 		var hero *string
 		var amount int64
 		var qualified, credited *time.Time
-		err := tx.QueryRow(ctx, `SELECT COALESCE(inviter_id::text,''),inviter_role,hero_id::text,reward_kobo,qualified_at,credited_at FROM referral_attributions WHERE id=$1::uuid FOR UPDATE`, id).Scan(&user, &role, &hero, &amount, &qualified, &credited)
+		err := tx.QueryRow(ctx, `SELECT COALESCE(inviter_id::text,''),inviter_role,hero_id::text,reward_kobo,qualified_at,credited_at FROM referral_attributions WHERE id=$1::uuid AND NOT EXISTS(SELECT 1 FROM hero_referral_stages hs WHERE hs.referral_id=referral_attributions.id) FOR UPDATE`, id).Scan(&user, &role, &hero, &amount, &qualified, &credited)
 		if err != nil {
 			return err
 		}

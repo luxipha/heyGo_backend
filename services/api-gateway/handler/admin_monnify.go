@@ -88,7 +88,7 @@ func (a *adminAPI) getMonnifySettings(c *gin.Context) {
 		heroFailure(c)
 		return
 	}
-	heroData(c, gin.H{"settings": s, "configured": s.Configured(), "apiKeyConfigured": len(s.APIKey) > 0, "secretKeyConfigured": len(s.SecretKey) > 0, "contractCodeConfigured": len(s.ContractCode) > 0, "encryptionReady": len(a.settingsKey) == 32, "liveAllowed": false})
+	heroData(c, gin.H{"settings": s, "configured": s.Configured(), "apiKeyConfigured": len(s.APIKey) > 0, "secretKeyConfigured": len(s.SecretKey) > 0, "contractCodeConfigured": len(s.ContractCode) > 0, "disbursementSourceConfigured": len(s.DisbursementSource) > 0, "encryptionReady": len(a.settingsKey) == 32, "liveAllowed": false})
 }
 func (a *adminAPI) putMonnifySettings(c *gin.Context) {
 	if len(a.settingsKey) != 32 {
@@ -96,6 +96,7 @@ func (a *adminAPI) putMonnifySettings(c *gin.Context) {
 		return
 	}
 	var b struct {
+		DisbursementSource  string `json:"disbursementSourceAccount"`
 		Version             int64  `json:"version"`
 		Enabled             bool   `json:"enabled"`
 		TripPaymentsEnabled bool   `json:"tripPaymentsEnabled"`
@@ -106,6 +107,10 @@ func (a *adminAPI) putMonnifySettings(c *gin.Context) {
 	}
 	if c.ShouldBindJSON(&b) != nil || b.Version < 0 || b.Environment != "sandbox" || b.TripPaymentsEnabled && !b.Enabled {
 		driverError(c, 400, "invalid_monnify_settings", "Use sandbox settings. Enable Monnify before enabling trip collection.")
+		return
+	}
+	if b.DisbursementSource != "" && (len(b.DisbursementSource) != 10 || strings.Trim(b.DisbursementSource, "0123456789") != "") {
+		driverError(c, 400, "invalid_disbursement_source", "Enter the 10-digit Monnify disbursement wallet account number.")
 		return
 	}
 	for _, v := range []string{b.APIKey, b.SecretKey, b.ContractCode} {
@@ -137,7 +142,7 @@ func (a *adminAPI) putMonnifySettings(c *gin.Context) {
 	for _, field := range []struct {
 		value, purpose string
 		target         *[]byte
-	}{{b.APIKey, "api-key", &s.APIKey}, {b.SecretKey, "secret-key", &s.SecretKey}, {b.ContractCode, "contract-code", &s.ContractCode}} {
+	}{{b.APIKey, "api-key", &s.APIKey}, {b.SecretKey, "secret-key", &s.SecretKey}, {b.ContractCode, "contract-code", &s.ContractCode}, {b.DisbursementSource, "disbursement-source", &s.DisbursementSource}} {
 		if strings.TrimSpace(field.value) != "" {
 			*field.target, e = monnifysettings.Seal(a.settingsKey, strings.TrimSpace(field.value), field.purpose)
 			if e != nil {
@@ -154,9 +159,9 @@ func (a *adminAPI) putMonnifySettings(c *gin.Context) {
 		driverError(c, 400, "replace_environment_credentials", "Supply all credentials when changing environment.")
 		return
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO admin_monnify_settings(enabled,trip_payments_enabled,environment,api_key_ciphertext,secret_key_ciphertext,contract_code_ciphertext,updated_by)VALUES($1,$2,$3,$4,$5,$6,$7::uuid)`, b.Enabled, b.TripPaymentsEnabled, b.Environment, s.APIKey, s.SecretKey, s.ContractCode, currentAdmin(c).ID)
+	_, e = tx.Exec(ctx, `INSERT INTO admin_monnify_settings(enabled,trip_payments_enabled,environment,api_key_ciphertext,secret_key_ciphertext,contract_code_ciphertext,updated_by,disbursement_source_ciphertext)VALUES($1,$2,$3,$4,$5,$6,$7::uuid,$8)`, b.Enabled, b.TripPaymentsEnabled, b.Environment, s.APIKey, s.SecretKey, s.ContractCode, currentAdmin(c).ID, s.DisbursementSource)
 	if e == nil {
-		e = adminAudit(c, tx, "monnify.settings.updated", "", gin.H{"previousVersion": b.Version, "enabled": b.Enabled, "tripPaymentsEnabled": b.TripPaymentsEnabled, "environment": b.Environment, "apiKeyChanged": b.APIKey != "", "secretKeyChanged": b.SecretKey != "", "contractCodeChanged": b.ContractCode != ""})
+		e = adminAudit(c, tx, "monnify.settings.updated", "", gin.H{"previousVersion": b.Version, "enabled": b.Enabled, "tripPaymentsEnabled": b.TripPaymentsEnabled, "environment": b.Environment, "apiKeyChanged": b.APIKey != "", "secretKeyChanged": b.SecretKey != "", "disbursementSourceChanged": b.DisbursementSource != "", "contractCodeChanged": b.ContractCode != ""})
 	}
 	if e == nil {
 		e = tx.Commit(ctx)

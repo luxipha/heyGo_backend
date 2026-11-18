@@ -123,8 +123,8 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	// "recent" (default) pages by last update, newest first; "oldest" pages by
 	// application time, oldest first, so the longest-waiting driver is on top.
 	sort := ctx.DefaultQuery("sort", "recent")
-	if sort != "recent" && sort != "oldest" {
-		driverError(ctx, http.StatusBadRequest, "invalid_sort", "Sort must be recent or oldest")
+	if sort != "recent" && sort != "oldest" && sort != "newest" {
+		driverError(ctx, http.StatusBadRequest, "invalid_sort", "Sort must be recent, oldest or newest")
 		return
 	}
 	withProgress := ctx.Query("progress") == "1"
@@ -172,8 +172,9 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 	AND ($7='all' OR balance_band=$7)
 	AND ($8='all' OR expiry_band=$8)
 	AND ($9='' OR lower(make)=lower($9))
-	AND ($10::TIMESTAMPTZ IS NULL OR ($13='recent' AND (updated_at,driver_id)<($10,$11::UUID)) OR ($13='oldest' AND (applied_at,driver_id)>($10,$11::UUID)))
-	ORDER BY CASE WHEN $13='oldest' THEN applied_at END ASC,CASE WHEN $13='oldest' THEN driver_id END ASC,
+	AND ($10::TIMESTAMPTZ IS NULL OR ($13='recent' AND (updated_at,driver_id)<($10,$11::UUID)) OR ($13='oldest' AND (applied_at,driver_id)>($10,$11::UUID)) OR ($13='newest' AND (applied_at,driver_id)<($10,$11::UUID)))
+	ORDER BY CASE WHEN $13='newest' THEN applied_at END DESC,CASE WHEN $13='newest' THEN driver_id END DESC,
+		CASE WHEN $13='oldest' THEN applied_at END ASC,CASE WHEN $13='oldest' THEN driver_id END ASC,
 		CASE WHEN $13='recent' THEN updated_at END DESC,CASE WHEN $13='recent' THEN driver_id END DESC LIMIT $12`, asOf, status, searchID, searchName, online, market, balance, expiry, vehicle, cursorTime, cursorID, limit+1, sort)
 	if err != nil {
 		reviewFailure(ctx)
@@ -214,7 +215,7 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 		items = items[:limit]
 		last := items[len(items)-1]
 		key := last["updatedAt"].(time.Time)
-		if sort == "oldest" {
+		if sort == "oldest" || sort == "newest" {
 			key = last["appliedAt"].(time.Time)
 		}
 		value := encodeDriverTripHistoryCursor(driverTripHistoryCursor{OccurredAt: key, ID: last["driverId"].(string)})

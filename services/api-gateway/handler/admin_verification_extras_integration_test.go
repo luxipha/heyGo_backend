@@ -122,7 +122,18 @@ func TestVerificationFaceMatchReuploadAndQueue(t *testing.T) {
 	if len(order) != 2 || order[0] != earlier {
 		t.Fatalf("oldest-first order = %v, want earlier applicant first", order)
 	}
-	request(http.MethodGet, "/admin/drivers?sort=newest", "", "", nil, api.listPartners, 400)
+	newest := request(http.MethodGet, "/admin/drivers?status=all&sort=newest&limit=100", "", "", nil, api.listPartners, 200)
+	order = nil
+	for _, raw := range newest["data"].([]any) {
+		id := raw.(map[string]any)["driverId"].(string)
+		if id == earlier || id == driver {
+			order = append(order, id)
+		}
+	}
+	if len(order) != 2 || order[0] != driver {
+		t.Fatalf("newest-first order = %v", order)
+	}
+	request(http.MethodGet, "/admin/drivers?sort=invalid", "", "", nil, api.listPartners, 400)
 
 	// awaiting_review covers pending drivers and approved drivers with a new vehicle to review.
 	exec(`UPDATE driver_profiles SET admin_status='approved' WHERE driver_id=$1::UUID`, earlier)

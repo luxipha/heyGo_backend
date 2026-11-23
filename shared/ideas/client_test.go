@@ -25,6 +25,9 @@ func TestIdeasClientConfigAndRedirectSafety(t *testing.T) {
 	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1) }))
 	defer other.Close()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.UserAgent() != "HeyGo-Ideas-Bridge/1.0" || r.Header.Get("Accept") != "application/json" {
+			t.Error("missing bridge client identification or JSON response preference")
+		}
 		if r.Header.Get("Authorization") != "Bearer secret-test-token" {
 			t.Error("missing server auth")
 		}

@@ -148,7 +148,7 @@ func (a *riderAmendmentAPI) preview(c *gin.Context) {
 		driverError(c, 503, "route_unavailable", "Replacement route is unavailable")
 		return
 	}
-	if currentRoute.Provider != route.Provider {
+	if err := amendmentRouteProviders(currentRoute, route); err != nil {
 		driverError(c, 503, "route_unavailable", "Route provider changed; retry the comparison")
 		return
 	}
@@ -211,6 +211,9 @@ func amendmentTiming(at time.Time, status string, current, proposed float64) gin
 }
 
 func amendmentRoute(ctx context.Context, router geo.RouteService, origin geo.Coordinate, stops []amendmentStop, destination agent.Place) (*geo.RouteResponse, error) {
+	if !origin.Valid() {
+		return nil, errors.New("invalid route origin")
+	}
 	points := []geo.Coordinate{origin}
 	for _, stop := range stops {
 		if stop.CompletedAt == nil {
@@ -219,11 +222,23 @@ func amendmentRoute(ctx context.Context, router geo.RouteService, origin geo.Coo
 	}
 	points = append(points, geo.Coordinate{Latitude: destination.Location.Latitude, Longitude: destination.Location.Longitude})
 	combined := &geo.RouteResponse{Routes: []geo.Route{{TrafficAware: true}}}
+	routed := 0
 	for i := 1; i < len(points); i++ {
 		if !points[i].Valid() {
 			return nil, errors.New("invalid route point")
 		}
-		part, err := router.Route(ctx, points[i-1], points[i])
+		// Exactly coincident endpoints have no remaining travel. Do not ask a
+		// road provider to invent a route for a zero-length leg.
+		if points[i-1] == points[i] {
+			continue
+		}
+		read := router.Route
+		if amendmentRouter, ok := router.(interface {
+			RouteAllowZero(context.Context, geo.Coordinate, geo.Coordinate) (*geo.RouteResponse, error)
+		}); ok {
+			read = amendmentRouter.RouteAllowZero
+		}
+		part, err := read(ctx, points[i-1], points[i])
 		if err != nil || part == nil || len(part.Routes) == 0 {
 			return nil, errors.New("route unavailable")
 		}
@@ -231,10 +246,11 @@ func amendmentRoute(ctx context.Context, router geo.RouteService, origin geo.Coo
 		if r.Distance < 0 || r.Duration < 0 || math.IsNaN(r.Distance+r.Duration) || math.IsInf(r.Distance+r.Duration, 0) || len(r.Geometry.Coordinates) < 2 {
 			return nil, errors.New("invalid route")
 		}
-		if i > 1 && part.Provider != combined.Provider {
+		if routed > 0 && part.Provider != combined.Provider {
 			return nil, errors.New("route provider changed")
 		}
 		combined.Provider = part.Provider
+		routed++
 		sum := &combined.Routes[0]
 		sum.Distance += r.Distance
 		sum.Duration += r.Duration
@@ -243,7 +259,30 @@ func amendmentRoute(ctx context.Context, router geo.RouteService, origin geo.Coo
 		sum.Geometry.Coordinates = append(sum.Geometry.Coordinates, r.Geometry.Coordinates...)
 		sum.Maneuvers = append(sum.Maneuvers, r.Maneuvers...)
 	}
+	if routed == 0 {
+		combined.Routes[0].Geometry.Coordinates = [][]float64{{origin.Longitude, origin.Latitude}, {origin.Longitude, origin.Latitude}}
+	}
 	return combined, nil
+}
+
+// A mathematically zero route needs no provider request. Its comparison uses
+// the identity of the other, genuinely routed alternative, never a fallback.
+func amendmentRouteProviders(current, proposed *geo.RouteResponse) error {
+	zero := func(route *geo.RouteResponse) bool {
+		return route.Provider == "" && len(route.Routes) == 1 && route.Routes[0].Distance == 0 && route.Routes[0].Duration == 0 && len(route.Routes[0].Geometry.Coordinates) == 2 &&
+			len(route.Routes[0].Geometry.Coordinates[0]) == 2 && len(route.Routes[0].Geometry.Coordinates[1]) == 2 &&
+			route.Routes[0].Geometry.Coordinates[0][0] == route.Routes[0].Geometry.Coordinates[1][0] && route.Routes[0].Geometry.Coordinates[0][1] == route.Routes[0].Geometry.Coordinates[1][1]
+	}
+	if zero(current) {
+		current.Provider = proposed.Provider
+	}
+	if zero(proposed) {
+		proposed.Provider = current.Provider
+	}
+	if current.Provider == "" || current.Provider != proposed.Provider {
+		return errors.New("route provider changed or unavailable")
+	}
+	return nil
 }
 
 func tripOptionsEvent(ctx context.Context, tx pgx.Tx, trip, source, kind string, payload any) error {

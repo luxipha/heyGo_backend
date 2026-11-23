@@ -17,6 +17,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/contracts"
 	"github.com/luxipha/heyGo_backend/shared/driverstate"
 	"github.com/luxipha/heyGo_backend/shared/geo"
+	"github.com/luxipha/heyGo_backend/shared/storage"
 	"github.com/luxipha/heyGo_backend/shared/tripstate"
 )
 
@@ -26,9 +27,11 @@ type riderHomeDB interface {
 type riderHomeAPI struct {
 	pool   riderHomeDB
 	router geo.RouteService
+	files  storage.ObjectStore
 }
 
 type riderTripSnapshot struct {
+	VehiclePhoto        gin.H               `json:"vehiclePhoto"`
 	OfferDiscountKobo   int64               `json:"offerDiscountKobo"`
 	DestinationETA      riderDestinationETA `json:"destinationEta"`
 	ScheduledBookingID  *string             `json:"scheduledBookingId"`
@@ -46,6 +49,7 @@ type riderTripSnapshot struct {
 	Status              string              `json:"status"`
 	Version             int64               `json:"version"`
 	PackageSlug         string              `json:"packageSlug"`
+	PackageName         string              `json:"packageName"`
 	FareKobo            int64               `json:"fareKobo"`
 	NoShowDebtKobo      int64               `json:"noShowDebtKobo"`
 	AmountDueKobo       int64               `json:"amountDueKobo"`
@@ -73,8 +77,11 @@ type riderTripSnapshot struct {
 	CancellationActor  *string         `json:"cancellationActor"`
 }
 
-func registerRiderHomeRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool) {
+func registerRiderHomeRoutes(authenticated *gin.RouterGroup, pool *pgxpool.Pool, stores ...storage.ObjectStore) {
 	a := &riderHomeAPI{}
+	if len(stores) > 0 {
+		a.files = stores[0]
+	}
 	if pool != nil {
 		a.pool = pool
 	}
@@ -100,9 +107,9 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
 		args = args[:1]
 	}
 	var t riderTripSnapshot
-	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.version,f.package_slug,
+	err := a.pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,t.version,f.package_slug,COALESCE((SELECT name FROM ride_categories WHERE slug=f.package_slug),''),
  ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo-t.ride_credit_kobo-CASE WHEN t.status='completed' THEN 0 ELSE LEAST(t.offer_discount_kobo,ROUND(f.total_fare_minor)::bigint) END,t.ride_credit_kobo,f.route,f.pickup_metadata,f.destination_metadata,t.matching_deadline,t.matching_outcome,
- (SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'status',a.status,'expiresAt',a.expires_at,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',CASE WHEN a.status='accepted' THEN COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) ELSE NULL END) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND a.status IN ('offered','accepted') ORDER BY a.attempt DESC LIMIT 1),
+ (SELECT jsonb_build_object('id',a.trip_id::TEXT||':'||a.attempt::TEXT,'attempt',a.attempt,'status',a.status,'expiresAt',a.expires_at,'pickupEtaSeconds',NULL,'pickupEtaStatus','unavailable','vehicle',CASE WHEN a.status='accepted' THEN COALESCE(t.accepted_vehicle_snapshot,jsonb_build_object('vehicleId',v.id,'make',v.make,'model',v.model,'color',v.color,'plate',v.plate,'packageSlug',v.package_slug)) WHEN a.status='completed' THEN t.accepted_vehicle_snapshot ELSE NULL END) FROM driver_assignments a LEFT JOIN driver_vehicles v ON v.driver_id=a.driver_id WHERE a.trip_id=t.id AND a.driver_id=t.assigned_driver_id AND (a.status IN ('offered','accepted') OR (t.status='completed' AND a.status='completed')) ORDER BY a.attempt DESC LIMIT 1),
  CASE WHEN f.pickup IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.pickup::geometry),'longitude',ST_X(f.pickup::geometry)) END,
  CASE WHEN f.destination IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('latitude',ST_Y(f.destination::geometry),'longitude',ST_X(f.destination::geometry)) END,
  CASE WHEN t.status IN ('accepted','arrived','started','completed') AND d.id IS NOT NULL
@@ -118,7 +125,7 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
  LEFT JOIN driver_live_locations l ON l.driver_id=d.id
  LEFT JOIN trip_settlements s ON s.trip_id=t.id
  WHERE t.rider_id=$1::UUID AND `+where+` ORDER BY t.created_at DESC,t.id DESC LIMIT 1`, args...).Scan(
-		&t.ID, &t.Status, &t.Version, &t.PackageSlug, &t.FareKobo, &t.NoShowDebtKobo, &t.AmountDueKobo, &t.RideCreditKobo, &t.Route, &t.PickupPlace, &t.DestinationPlace, &t.MatchingDeadline, &t.MatchingOutcome, &t.Assignment, &t.Pickup, &t.Destination, &t.Driver, &t.SettlementStatus, &t.CreatedAt, &t.UpdatedAt, &t.ArrivedAt, &t.StartedAt, &t.CompletedAt, &t.CancelledAt, &t.CancellationReason, &t.CancellationActor, &t.RidePreferences, &t.PreferencesRevision, &t.GuestName, &t.GuestPhone, &t.PickupNote, &t.Stops, &t.RouteRevision, &t.OfferDiscountKobo)
+		&t.ID, &t.Status, &t.Version, &t.PackageSlug, &t.PackageName, &t.FareKobo, &t.NoShowDebtKobo, &t.AmountDueKobo, &t.RideCreditKobo, &t.Route, &t.PickupPlace, &t.DestinationPlace, &t.MatchingDeadline, &t.MatchingOutcome, &t.Assignment, &t.Pickup, &t.Destination, &t.Driver, &t.SettlementStatus, &t.CreatedAt, &t.UpdatedAt, &t.ArrivedAt, &t.StartedAt, &t.CompletedAt, &t.CancelledAt, &t.CancellationReason, &t.CancellationActor, &t.RidePreferences, &t.PreferencesRevision, &t.GuestName, &t.GuestPhone, &t.PickupNote, &t.Stops, &t.RouteRevision, &t.OfferDiscountKobo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -141,6 +148,7 @@ func (a *riderHomeAPI) readTrip(ctx *gin.Context, id string, active bool) (*ride
 		enrichAssignedPickupETA(ctx.Request.Context(), a.pool, router, &t)
 	}
 	enrichDestinationETA(ctx.Request.Context(), a.pool, router, &t)
+	t.VehiclePhoto = a.tripVehiclePhoto(ctx, t.ID)
 	return &t, nil
 }
 func (a *riderHomeAPI) activeTrip(ctx *gin.Context) {
@@ -162,6 +170,7 @@ func (a *riderHomeAPI) activeTrip(ctx *gin.Context) {
 		driverError(ctx, 503, "trip_unavailable", "Your current trip is unavailable")
 		return
 	}
+	ctx.Header("Cache-Control", "private, no-store")
 	ctx.JSON(200, contracts.APIResponse{Data: gin.H{"trip": t, "afterEventId": fmt.Sprintf("evt_%d", cursor)}})
 }
 func (a *riderHomeAPI) tripDetail(ctx *gin.Context) {
@@ -179,6 +188,7 @@ func (a *riderHomeAPI) tripDetail(ctx *gin.Context) {
 		driverError(ctx, 404, "trip_not_found", "Trip was not found")
 		return
 	}
+	ctx.Header("Cache-Control", "private, no-store")
 	ctx.JSON(200, contracts.APIResponse{Data: t})
 }
 func (a *riderHomeAPI) availability(ctx *gin.Context) {

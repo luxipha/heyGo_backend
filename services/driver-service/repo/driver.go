@@ -226,15 +226,30 @@ func (r *postgresDriverRepo) MatchAndReserve(ctx context.Context, tripID, packag
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO trip_event_outbox(trip_id,topic,recipient_id,payload,correlation_id)
-		VALUES($1::UUID,$2,$3::UUID,$4::JSONB,$5) ON CONFLICT DO NOTHING`,
-		tripID, contracts.DriverCmdTripRequest, c.Driver.Id, offer, correlation.FromContext(ctx)); err != nil {
+	if err := enqueueDriverOffer(ctx, tx, tripID, c.Driver.Id, offer); err != nil {
 		return nil, fmt.Errorf("enqueue driver offer: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// Commit the offer and its socket event together. A short-lived offer must not
+// spend its response window waiting for broker delivery to the gateway. Keep
+// the outbox event ID so eventual Pub/Sub replay cannot duplicate the event or
+// its notification.
+func enqueueDriverOffer(ctx context.Context, tx pgx.Tx, tripID, driverID string, offer []byte) error {
+	var outboxID int64
+	var stored json.RawMessage
+	if err := tx.QueryRow(ctx, `INSERT INTO trip_event_outbox(trip_id,topic,recipient_id,payload,correlation_id)
+		VALUES($1::UUID,$2,$3::UUID,$4::JSONB,$5)
+		ON CONFLICT(trip_id,topic,recipient_id,attempt) DO UPDATE SET payload=trip_event_outbox.payload
+		RETURNING id,payload`, tripID, contracts.DriverCmdTripRequest, driverID, offer, correlation.FromContext(ctx)).Scan(&outboxID, &stored); err != nil {
+		return err
+	}
+	_, err := messaging.AppendEventTx(ctx, tx, driverID, fmt.Sprintf("trip-outbox-%d", outboxID), contracts.DriverCmdTripRequest, stored)
+	return err
 }
 
 func mergeNoShowDebtOfferFields(source, tripJSON []byte) ([]byte, error) {

@@ -95,6 +95,18 @@ func (a *heroesAPI) requestEmailOTP(c *gin.Context) {
 			}
 		}
 	}
+	if reviewVersion == nil {
+		// New sign-ups can be switched off in admin. Existing Heroes can always sign in.
+		var exists, accepting bool
+		if err = tx.QueryRow(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM heroes_accounts WHERE email=$1),COALESCE((SELECT accepting_new FROM heroes_settings WHERE id=1),true)`, email).Scan(&exists, &accepting); err != nil {
+			heroFailure(c)
+			return
+		}
+		if !exists && !accepting {
+			driverError(c, 403, "heroes_closed", "Heroes is not accepting new sign-ups right now. Please check back soon.")
+			return
+		}
+	}
 	_, err = tx.Exec(c.Request.Context(), `INSERT INTO heroes_email_otps(email,challenge_id,code_hash,expires_at,review_otp_version)VALUES($1,$2::uuid,$3,$4,$5) ON CONFLICT(email)DO UPDATE SET challenge_id=EXCLUDED.challenge_id,code_hash=EXCLUDED.code_hash,expires_at=EXCLUDED.expires_at,review_otp_version=EXCLUDED.review_otp_version,requested_at=now(),attempts=0,used_at=NULL`, email, id, a.otpHash(id, code), expires, reviewVersion)
 	if err != nil {
 		heroFailure(c)
@@ -193,6 +205,16 @@ func (a *heroesAPI) verifyEmailOTP(c *gin.Context) {
 		tag, e := heroesToken()
 		if e != nil {
 			heroFailure(c)
+			return
+		}
+		var accepting bool
+		if e := tx.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT accepting_new FROM heroes_settings WHERE id=1),true)`).Scan(&accepting); e != nil {
+			heroFailure(c)
+			return
+		}
+		// A code requested before sign-ups were closed must not create an account afterwards.
+		if !accepting && reviewVersion == nil {
+			driverError(c, 403, "heroes_closed", "Heroes is not accepting new sign-ups right now. Please check back soon.")
 			return
 		}
 		id = uuid.NewString()

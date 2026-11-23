@@ -85,6 +85,16 @@ func ConfiguredRoutes() (RouteService, error) {
 	return &OSRM{Endpoint: strings.TrimRight(endpoint, "/"), Client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 func (o *OSRM) Route(ctx context.Context, a, b Coordinate) (*RouteResponse, error) {
+	return o.route(ctx, a, b, false)
+}
+
+// RouteAllowZero accepts provider-rounded zero time only for a validated
+// sub-metre snapped road segment. Ordinary route callers remain strict.
+func (o *OSRM) RouteAllowZero(ctx context.Context, a, b Coordinate) (*RouteResponse, error) {
+	return o.route(ctx, a, b, true)
+}
+
+func (o *OSRM) route(ctx context.Context, a, b Coordinate, allowZero bool) (*RouteResponse, error) {
 	if !a.Valid() || !b.Valid() {
 		return nil, errors.New("invalid route coordinates")
 	}
@@ -110,9 +120,10 @@ func (o *OSRM) Route(ctx context.Context, a, b Coordinate) (*RouteResponse, erro
 		return nil, errors.New("route response too large or unreadable")
 	}
 	var wire struct {
-		Code   string
-		Routes []struct {
-			Distance, Duration float64
+		Code      string
+		Waypoints []struct{ Location []float64 }
+		Routes    []struct {
+			Distance, Duration *float64
 			Geometry           Geometry
 			Legs               []struct {
 				Steps []struct {
@@ -130,10 +141,21 @@ func (o *OSRM) Route(ctx context.Context, a, b Coordinate) (*RouteResponse, erro
 		return nil, errors.New("no usable route")
 	}
 	w := wire.Routes[0]
-	if !positive(w.Distance) || !positive(w.Duration) || len(w.Geometry.Coordinates) < 2 {
+	if w.Distance == nil || w.Duration == nil {
+		return nil, errors.New("missing route measurements")
+	}
+	distance, duration := *w.Distance, *w.Duration
+	zeroTime := allowZero && duration == 0 && validZeroTimeOSRM(distance, w.Geometry.Coordinates, func() [][]float64 {
+		points := make([][]float64, len(wire.Waypoints))
+		for i, waypoint := range wire.Waypoints {
+			points[i] = waypoint.Location
+		}
+		return points
+	}())
+	if ((!positive(distance) || !positive(duration)) && !zeroTime) || len(w.Geometry.Coordinates) < 2 {
 		return nil, errors.New("invalid route measurements")
 	}
-	r := Route{Distance: w.Distance, Duration: w.Duration, Geometry: w.Geometry}
+	r := Route{Distance: distance, Duration: duration, Geometry: w.Geometry}
 	for _, p := range r.Geometry.Coordinates {
 		if len(p) != 2 || !(Coordinate{Latitude: p[1], Longitude: p[0]}).Valid() {
 			return nil, errors.New("invalid route geometry")
@@ -148,6 +170,31 @@ func (o *OSRM) Route(ctx context.Context, a, b Coordinate) (*RouteResponse, erro
 		}
 	}
 	return &RouteResponse{Routes: []Route{r}, Provider: "osrm"}, nil
+}
+
+func validZeroTimeOSRM(distance float64, geometry, snapped [][]float64) bool {
+	// OSRM rounds metres/time in its response; this opt-in is bounded to a
+	// sub-metre segment, not an arbitrary short trip or a provider failure.
+	if math.IsNaN(distance) || math.IsInf(distance, 0) || distance < 0 || distance >= 1 || len(geometry) < 2 || len(snapped) != 2 {
+		return false
+	}
+	for _, point := range append(append([][]float64{}, geometry...), snapped...) {
+		if len(point) != 2 || !(Coordinate{Latitude: point[1], Longitude: point[0]}).Valid() {
+			return false
+		}
+	}
+	if geometry[0][0] != snapped[0][0] || geometry[0][1] != snapped[0][1] || geometry[len(geometry)-1][0] != snapped[1][0] || geometry[len(geometry)-1][1] != snapped[1][1] {
+		return false
+	}
+	length := 0.0
+	for i := 1; i < len(geometry); i++ {
+		a, b := geometry[i-1], geometry[i]
+		r := math.Pi / 180
+		dlat, dlng := (b[1]-a[1])*r, (b[0]-a[0])*r
+		h := math.Sin(dlat/2)*math.Sin(dlat/2) + math.Cos(a[1]*r)*math.Cos(b[1]*r)*math.Sin(dlng/2)*math.Sin(dlng/2)
+		length += 6371000 * 2 * math.Atan2(math.Sqrt(h), math.Sqrt(math.Max(0, 1-h)))
+	}
+	return length < 1
 }
 func positive(n float64) bool { return n > 0 && !math.IsNaN(n) && !math.IsInf(n, 0) }
 

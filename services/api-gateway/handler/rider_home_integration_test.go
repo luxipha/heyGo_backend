@@ -62,7 +62,7 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 	exec(`INSERT INTO pricing_package_rates VALUES($1::UUID,'sedan',10000,100,100)`, pricing)
 	exec(`INSERT INTO operating_balance_policies(id,market_code,version,minimum_kobo,warning_kobo,allow_negative,maximum_negative_kobo,status,effective_from,created_by,approved_by,approved_at) VALUES($1::UUID,$2,1,1,1,FALSE,0,'approved',NOW()-INTERVAL '1 day',$3::UUID,$4::UUID,NOW())`, uuid.NewString(), market, creator, approver)
 	exec(`INSERT INTO driver_profiles(driver_id,manual_verification_status,admin_status,admin_reviewed_at) VALUES($1::UUID,'approved','approved',NOW()+INTERVAL '1 second')`, driver)
-	exec(`INSERT INTO driver_vehicles(driver_id,package_slug)VALUES($1::uuid,'sedan')`, driver)
+	exec(`INSERT INTO driver_vehicles(driver_id,package_slug,make,model,color,plate,review_status,approval_status)VALUES($1::uuid,'sedan','Audi','A4','Black','TEST','approved','approved')`, driver)
 	for _, kind := range []string{"driver_license", "vehicle_license", "roadworthiness", "auto_insurance", "hackney_permit"} {
 		exec(`INSERT INTO driver_documents(id,driver_id,type,status,storage_key,expires_at) VALUES($1::UUID,$2::UUID,$3,'approved','test',NOW()+INTERVAL '1 day')`, uuid.NewString(), driver, kind)
 	}
@@ -130,11 +130,38 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 		if response.Code != 200 || !strings.Contains(response.Body.String(), trip) {
 			t.Fatalf("recover %s: %s", status, response.Body.String())
 		}
+		if !strings.Contains(response.Body.String(), `"packageName":"Sedan"`) {
+			t.Fatalf("trip must expose catalogue category name: %s", response.Body.String())
+		}
 		if (status == "pending" || status == "assigned") && !strings.Contains(response.Body.String(), `"driver":null`) {
 			t.Fatal("offered driver was disclosed before acceptance")
 		}
 	}
 	exec(`INSERT INTO driver_assignments(trip_id,driver_id,attempt,status,expires_at,responded_at,trip_payload) VALUES($1::UUID,$2::UUID,1,'accepted',NOW()+INTERVAL '1 hour',NOW(),'{}')`, trip, driver)
+	// Rider receives only the approved front photo of the accepted car.
+	store := newPrivacyMemoryStore()
+	api.files = store
+	front := "rider-front-" + uuid.NewString()
+	for _, angle := range []string{"front", "vin", "front_interior"} {
+		key := "private-" + angle
+		if angle == "front" {
+			key = front
+		}
+		exec(`INSERT INTO driver_vehicle_photos(id,driver_id,vehicle_revision,angle,storage_key,content_type,size_bytes,uploaded_by,uploader_type) SELECT gen_random_uuid(),$1::uuid,inspection_revision,$2,$3,'image/png',1,$1::uuid,'driver' FROM driver_vehicles WHERE driver_id=$1::uuid`, driver, angle, key)
+	}
+	photo := call("/rider/trips/"+trip, rider, api.tripDetail, trip)
+	if photo.Code != 200 || !strings.Contains(photo.Body.String(), front) || strings.Contains(photo.Body.String(), "private-vin") || strings.Contains(photo.Body.String(), "private-front_interior") || store.presignTTL != 2*time.Minute || photo.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("approved assigned vehicle photo unavailable or private evidence leaked: %s", photo.Body.String())
+	}
+	beforePhoto := store.presignCount
+	if foreign := call("/rider/trips/"+trip, other, api.tripDetail, trip); foreign.Code != 404 || store.presignCount != beforePhoto {
+		t.Fatal("foreign rider could sign vehicle media")
+	}
+	exec(`UPDATE driver_vehicles SET review_status='pending' WHERE driver_id=$1::uuid`, driver)
+	if unavailable := call("/rider/trips/"+trip, rider, api.tripDetail, trip); strings.Contains(unavailable.Body.String(), front) {
+		t.Fatal("unapproved vehicle photo exposed")
+	}
+	exec(`UPDATE driver_vehicles SET review_status='approved' WHERE driver_id=$1::uuid`, driver)
 	for _, status := range []string{"accepted", "arrived", "started"} {
 		exec(`UPDATE trips SET status=$2 WHERE id=$1::UUID`, trip, status)
 		at := time.Now().UTC()
@@ -228,6 +255,23 @@ func TestRiderHomeOwnershipRecoveryAndAvailability(t *testing.T) {
 		t.Fatal("owned snapshot unavailable or leaks earnings")
 	}
 	exec(`UPDATE trips SET status='completed' WHERE id=$1::UUID`, trip)
+	exec(`UPDATE driver_assignments SET status='completed' WHERE trip_id=$1::UUID`, trip)
+	exec(`UPDATE driver_vehicles SET model='Changed after trip' WHERE driver_id=$1::UUID`, driver)
+	completed := call("/rider/trips/"+trip, rider, api.tripDetail, trip)
+	var completedPayload struct {
+		Data struct {
+			Assignment struct {
+				Status  string `json:"status"`
+				Vehicle struct {
+					Make  string `json:"make"`
+					Model string `json:"model"`
+				} `json:"vehicle"`
+			} `json:"assignment"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(completed.Body.Bytes(), &completedPayload) != nil || completed.Code != 200 || completedPayload.Data.Assignment.Status != "completed" || completedPayload.Data.Assignment.Vehicle.Make != "Audi" || completedPayload.Data.Assignment.Vehicle.Model != "A4" {
+		t.Fatalf("completed trip must retain its accepted vehicle, not the current fleet: %s", completed.Body.String())
+	}
 	exec(`INSERT INTO trip_ratings(trip_id,actor_id,subject_id,rating) VALUES($1::uuid,$2::uuid,$3::uuid,4)`, trip, rider, driver)
 	if rec := call("/rider/trips/"+trip, rider, api.tripDetail, trip); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ratingAverage": 4`) && !strings.Contains(rec.Body.String(), `"ratingAverage":4`) || !strings.Contains(rec.Body.String(), `driver_registration`) {
 		t.Fatalf("public driver summary missing: %s", rec.Body.String())

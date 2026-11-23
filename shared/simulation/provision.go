@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,6 +15,13 @@ import (
 
 func identity(run, id string) string {
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("heygo-simulation:"+run+":"+id)).String()
+}
+
+// Synthetic contacts deliberately use the nondialable +000 prefix. They are
+// fixture identity evidence, never SMS delivery evidence or a real contact.
+func syntheticPhone(actorID string) string {
+	hash := sha256.Sum256([]byte("heygo-simulation-phone:v1:" + actorID))
+	return fmt.Sprintf("+000%012d", binary.BigEndian.Uint64(hash[:8])%1000000000000)
 }
 func secret() string {
 	b := make([]byte, 32)
@@ -58,8 +66,13 @@ func Provision(ctx context.Context, pool *pgxpool.Pool, run, participant string,
 	if e != nil || exists {
 		return a, errors.New("synthetic identity collision; existing account preserved")
 	}
+	phone := syntheticPhone(a.ID)
+	e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE phone_e164=$1)`, phone).Scan(&exists)
+	if e != nil || exists {
+		return a, errors.New("synthetic contact collision; existing account preserved")
+	}
 	owner := "heygo-simulation:" + run + ":" + participant
-	_, e = tx.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles,verified,email,email_verified,active)VALUES($1::uuid,$2,$2,ARRAY[$3]::text[],TRUE,$4,TRUE,TRUE)`, a.ID, owner, c.Role, "sim-"+a.ID+"@simulation.heygo.invalid")
+	_, e = tx.Exec(ctx, `INSERT INTO users(id,casper_id_user_id,human_id,roles,verified,email,email_verified,active,phone_e164,phone_verified_at)VALUES($1::uuid,$2,$2,ARRAY[$3]::text[],TRUE,$4,TRUE,TRUE,$5,NOW())`, a.ID, owner, c.Role, "sim-"+a.ID+"@simulation.heygo.invalid", phone)
 	if e != nil {
 		return a, e
 	}

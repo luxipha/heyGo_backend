@@ -14,6 +14,8 @@ type PreviewTripRequest struct {
 	SourceTripID       string `json:"sourceTripId"`
 	SchemaVersion      int    `json:"schemaVersion"`
 	PickupPlaceID      string `json:"pickupPlaceId"`
+	PickupName         string `json:"pickupName"`
+	PickupAddress      string `json:"pickupAddress"`
 	DestinationPlaceID string `json:"destinationPlaceId"`
 	// Pin destinations use coordinates directly, without a provider place ID.
 	DestinationSource string           `json:"destinationSource"`

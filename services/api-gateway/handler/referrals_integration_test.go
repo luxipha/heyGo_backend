@@ -56,6 +56,7 @@ func TestReferralRegistrationAndDisabledLink(t *testing.T) {
 	tx.Commit(ctx)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(stripCredentialQuery)
 	registerReferralPublicRoutes(r, pool)
 	userID := fresh
 	store := gatewayauth.NewPostgresUserStore(pool)
@@ -78,6 +79,24 @@ func TestReferralRegistrationAndDisabledLink(t *testing.T) {
 	if w := call("GET", "/r/"+code, ""); w.Code != 200 || !strings.Contains(w.Body.String(), code) {
 		t.Fatalf("invite page: %d %s", w.Code, w.Body.String())
 	}
+	// Exercise a Hero claim through the production query-cleanup middleware.
+	hero, heroDriver := uuid.NewString(), uuid.NewString()
+	heroCode := "H" + strings.ReplaceAll(hero, "-", "")[:9]
+	heroCode = strings.ToUpper(heroCode)
+	exec(`INSERT INTO heroes_accounts(id,email,name,password_hash,referral_code)VALUES($1::uuid,$1||'@example.test','Test Hero','test',$2)`, hero, heroCode)
+	exec(`INSERT INTO users(id,roles)VALUES($1::uuid,'{}')`, heroDriver)
+	userID = heroDriver
+	if w := call("GET", "/driver/referrals/check?code="+heroCode, ""); w.Code != 200 || !strings.Contains(w.Body.String(), heroCode) {
+		t.Fatalf("Hero lookup through middleware: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("POST", "/driver/referrals/claim", `{"code":"`+heroCode+`"}`); w.Code != 200 {
+		t.Fatalf("Hero claim: %d %s", w.Code, w.Body.String())
+	}
+	var linked bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM referral_attributions WHERE invitee_id=$1::uuid AND hero_id=$2::uuid)`, heroDriver, hero).Scan(&linked); err != nil || !linked {
+		t.Fatalf("Hero attribution not persisted: linked=%v err=%v", linked, err)
+	}
+	userID = fresh
 	if w := call("GET", "/rider/referrals/check?code="+code, ""); w.Code != 200 {
 		t.Fatalf("new user lookup: %d %s", w.Code, w.Body.String())
 	}
@@ -93,6 +112,12 @@ func TestReferralRegistrationAndDisabledLink(t *testing.T) {
 		t.Fatalf("registration replay: %d %s", w.Code, w.Body.String())
 	}
 	userID = existing
+	if w := call("GET", "/driver/referrals/check?code="+heroCode, ""); w.Code != 409 {
+		t.Fatalf("existing user lookup: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("POST", "/driver/referrals/claim", `{"code":"`+heroCode+`"}`); w.Code != 409 {
+		t.Fatalf("existing user Hero claim: %d %s", w.Code, w.Body.String())
+	}
 	if w := call("POST", "/auth/register", string(raw)); w.Code != 409 {
 		t.Fatalf("existing user claim: %d %s", w.Code, w.Body.String())
 	}

@@ -107,6 +107,41 @@ variable "allowed_origins" {
   }
 }
 
+variable "venue_partner_url" {
+  description = "HTTPS origin of the venue partner, e.g. https://partner.example.com (no /api path; the client appends it). Leave empty to disable. Populate heygo-venue-partner-service-key before enabling."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.venue_partner_url == "" || can(regex("^https://[^/?#]+/?$", var.venue_partner_url))
+    error_message = "venue_partner_url must be empty or an HTTPS origin without /api, a query or a fragment."
+  }
+}
+
+variable "venue_partner_inbound_enabled" {
+  description = "Enable authenticated venue earnings reports only after heygo-venue-partner-inbound-key has a valid version and is configured by the partner."
+  type        = bool
+  default     = false
+}
+
+variable "r2_secret_version" {
+  description = "Pinned version of the four existing heygo-r2-* secrets, provisioned separately. Empty disables storage references; preserve the live version when reconciling production."
+  type        = string
+  default     = ""
+}
+
+variable "fcm_project_id" {
+  description = "Existing Firebase project for keyless ADC push delivery. Empty omits FCM configuration."
+  type        = string
+  default     = ""
+}
+
+variable "heroes_public_url" {
+  description = "Public Heroes HTTPS origin used in referral links. Empty omits the override."
+  type        = string
+  default     = ""
+}
+
 variable "admin_frontend_url" {
   description = "HTTPS origin for single-use staff invitation, verification, and recovery links. Configure before enabling staff email flows."
   type        = string
@@ -207,4 +242,30 @@ variable "bug_report_provider" {
     condition     = contains(["disabled", "mantis"], var.bug_report_provider)
     error_message = "bug_report_provider must be disabled or mantis."
   }
+}
+
+variable "venue_partner_service_key_version" {
+  description = "Pinned numeric version of the outbound venue secret; preserve the version verified by the configuration workflow."
+  type        = string
+  default     = "1"
+  validation {
+    condition     = can(regex("^[1-9][0-9]*$", var.venue_partner_service_key_version))
+    error_message = "Use a pinned numeric outbound venue secret version."
+  }
+}
+
+variable "venue_partner_inbound_key_version" {
+  description = "Pinned numeric version of the inbound venue secret."
+  type        = string
+  default     = "1"
+  validation {
+    condition     = can(regex("^[1-9][0-9]*$", var.venue_partner_inbound_key_version))
+    error_message = "Use a pinned numeric inbound venue secret version."
+  }
+}
+
+variable "payment_admin_settings_enabled" {
+  description = "Opt in to Admin-managed Payment credentials only in a separately reviewed rollout. False preserves the existing direct-secret configuration."
+  type        = bool
+  default     = false
 }

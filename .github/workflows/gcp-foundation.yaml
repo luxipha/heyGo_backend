@@ -6,12 +6,16 @@ on:
       - main
     paths:
       - infra/terraform/**
+      - scripts/terraform-production-plan.py
+      - scripts/test_terraform_production_plan.py
       - .github/workflows/gcp-foundation.yaml
   pull_request:
     branches:
       - main
     paths:
       - infra/terraform/**
+      - scripts/terraform-production-plan.py
+      - scripts/test_terraform_production_plan.py
       - .github/workflows/gcp-foundation.yaml
   workflow_dispatch:
 
@@ -46,6 +50,10 @@ jobs:
 
       - name: Validate configuration
         run: terraform validate -no-color
+
+      - name: Check production plan safeguards
+        working-directory: .
+        run: python3 -m unittest discover -s scripts -p test_terraform_production_plan.py
 
   workload-identity:
     name: Verify keyless Google Cloud access

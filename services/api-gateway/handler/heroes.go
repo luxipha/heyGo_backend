@@ -69,6 +69,7 @@ func registerHeroesRoutes(r *gin.Engine, pool *pgxpool.Pool) *heroesAPI {
 	g.GET("/wallet", a.wallet)
 	g.POST("/bank-account", a.saveBank)
 	g.GET("/leaderboard", a.leaderboard)
+	g.GET("/program", a.program)
 	return a
 }
 func (a *heroesAPI) authenticate(c *gin.Context) {
@@ -209,12 +210,12 @@ func maskHeroPhone(phone string) string {
 }
 func (a *heroesAPI) wallet(c *gin.Context) {
 	var balance, pending, paid int64
-	err := a.pool.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT sum(amount_kobo)FROM heroes_wallet_entries WHERE hero_id=$1::uuid),0),COALESCE((SELECT sum(p.reward_kobo)FROM heroes_all_referrals r JOIN heroes_all_policies p ON p.id=r.policy_id WHERE r.hero_id=$1::uuid AND r.qualified_at IS NULL AND p.enabled AND NOT EXISTS(SELECT 1 FROM hero_referral_stages s WHERE s.referral_id=r.id)),0)+COALESCE((SELECT sum(s.reward_kobo) FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE a.hero_id=$1::uuid AND s.credited_at IS NULL),0),COALESCE((SELECT sum(p.amount_kobo)FROM heroes_manual_payments p WHERE p.hero_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=p.id)),0)`, heroID(c)).Scan(&balance, &pending, &paid)
+	err := a.pool.QueryRow(c.Request.Context(), `SELECT COALESCE((SELECT sum(amount_kobo)FROM heroes_wallet_entries WHERE hero_id=$1::uuid),0),COALESCE((SELECT sum(p.reward_kobo)FROM heroes_all_referrals r JOIN heroes_all_policies p ON p.id=r.policy_id WHERE r.hero_id=$1::uuid AND r.qualified_at IS NULL AND p.enabled AND NOT EXISTS(SELECT 1 FROM hero_referral_stages s WHERE s.referral_id=r.id)),0)+COALESCE((SELECT sum(s.reward_kobo) FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE a.hero_id=$1::uuid AND s.credited_at IS NULL),0)+COALESCE((SELECT sum(e.amount_kobo)FROM hero_venue_earnings e WHERE e.hero_id=$1::uuid AND e.status='pending'),0),COALESCE((SELECT sum(p.amount_kobo)FROM heroes_manual_payments p WHERE p.hero_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=p.id)),0)`, heroID(c)).Scan(&balance, &pending, &paid)
 	if err != nil {
 		heroFailure(c)
 		return
 	}
-	rows, err := a.pool.Query(c.Request.Context(), `SELECT id::text,amount_kobo,created_at FROM heroes_wallet_entries WHERE hero_id=$1::uuid ORDER BY created_at DESC,id DESC LIMIT 100`, heroID(c))
+	rows, err := a.pool.Query(c.Request.Context(), `SELECT id::text,amount_kobo,created_at,kind FROM heroes_wallet_entries WHERE hero_id=$1::uuid ORDER BY created_at DESC,id DESC LIMIT 100`, heroID(c))
 	if err != nil {
 		heroFailure(c)
 		return
@@ -222,14 +223,14 @@ func (a *heroesAPI) wallet(c *gin.Context) {
 	defer rows.Close()
 	items := make([]gin.H, 0)
 	for rows.Next() {
-		var id string
+		var id, kind string
 		var amount int64
 		var at time.Time
-		if rows.Scan(&id, &amount, &at) != nil {
+		if rows.Scan(&id, &amount, &at, &kind) != nil {
 			heroFailure(c)
 			return
 		}
-		items = append(items, gin.H{"id": id, "amountKobo": amount, "createdAt": at, "kind": "referral_reward"})
+		items = append(items, gin.H{"id": id, "amountKobo": amount, "createdAt": at, "kind": kind})
 	}
 	if rows.Err() != nil {
 		heroFailure(c)
@@ -324,4 +325,22 @@ func getDriverHeroReferral(c *gin.Context, pool *pgxpool.Pool) {
 		return
 	}
 	heroData(c, gin.H{"hero": gin.H{"name": name, "code": code}})
+}
+
+// program tells the app what a Hero can earn for the venues they list, so the numbers
+// shown on screen always match the admin settings.
+func (a *heroesAPI) program(c *gin.Context) {
+	s, err := readHeroesSettings(c.Request.Context(), a.pool)
+	if err != nil {
+		heroFailure(c)
+		return
+	}
+	heroData(c, gin.H{
+		"liveBonusKobo":    s.LiveBonusKobo,
+		"ordersBonusKobo":  s.OrdersBonusKobo,
+		"ordersBonusCount": s.OrdersBonusCount,
+		"reviewHours":      gin.H{"min": s.ReviewHoursMin, "max": s.ReviewHoursMax},
+		// Bonuses are queued by a venue's first delivered order, not by listing or launching it.
+		"bonusesStartAtFirstDelivery": true,
+	})
 }

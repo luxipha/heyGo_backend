@@ -189,6 +189,7 @@ func (a *supportAPI) createUpload(ctx *gin.Context) {
 }
 
 type createSupportCaseBody struct {
+	TripID      string   `json:"tripId"`
 	TopicCode   string   `json:"topicCode" binding:"required"`
 	DetailCode  string   `json:"detailCode"`
 	Subject     string   `json:"subject"`
@@ -273,7 +274,25 @@ func (a *supportAPI) createTicket(ctx *gin.Context) {
 	if strings.TrimSpace(body.Subject) == "" {
 		body.Subject = "Support request"
 	}
-	caseID, err := a.createCase(ctx, owner, audience, body, "", "support", "normal")
+	tripID := strings.TrimSpace(body.TripID)
+	if tripID != "" {
+		parsed, err := uuid.Parse(tripID)
+		if err != nil {
+			driverError(ctx, http.StatusBadRequest, "invalid_trip_id", "Valid trip ID is required")
+			return
+		}
+		tripID = parsed.String()
+		var participant bool
+		if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM trips WHERE id=$1::UUID AND (rider_id=$2::UUID OR assigned_driver_id=$2::UUID))`, tripID, owner).Scan(&participant); err != nil {
+			driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "The linked ride could not be checked")
+			return
+		}
+		if !participant {
+			driverError(ctx, http.StatusForbidden, "support_trip_forbidden", "Only a participant can link this ride")
+			return
+		}
+	}
+	caseID, err := a.createCase(ctx, owner, audience, body, tripID, "support", "normal")
 	if err != nil {
 		supportFailure(ctx, err)
 		return
@@ -513,7 +532,8 @@ func (a *supportAPI) listCases(ctx *gin.Context, owner string, staff bool) {
 	var lastAt time.Time
 	var lastID string
 	for rows.Next() {
-		var id, topic, label, subject, state, priority, requester, humanID string
+		var id, topic, label, subject, state, priority, requester string
+		var humanID *string
 		var assigned *string
 		var trip *string
 		var number int64
@@ -648,7 +668,8 @@ func (a *supportAPI) adminCaseContact(ctx *gin.Context) {
 
 func (a *supportAPI) readCase(ctx *gin.Context, caseID, owner string, staff bool) {
 	var item gin.H
-	var opener, requesterHumanID, topic, label, subject, state, priority, audience string
+	var opener, topic, label, subject, state, priority, audience string
+	var requesterHumanID *string
 	var trip *string
 	var number int64
 	var created, updated time.Time

@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	eventPollFallbackInterval     = 2 * time.Second
-	eventNotifierRecoveryInterval = 15 * time.Second
+	eventPollFallbackInterval = 2 * time.Second
+	// A lost wake must not delay an offer beyond its response deadline.
+	eventNotifierRecoveryInterval = 2 * time.Second
 )
 const eventBatchSize = 100
 

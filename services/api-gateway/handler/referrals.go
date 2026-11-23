@@ -12,6 +12,7 @@ import (
 	"github.com/luxipha/heyGo_backend/shared/referrals"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -306,7 +307,7 @@ func (a *adminAPI) approveReferralRewards(c *gin.Context) {
 	heroData(c, gin.H{"approved": len(b.IDs)})
 }
 
-var referralInviteTemplate = template.Must(template.New("referral").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>heyGo invitation</title><style>body{font:16px system-ui;margin:0;background:#f8faf4;color:#0f172a}main{max-width:440px;margin:8vh auto;padding:24px}h1{font-size:30px}code{display:block;font-size:28px;font-weight:700;margin:24px 0;overflow-wrap:anywhere}button{background:#168a43;color:white;border:0;border-radius:12px;padding:16px 24px;font:inherit;cursor:pointer}a{color:#168a43}p{line-height:1.6}</style></head><body><main><strong>heyGo</strong><h1>{{.Title}}</h1><p>{{.Notice}}</p>{{if .Code}}<code id="code">{{.Code}}</code><button id="copy">Copy code</button><p id="feedback" role="status"></p><p>Enter this code during signup. You can confirm one referrer. Existing accounts cannot add a code.</p><p>Reward conditions are shown in the app.</p><a href="https://heygo.ng/">About riding</a>{{if .Drivers}} · <a href="https://heygo.ng/drive/">About driving</a>{{end}}<script>document.getElementById('copy').onclick=async function(){try{await navigator.clipboard.writeText(document.getElementById('code').textContent);document.getElementById('feedback').textContent='Code copied';}catch(e){document.getElementById('feedback').textContent='Select and copy the code above.';}}</script>{{end}}</main></body></html>`))
+var referralInviteTemplate = template.Must(template.New("referral").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>heyGo invitation</title><style>body{font:16px system-ui;margin:0;background:#f8faf4;color:#0f172a}main{max-width:440px;margin:8vh auto;padding:24px}h1{font-size:30px}code{display:block;font-size:28px;font-weight:700;margin:24px 0;overflow-wrap:anywhere}button{background:#168a43;color:white;border:0;border-radius:12px;padding:16px 24px;font:inherit;cursor:pointer}a{color:#168a43}p{line-height:1.6}</style></head><body><main><strong>heyGo</strong><h1>{{.Title}}</h1><p>{{.Notice}}</p>{{if .Code}}<code id="code">{{.Code}}</code><button id="copy">Copy code</button><p id="feedback" role="status"></p><p>Enter this code during signup. You can confirm one referrer. Existing accounts cannot add a code.</p><p>Reward conditions are shown in the app.</p>{{if .AppURL}}<p><a id="get-app" href="{{.AppURL}}" style="display:inline-block;background:#168a43;color:#fff;text-decoration:none;border-radius:12px;padding:16px 24px">{{.AppLabel}}</a></p>{{end}}<a href="https://heygo.ng/">About riding</a>{{if .Drivers}} · <a href="https://heygo.ng/drive/">About driving</a>{{end}}<script>document.getElementById('copy').onclick=async function(){try{await navigator.clipboard.writeText(document.getElementById('code').textContent);document.getElementById('feedback').textContent='Code copied';}catch(e){document.getElementById('feedback').textContent='Select and copy the code above.';}}</script>{{end}}</main></body></html>`))
 
 func referralInvitePage(c *gin.Context, pool *pgxpool.Pool) {
 	c.Header("Cache-Control", "no-store")
@@ -333,9 +334,16 @@ func referralInvitePage(c *gin.Context, pool *pgxpool.Pool) {
 	} else {
 		data["Code"] = r.Code
 		data["Drivers"] = r.Role != "rider"
+		q := url.QueryEscape(r.Code)
 		if r.Role == "rider" {
 			data["Notice"] = "You’re invited to ride with heyGo."
-		} else if r.Role == "hero" {
+			data["AppLabel"] = "Get the rider app"
+			data["AppURL"] = "https://play.google.com/store/apps/details?id=ng.heygo.rider&referrer=" + url.QueryEscape("ref="+r.Code)
+		} else {
+			data["AppLabel"] = "Get the driver app"
+			data["AppURL"] = "https://heygo.ng/drive/?ref=" + q
+		}
+		if r.Role == "hero" {
 			data["Notice"] = "You’re invited to drive with heyGo."
 		}
 	}

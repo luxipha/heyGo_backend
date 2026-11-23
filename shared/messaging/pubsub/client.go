@@ -125,6 +125,12 @@ func (p *Producer) SendMessage(ctx context.Context, topic string, message *contr
 }
 
 func (p *Producer) SendMessageAndWait(ctx context.Context, topic string, message *contracts.EventMessage, timeout time.Duration) error {
+	started := time.Now()
+	if timingCritical(topic) {
+		defer func() {
+			log.Printf("dispatch publish topic=%s event_id=%s elapsed_ms=%d", topic, message.EventID, time.Since(started).Milliseconds())
+		}()
+	}
 	prepare(ctx, message)
 	data, err := json.Marshal(message)
 	if err != nil {
@@ -163,6 +169,10 @@ type Consumer struct {
 	client *Client
 }
 
+func timingCritical(topic string) bool {
+	return topic == contracts.DriverCmdTripRequest || topic == contracts.DriverCmdTripAccept
+}
+
 func (c *Consumer) SubscribeAndConsume(ctx context.Context, topics []string, handler MessageHandler) error {
 	if len(topics) == 0 {
 		return errors.New("at least one Pub/Sub topic is required")
@@ -177,6 +187,12 @@ func (c *Consumer) SubscribeAndConsume(ctx context.Context, topics []string, han
 			subscriber.ReceiveSettings.MaxOutstandingMessages = 32
 			subscriber.ReceiveSettings.MaxOutstandingBytes = 16 << 20
 			errCh <- subscriber.Receive(receiveCtx, func(messageCtx context.Context, delivery *gpubsub.Message) {
+				started := time.Now()
+				if timingCritical(topic) {
+					defer func() {
+						log.Printf("dispatch consume group=%s topic=%s event_id=%s broker_age_ms=%d handler_ms=%d", c.client.groupID, topic, delivery.Attributes["event_id"], started.Sub(delivery.PublishTime).Milliseconds(), time.Since(started).Milliseconds())
+					}()
+				}
 				var envelope contracts.EventMessage
 				if err := json.Unmarshal(delivery.Data, &envelope); err != nil {
 					log.Printf("invalid Pub/Sub envelope on %s: %v", topic, err)

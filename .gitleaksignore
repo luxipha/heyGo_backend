@@ -17,3 +17,6 @@
 1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:406
 1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:433
 1abb5b7830a15a2b9a813a2ba2597127f65b489a:docs/releases/2026-10-24/source-manifest.json:generic-api-key:434
+
+# Synthetic venue client test key used only by httptest; no production credential.
+36cf4b80c10bf5c51054bac31f3b513d837396cd:services/api-gateway/handler/heroes_venues_test.go:generic-api-key:84

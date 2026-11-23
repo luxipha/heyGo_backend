@@ -130,6 +130,20 @@ func ReadSettings(ctx context.Context, pool *pgxpool.Pool) (SettingsStatus, erro
 type DatabaseRoutes struct{ Pool *pgxpool.Pool }
 
 func (d DatabaseRoutes) Route(ctx context.Context, a, b Coordinate) (*RouteResponse, error) {
+	return d.route(ctx, a, b, false)
+}
+
+func (d DatabaseRoutes) RouteAllowZero(ctx context.Context, a, b Coordinate) (*RouteResponse, error) {
+	return d.route(ctx, a, b, true)
+}
+
+type zeroTimeOSRM struct{ *OSRM }
+
+func (o zeroTimeOSRM) Route(ctx context.Context, a, b Coordinate) (*RouteResponse, error) {
+	return o.OSRM.RouteAllowZero(ctx, a, b)
+}
+
+func (d DatabaseRoutes) route(ctx context.Context, a, b Coordinate, allowZero bool) (*RouteResponse, error) {
 	status, err := ReadSettings(ctx, d.Pool)
 	if err != nil {
 		return nil, err
@@ -146,6 +160,9 @@ func (d DatabaseRoutes) Route(ctx context.Context, a, b Coordinate) (*RouteRespo
 		router, err = configuredAMapRoutes()
 	case "osrm":
 		router = &OSRM{Endpoint: s.OSRMEndpoint, Client: routingHTTPClient}
+		if allowZero {
+			router = zeroTimeOSRM{router.(*OSRM)}
+		}
 	default:
 		return nil, errors.New("routing disabled by administrator")
 	}

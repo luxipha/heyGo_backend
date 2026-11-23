@@ -89,7 +89,13 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 		registerPhoneAuthRoutes(r, pool, phoneUsers, phoneAuth)
 	}
 	registerAdminRoutes(r, pool, files, phoneAuth)
-	registerHeroesRoutes(r, pool)
+	// Owner codes go out through the same SMS provider as sign-in codes (configured in Admin settings).
+	ownerSMS := phoneAuth.Sender
+	if ownerSMS == nil && pool != nil {
+		ownerSMS = &configuredKudiSMSSender{pool: pool, key: phoneAuth.ResendSecretKey}
+	}
+	registerHeroVenueRoutes(r, registerHeroesRoutes(r, pool), newVenuePartnerFromEnv(), ownerSMS)
+	registerVenueEarningsPartnerRoute(r, pool)
 	registerReferralPublicRoutes(r, pool)
 
 	authenticated := r.Group("/", middleware, authMiddleware.Authenticate, idempotencyMiddleware(pool))
@@ -114,7 +120,7 @@ func NewHTTPHandler(bus *pubsub.Client, connMgr *messaging.ConnectionManager, au
 	registerSupportRoutes(authenticated, pool, files)
 	registerBugReportRoutes(authenticated, pool)
 	registerNoShowRiderRoutes(authenticated, pool)
-	registerRiderHomeRoutes(authenticated, pool)
+	registerRiderHomeRoutes(authenticated, pool, files)
 	registerRideAgentRoutes(authenticated, pool)
 	registerRiderCommandRoutes(authenticated, pool, bus)
 	registerRiderTripReadRoutes(authenticated, pool)
@@ -355,6 +361,11 @@ func previewTripHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 		driverError(ctx, 400, "invalid_pickup_note", "Pickup notes allow at most 500 characters without control characters")
 		return
 	}
+	devicePickup, err := devicePickupMetadata(payload)
+	if err != nil {
+		driverError(ctx, 400, "invalid_pickup_address", err.Error())
+		return
+	}
 	var pickupMeta, destinationMeta any
 	if payload.SchemaVersion != 0 && payload.SchemaVersion != 1 {
 		driverError(ctx, 400, "invalid_schema_version", "Unsupported ride schema")
@@ -385,7 +396,7 @@ func previewTripHandler(ctx *gin.Context, pool *pgxpool.Pool) {
 			destinationMeta = reply.Place
 			payload.Destination = sharedtypes.Coordinate{Latitude: reply.Place.Location.Latitude, Longitude: reply.Place.Location.Longitude}
 		}
-		pickupMeta = map[string]any{"provider": "device", "name": "Current location", "location": payload.Pickup}
+		pickupMeta = devicePickup
 		if payload.SourceTripID != "" && payload.PickupPlaceID == "" {
 			if _, err := uuid.Parse(payload.SourceTripID); err != nil {
 				driverError(ctx, 400, "invalid_trip_id", "Valid previous trip ID is required")

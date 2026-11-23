@@ -46,6 +46,8 @@ func (c *Client) Post(ctx context.Context, path string, body any, out any) error
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "HeyGo-Ideas-Bridge/1.0")
 	res, e := c.HTTP.Do(req)
 	if e != nil {
 		return errors.New("ideas service unavailable")

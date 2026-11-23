@@ -22,6 +22,55 @@ type testEventLog struct {
 	subscribers map[chan struct{}]struct{}
 }
 
+type missedWakeEventLog struct{ testEventLog }
+
+func (s *missedWakeEventLog) SubscribeEventWake(string) (<-chan struct{}, func()) {
+	return make(chan struct{}), func() {}
+}
+
+func TestEventStreamDeliversOfferBeforeDeadlineWhenWakeIsLost(t *testing.T) {
+	log := &missedWakeEventLog{}
+	log.append("baseline")
+	manager := messaging.NewConnectionManager("https://app.heygo.test")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := manager.Upgrade(w, r)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		cancel, err := attachEventStream(r.Context(), manager, conn, log, "driver-1", "evt_0")
+		if err != nil {
+			return
+		}
+		defer cancel()
+		defer manager.RemoveIf("driver-1", conn)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": []string{"https://app.heygo.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var event contracts.WSMessage
+	if err := client.ReadJSON(&event); err != nil {
+		t.Fatal(err)
+	}
+	// Replay has completed; this subsequent event deliberately sends no wake.
+	log.append("driver.event.trip_offer")
+	_ = client.SetReadDeadline(time.Now().Add(4 * time.Second))
+	if err := client.ReadJSON(&event); err != nil {
+		t.Fatalf("offer missed its response window after lost wake: %v", err)
+	}
+	if event.ID != "evt_2" || event.Type != "driver.event.trip_offer" {
+		t.Fatalf("unexpected offer: %#v", event)
+	}
+}
+
 func (s *testEventLog) append(kind string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

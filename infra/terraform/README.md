@@ -1,5 +1,11 @@
 # HeyGo Google Cloud foundation
 
+> Existing production: first read [the deployment change-path guide](../../docs/CLOUD_RUN_DEPLOYMENT.md#choose-the-change-path-before-deploying).
+> Routine backend releases and venue configuration changes use their GitHub
+> workflows. The initial provisioning examples below are not an instruction to
+> apply Terraform to an already-running environment. Local reconciliation edits
+> require a separate review and fresh plan; do not apply them to clear Source Control.
+
 This Terraform root provisions the shared deployment foundation and runtime in the
 `heygo-ng` project:
 
@@ -184,3 +190,60 @@ default service accounts.
 The one-time role removal is intentionally not modeled as an authoritative
 Terraform IAM binding because doing so would make this root responsible for
 every project member that legitimately holds the Editor role.
+
+## Existing production configuration and venue partner changes
+
+Before planning against an existing deployment, read the live environment and secret
+references and populate the production inputs. Preserve `r2_secret_version` (the
+four separately provisioned `heygo-r2-*` secrets), `fcm_project_id` (keyless ADC),
+and `heroes_public_url`. Empty defaults omit these environment entries and will
+remove them from an existing service if the production inputs are omitted.
+The R2 secret containers and permissions remain separately provisioned; this root
+references their existing names without importing or replacing them.
+
+`venue_partner_url` is an HTTPS origin without `/api`; the client adds that path.
+Create/populate `heygo-venue-partner-service-key` before enabling outbound calls.
+Inbound earnings reports use the separate `heygo-venue-partner-inbound-key` and
+`venue_partner_inbound_enabled`; populate and coordinate that key with the partner
+before enabling it. Terraform creates containers/access bindings, not external
+credential values. Keep the keys out of tfvars, source and review output.
+
+Application release workflows own images and generated revision names. Terraform
+continues to manage environment, identities and other runtime configuration.
+Review a fresh full plan for unrelated drift, resource removals, secret-reference
+changes and missing Pub/Sub subscriptions before any apply. A successful image
+rollout does not prove infrastructure or broker delivery is healthy.
+
+## Production reconciliation and subscription restoration
+
+`python3 scripts/terraform-production-plan.py --output .dev/NEW_REVIEW_DIRECTORY`
+(from the backend root) prepares a new private evidence directory, reads current
+services and state, derives production inputs without reading key values, and
+creates a full refreshed saved plan. It never applies Terraform. It rejects
+service updates, deletions, replacements, unexpected creates, and expiring
+subscriptions. Raw state/plan material stays under ignored `.dev` with private
+permissions. Use the saved plan hash and summary when reviewing an apply; never
+print raw state or commit the generated tfvars/plan.
+
+The November 2026 audit confirmed `Subscriber.InternalExpireInactiveSubscription`
+for all 29 service subscriptions on 19 November. Their old policy was 31 days of
+inactivity. These are permanent service wiring, so `expiration_policy.ttl = ""`
+now prevents expiry. Restoring a subscription does not restore its deleted
+backlog; do not claim historical message recovery from a successful apply.
+
+The venue containers and API read grants already exist. `venue_imports.tf`
+adopts those four resources using import blocks; secret values and externally
+provisioned versions remain untouched. The source uses the pinned venue versions
+verified by the configuration workflow. Do not replace them with `latest` during
+reconciliation. Payment's optional Admin settings key is explicitly disabled for
+the current direct-secret configuration and requires a separate opt-in review.
+
+For this restoration, an acceptable plan has only 29 subscription creates, 58
+existing-scope subscriber/dead-letter access bindings, and four no-change venue
+imports. There must be no Cloud Run, Cloud SQL, traffic, environment, image,
+credential-value, or unrelated IAM changes. Review and authorize the exact saved
+plan before applying it; retain the prior state snapshot. After apply, verify all
+29 push endpoints, pinned OIDC identity/audiences, non-expiring policies and access
+bindings, then generate another full plan: it must show no remaining changes.
+Run functional delivery tests separately with controlled actors; readiness alone
+checks publisher permission and does not establish subscriber delivery.

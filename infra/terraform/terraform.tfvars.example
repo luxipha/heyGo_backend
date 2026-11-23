@@ -27,3 +27,20 @@ cloud_sql_tier                      = "db-f1-micro"
 # After authenticated push delivery has been deployed and verified, set this
 # to false in a separate cleanup plan.
 # retain_pull_subscriber_permissions = false
+
+# Preserve these already-enabled production features during infrastructure plans.
+# r2_secret_version = "1"
+# fcm_project_id    = "heygo-c5ae1"
+# heroes_public_url = "https://hero.heygo.ng"
+
+# Venue partner activation is separate from creating empty secret containers.
+# Supply external secret versions privately before enabling either direction.
+# venue_partner_url             = "https://partner.example.com"
+# venue_partner_inbound_enabled = true
+
+# Venue references are pinned to the versions verified by the config workflow.
+# venue_partner_service_key_version = "1"
+# venue_partner_inbound_key_version = "1"
+# Keep false for the existing direct Payment secret configuration. Enabling it
+# is a separate credentials change, not part of subscription restoration.
+# payment_admin_settings_enabled = false

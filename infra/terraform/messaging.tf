@@ -166,6 +166,12 @@ resource "google_pubsub_subscription" "events" {
   message_retention_duration = "604800s"
   retain_acked_messages      = false
 
+  # Long-lived service wiring must survive periods without production traffic.
+  # The provider default expires inactive subscriptions after 31 days.
+  expiration_policy {
+    ttl = ""
+  }
+
   dead_letter_policy {
     dead_letter_topic     = google_pubsub_topic.dead_letter[each.value.topic].id
     max_delivery_attempts = 5

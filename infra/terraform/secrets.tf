@@ -14,6 +14,8 @@ locals {
     "ride-agent-internal-token",
     "ride-agent-places-key",
     "mantis-api-token",
+    "venue-partner-service-key",
+    "venue-partner-inbound-key",
   ])
 
   service_secret_access = {
@@ -24,6 +26,8 @@ locals {
       "admin-settings-key",
       "ride-agent-internal-token",
       "mantis-api-token",
+      "venue-partner-service-key",
+      "venue-partner-inbound-key",
     ])
     ride-agent-gateway = toset([
       "ride-agent-internal-token",
@@ -33,13 +37,13 @@ locals {
       "database-url",
       "internal-service-token",
     ])
-    payment-service = toset([
+    payment-service = toset(concat([
       "database-url",
       "internal-service-token",
       "monnify-api-key",
       "monnify-secret-key",
       "monnify-contract-code",
-    ])
+    ], var.payment_admin_settings_enabled ? ["admin-settings-key"] : []))
     trip-service = toset([
       "database-url",
       "internal-service-token",

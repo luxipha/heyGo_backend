@@ -7,19 +7,21 @@ locals {
     OTP_PEPPER                = "otp-pepper"
     HEYGO_ADMIN_SETTINGS_KEY  = "admin-settings-key"
     RIDE_AGENT_INTERNAL_TOKEN = "ride-agent-internal-token"
-  }, var.bug_report_provider == "mantis" ? { MANTIS_API_TOKEN = "mantis-api-token" } : {})
+    }, var.bug_report_provider == "mantis" ? { MANTIS_API_TOKEN = "mantis-api-token" } : {},
+    # Populate the external secret version before enabling the outbound connection.
+    var.venue_partner_url != "" ? { VENUE_PARTNER_SERVICE_KEY = "venue-partner-service-key" } : {},
+  var.venue_partner_inbound_enabled ? { VENUE_PARTNER_INBOUND_KEY = "venue-partner-inbound-key" } : {})
   driver_service_secrets = {
     DATABASE_URL           = "database-url"
     INTERNAL_SERVICE_TOKEN = "internal-service-token"
   }
-  payment_service_secrets = {
-    HEYGO_ADMIN_SETTINGS_KEY = "admin-settings-key"
-    DATABASE_URL             = "database-url"
-    INTERNAL_SERVICE_TOKEN   = "internal-service-token"
-    MONNIFY_API_KEY          = "monnify-api-key"
-    MONNIFY_SECRET_KEY       = "monnify-secret-key"
-    MONNIFY_CONTRACT_CODE    = "monnify-contract-code"
-  }
+  payment_service_secrets = merge({
+    DATABASE_URL           = "database-url"
+    INTERNAL_SERVICE_TOKEN = "internal-service-token"
+    MONNIFY_API_KEY        = "monnify-api-key"
+    MONNIFY_SECRET_KEY     = "monnify-secret-key"
+    MONNIFY_CONTRACT_CODE  = "monnify-contract-code"
+  }, var.payment_admin_settings_enabled ? { HEYGO_ADMIN_SETTINGS_KEY = "admin-settings-key" } : {})
   trip_service_secrets = {
     DATABASE_URL           = "database-url"
     INTERNAL_SERVICE_TOKEN = "internal-service-token"
@@ -40,6 +42,8 @@ resource "google_cloud_run_v2_service" "driver" {
       client,
       client_version,
       template[0].containers[0].image,
+      # Application release workflows own generated revision names as well as images.
+      template[0].revision,
     ]
   }
 
@@ -170,6 +174,8 @@ resource "google_cloud_run_v2_service" "trip" {
       client,
       client_version,
       template[0].containers[0].image,
+      # Application release workflows own generated revision names as well as images.
+      template[0].revision,
     ]
   }
 
@@ -281,6 +287,8 @@ resource "google_cloud_run_v2_service" "payment" {
       client,
       client_version,
       template[0].containers[0].image,
+      # Application release workflows own generated revision names as well as images.
+      template[0].revision,
     ]
   }
 
@@ -414,6 +422,8 @@ resource "google_cloud_run_v2_service" "api_gateway" {
       client,
       client_version,
       template[0].containers[0].image,
+      # Application release workflows own generated revision names as well as images.
+      template[0].revision,
     ]
   }
 
@@ -494,6 +504,41 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         name  = "ALLOWED_ORIGINS"
         value = var.allowed_origins
       }
+      # Preserve separately provisioned production storage secrets and their pinned versions.
+      dynamic "env" {
+        for_each = var.r2_secret_version != "" ? {
+          R2_ENDPOINT          = "heygo-r2-endpoint"
+          R2_BUCKET            = "heygo-r2-bucket"
+          R2_ACCESS_KEY_ID     = "heygo-r2-access-key-id"
+          R2_SECRET_ACCESS_KEY = "heygo-r2-secret-access-key"
+        } : {}
+        content {
+          name = env.key
+          value_source {
+            secret_key_ref {
+              secret  = env.value
+              version = var.r2_secret_version
+            }
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = merge(
+          var.fcm_project_id != "" ? { FCM_AUTH_MODE = "adc", FCM_PROJECT_ID = var.fcm_project_id } : {},
+          var.heroes_public_url != "" ? { HEROES_PUBLIC_URL = var.heroes_public_url } : {},
+        )
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = var.venue_partner_url != "" ? { VENUE_PARTNER_URL = var.venue_partner_url } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
       env {
         name  = "ADMIN_FRONTEND_URL"
         value = var.admin_frontend_url
@@ -560,8 +605,11 @@ resource "google_cloud_run_v2_service" "api_gateway" {
           name = env.key
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.runtime[env.value].secret_id
-              version = "latest"
+              secret = google_secret_manager_secret.runtime[env.value].secret_id
+              version = lookup({
+                VENUE_PARTNER_SERVICE_KEY = var.venue_partner_service_key_version
+                VENUE_PARTNER_INBOUND_KEY = var.venue_partner_inbound_key_version
+              }, env.key, "latest")
             }
           }
         }

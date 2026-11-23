@@ -42,23 +42,31 @@ secret containers may have been provisioned independently by the configuration
 rollout. Recheck them and their access bindings before any later infrastructure
 apply.
 
-### Local Terraform work from 23 November 2026
+### Terraform reconciliation from 23 November 2026
 
-The five edited files under `infra/terraform` are reconciliation work, not a
-prerequisite for the venue configuration rollout. Their edits preserve existing
-R2/FCM/Heroes settings, define the two venue directions, correct the partner URL
-contract and keep workflow-owned images/revision names separate. They remain
-uncommitted and unapplied until reviewed as a separate infrastructure change.
-Do not delete them, include them in an application release merely to clear Source
-Control, or apply their old saved plan. Preserve the work and reassess it against
-live infrastructure before deciding to commit/import/apply it.
+The local Terraform edits were initially held out of the application and venue
+configuration releases. The separate reconciliation preserves R2/FCM/Heroes and
+pinned venue settings, imports the already-created venue containers/access grants,
+and keeps workflow-owned images/revisions unchanged. Payment's optional Admin
+settings key remains disabled unless explicitly enabled in a separate review.
+The unrelated `QA_REVIEW_PHONE_CLEANUP.md` stays outside infrastructure releases.
 
-The review-only plan generated on that date preserved existing API environment
-entries but also proposed restoring 29 absent Pub/Sub subscriptions and associated
-bindings, adding the venue secret containers/bindings, and changing Payment
-configuration. Those findings are historical evidence, not an approved or current
-apply plan. The venue secrets were subsequently provisioned separately. The local
-`QA_REVIEW_PHONE_CLEANUP.md` is unrelated QA work and remains outside this release.
+Cloud audit logs confirmed that all 29 service subscriptions were automatically
+removed on 19 November by `Subscriber.InternalExpireInactiveSubscription` under
+their default 31-day inactivity policy. Service subscriptions now explicitly use
+an empty expiration TTL so they do not expire. Restoration does not recover the
+deleted subscriptions' backlog. Readiness checks publisher permission; they do
+not prove subscription presence or functional delivery.
+
+Use `scripts/terraform-production-plan.py` and the production reconciliation
+procedure in `infra/terraform/README.md`. It reads current services/state, derives
+private inputs without reading key values, saves a full refreshed plan, and rejects
+changes outside the known restoration/import scope. The reviewed restoration plan
+contains 29 subscription creates, 58 unchanged-scope access bindings and four
+no-change imports, with no service, database, environment, image or traffic changes.
+Do not apply an old plan or initial-provisioning defaults. Review the new saved
+plan, retain state evidence, verify restored policies/identities and run another
+full plan after apply; no remaining changes is the infrastructure completion gate.
 
 ## Runtime contract
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -81,7 +82,7 @@ func TestVenuePartnerClient(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	key := "0123456789abcdef0123456789abcdef"
+	key := strings.Repeat("test-key-", 4)
 	p := &httpVenuePartner{base: srv.URL, key: key, client: srv.Client()}
 
 	rev, err := p.Submit(context.Background(), validVenue())

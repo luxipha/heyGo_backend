@@ -22,6 +22,17 @@ var ErrUnavailable = errors.New("Referrals are unavailable")
 var ErrIneligible = errors.New("Referral codes are for new accounts only")
 var ErrConflict = errors.New("Your referrer is already confirmed")
 var ErrInvalid = errors.New("Referral code not found")
+
+// Specific rejections wrap ErrInvalid so existing errors.Is(err, ErrInvalid)
+// handling still applies. Only reasons that help the user and reveal nothing
+// about the referrer's account get their own error; inactive, simulation and
+// unknown codes all stay a plain ErrInvalid.
+var (
+	ErrBadFormat   = fmt.Errorf("%w: malformed code", ErrInvalid)
+	ErrWrongRole   = fmt.Errorf("%w: rider code used for driver signup", ErrInvalid)
+	ErrOwnCode     = fmt.Errorf("%w: own code", ErrInvalid)
+	ErrSameAccount = fmt.Errorf("%w: same person as referrer", ErrInvalid)
+)
 var ErrStale = errors.New("Settings changed. Reload before saving")
 
 type Stage struct {
@@ -131,8 +142,11 @@ type Referrer struct {
 func Lookup(ctx context.Context, q querier, code, target string) (Referrer, error) {
 	var r Referrer
 	code = strings.ToUpper(strings.TrimSpace(code))
-	if len(code) < 3 || len(code) > 32 || (target != "driver" && target != "rider") {
+	if target != "driver" && target != "rider" {
 		return r, ErrInvalid
+	}
+	if len(code) < 3 || len(code) > 32 || strings.ContainsAny(code, " /:\t\r\n") {
+		return r, ErrBadFormat
 	}
 	s, err := Read(ctx, q)
 	if err != nil {
@@ -144,6 +158,12 @@ func Lookup(ctx context.Context, q querier, code, target string) (Referrer, erro
 	err = q.QueryRow(ctx, `SELECT u.id::text,split_part(COALESCE(NULLIF(dp.display_name,''),NULLIF(rp.display_name,''),'Member'),' ',1),c.code,c.inviter_role FROM referral_codes c JOIN users u ON u.id=c.user_id LEFT JOIN driver_profiles dp ON dp.driver_id=u.id LEFT JOIN rider_profiles rp ON rp.rider_id=u.id WHERE c.code=$1 AND u.active AND (c.inviter_role='driver' OR $2='rider') AND NOT EXISTS(SELECT 1 FROM simulation_participants sp WHERE sp.actor_user_id=u.id)`, code, target).Scan(&r.ID, &r.Name, &r.Code, &r.Role)
 	if errors.Is(err, pgx.ErrNoRows) && target == "driver" {
 		err = q.QueryRow(ctx, `SELECT id::text,split_part(name,' ',1),referral_code,'hero' FROM heroes_accounts WHERE referral_code=$1 AND active`, code).Scan(&r.ID, &r.Name, &r.Code, &r.Role)
+	}
+	if errors.Is(err, pgx.ErrNoRows) && target == "driver" {
+		var riderOnly bool
+		if e := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM referral_codes c JOIN users u ON u.id=c.user_id WHERE c.code=$1 AND c.inviter_role='rider' AND u.active AND NOT EXISTS(SELECT 1 FROM simulation_participants sp WHERE sp.actor_user_id=u.id))`, code).Scan(&riderOnly); e == nil && riderOnly {
+			return r, ErrWrongRole
+		}
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrInvalid
@@ -195,7 +215,7 @@ func Claim(ctx context.Context, tx pgx.Tx, userID, code, target string) error {
 		return err
 	}
 	if r.ID == userID {
-		return ErrInvalid
+		return ErrOwnCode
 	}
 	var same bool
 	if r.Role == "hero" {
@@ -207,7 +227,7 @@ func Claim(ctx context.Context, tx pgx.Tx, userID, code, target string) error {
 		return err
 	}
 	if same {
-		return ErrInvalid
+		return ErrSameAccount
 	}
 	s, err := Read(ctx, tx)
 	if err != nil {

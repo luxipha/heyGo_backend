@@ -24,6 +24,14 @@ func referralError(c *gin.Context, err error) {
 		driverError(c, 409, "referrals_disabled", err.Error())
 	case errors.Is(err, referrals.ErrIneligible), errors.Is(err, referrals.ErrConflict):
 		driverError(c, 409, "referral_ineligible", err.Error())
+	case errors.Is(err, referrals.ErrBadFormat):
+		driverError(c, 404, "referral_bad_format", "That doesn’t look like a heyGo code.")
+	case errors.Is(err, referrals.ErrWrongRole):
+		driverError(c, 404, "referral_wrong_role", "Rider code can’t be used to sign up as a driver.")
+	case errors.Is(err, referrals.ErrOwnCode):
+		driverError(c, 404, "referral_own_code", "Own referral code not allowed.")
+	case errors.Is(err, referrals.ErrSameAccount):
+		driverError(c, 404, "referral_same_account", "This code can’t be used on this account.")
 	case errors.Is(err, referrals.ErrInvalid):
 		driverError(c, 404, "referral_not_found", "Referral code not found")
 	default:
@@ -31,7 +39,8 @@ func referralError(c *gin.Context, err error) {
 	}
 }
 func registerReferralPublicRoutes(r *gin.Engine, pool *pgxpool.Pool) {
-	r.GET("/r/:code", func(c *gin.Context) { referralInvitePage(c, pool) })
+	r.GET("/ref/:code", func(c *gin.Context) { referralInvitePage(c, pool) })
+	r.GET("/r/:code", func(c *gin.Context) { referralInvitePage(c, pool) }) // legacy links already shared
 	r.GET("/referrals/config", func(c *gin.Context) {
 		s, e := referrals.Read(c.Request.Context(), pool)
 		if e != nil {
@@ -183,7 +192,7 @@ func referralSummary(c *gin.Context, pool *pgxpool.Pool, role string) {
 	if base == "" {
 		base = "https://" + c.Request.Host
 	}
-	heroData(c, gin.H{"enabled": s.Enabled, "disabledNotice": s.DisabledNotice, "headline": headline, "body": body, "code": code, "link": base + "/r/" + code, "earnedKobo": earned, "pendingKobo": pending, "invited": invited, "inProgress": progress, "rewarded": rewarded, "invitations": items, "nextCursor": next, "rules": s.Rules})
+	heroData(c, gin.H{"enabled": s.Enabled, "disabledNotice": s.DisabledNotice, "headline": headline, "body": body, "code": code, "link": base + "/ref/" + code, "earnedKobo": earned, "pendingKobo": pending, "invited": invited, "inProgress": progress, "rewarded": rewarded, "invitations": items, "nextCursor": next, "rules": s.Rules})
 }
 func (a *adminAPI) getReferralSettings(c *gin.Context) {
 	s, e := referrals.Read(c.Request.Context(), a.pool)

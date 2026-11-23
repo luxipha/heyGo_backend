@@ -526,6 +526,7 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         for_each = merge(
           var.fcm_project_id != "" ? { FCM_AUTH_MODE = "adc", FCM_PROJECT_ID = var.fcm_project_id } : {},
           var.heroes_public_url != "" ? { HEROES_PUBLIC_URL = var.heroes_public_url } : {},
+          var.referral_public_url != "" ? { REFERRAL_PUBLIC_URL = var.referral_public_url } : {},
         )
         content {
           name  = env.key

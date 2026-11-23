@@ -142,6 +142,12 @@ variable "heroes_public_url" {
   default     = ""
 }
 
+variable "referral_public_url" {
+  description = "Public HTTPS origin (no path) routing /ref/<code> to the API. Empty uses the serving API host. Configure a branded origin only after its referral route is available."
+  type        = string
+  default     = ""
+}
+
 variable "admin_frontend_url" {
   description = "HTTPS origin for single-use staff invitation, verification, and recovery links. Configure before enabling staff email flows."
   type        = string

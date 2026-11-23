@@ -99,3 +99,37 @@ Require cloud-staging auth/matching/trip/payment/recovery evidence before
 production promotion. Apply migration 064 before Payment Service and verify the
 authenticated payment-event recovery Scheduler job. See
 [archived payment-event recovery notes](https://github.com/luxipha/heyGo_backend/blob/98f4e8c88349b93b296d75d70e46691df762bac9/docs/PAYMENT_EVENT_RECOVERY.md).
+
+
+## Venue partner configuration rollout
+
+Use `Configure venue partner` for this configuration-only change. It preserves
+all existing API environment entries, secret references, image and runtime identity;
+it does not run migrations or apply Terraform. Its concurrency group is shared
+with application releases. The exact workflow commit must have a passing main
+audit. Provision the two external keys privately in Secret Manager and grant only
+the API runtime identity access to those secrets before preparing a revision.
+
+- `VENUE_PARTNER_URL`: HTTPS origin; the client appends `/api/heygo/...`.
+- `VENUE_PARTNER_SERVICE_KEY`: numeric version of `heygo-venue-partner-service-key`;
+  sent to the partner as `x-heygo-service-key`.
+- `VENUE_PARTNER_INBOUND_KEY`: numeric version of `heygo-venue-partner-inbound-key`;
+  the partner must send this independent key as `x-service-key` to
+  `/partner/venue-earnings`.
+
+Dispatch `prepare` with the current 100%-traffic revision, origin, numeric secret
+versions and `confirmation=configure`. It saves rollback evidence, creates a
+no-traffic candidate, rejects changes to existing configuration, and checks
+readiness/authentication. Inspect the run artifact and test the candidate with
+the saved keys using read-only partner queries and an authenticated malformed
+earnings report (expect 400 without any database write). Do not use a real order
+or send owner OTPs merely to check configuration.
+
+Only after those checks pass, dispatch `promote` using the successful prepare run
+ID and the same expected old revision. The workflow verifies the candidate and
+production state again, promotes that explicit revision, and checks readiness.
+Retain the workflow artifact. Roll back using `gcloud run services update-traffic`
+with the artifact's `previousRevision`; secret versions and database are not
+changed by traffic rollback. Never paste key values into workflow inputs or logs.
+This proves configuration/authentication, not venue submission, delivery, or wallet
+credit end-to-end. Configure the partner's earnings sender separately.

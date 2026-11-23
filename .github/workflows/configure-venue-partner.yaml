@@ -1,0 +1,106 @@
+name: Configure venue partner
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Prepare a no-traffic candidate, or promote after operator integration checks
+        type: choice
+        options: [prepare, promote]
+        required: true
+      expected_revision:
+        description: Reviewed API revision currently serving 100% of traffic
+        required: true
+        type: string
+      partner_url:
+        description: Partner HTTPS origin without /api (prepare only; never enter keys here)
+        type: string
+        default: ''
+      outbound_version:
+        description: Numeric version of heygo-venue-partner-service-key (prepare only)
+        type: string
+        default: ''
+      inbound_version:
+        description: Numeric version of heygo-venue-partner-inbound-key (prepare only)
+        type: string
+        default: ''
+      candidate_run_id:
+        description: Successful prepare workflow run ID (promote only)
+        type: string
+        default: ''
+      confirmation:
+        description: Type configure to authorize the selected stage
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-run-production
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'configure'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require passing audit for this workflow commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/audit.yaml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&per_page=10" --jq '.workflow_runs[0].conclusion')"
+          test "$conclusion" = success
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: heygo-ng
+          workload_identity_provider: projects/392496443029/locations/global/workloadIdentityPools/github-actions/providers/heygo-backend
+          service_account: github-cloud-run-deployer@heygo-ng.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Validate prepare run before promotion
+        if: inputs.stage == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+        run: |
+          [[ "$CANDIDATE_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN" |
+            jq -e --arg sha "$GITHUB_SHA" '.conclusion == "success" and .head_sha == $sha and .path == ".github/workflows/configure-venue-partner.yaml"'
+      - uses: actions/download-artifact@v4
+        if: inputs.stage == 'promote'
+        with:
+          name: venue-candidate
+          path: venue-evidence
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+      - name: Prepare or promote venue configuration
+        env:
+          STAGE: ${{ inputs.stage }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          PARTNER_URL: ${{ inputs.partner_url }}
+          OUTBOUND_VERSION: ${{ inputs.outbound_version }}
+          INBOUND_VERSION: ${{ inputs.inbound_version }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+        run: |
+          source_run="$GITHUB_RUN_ID"
+          if [[ "$STAGE" == promote ]]; then source_run="$CANDIDATE_RUN"; fi
+          python3 scripts/configure-venue-partner.py --stage "$STAGE" \
+            --expected-revision "$EXPECTED_REVISION" --partner-url "$PARTNER_URL" \
+            --outbound-version "$OUTBOUND_VERSION" --inbound-version "$INBOUND_VERSION" \
+            --tag "venue-$source_run" --execute
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: venue-${{ inputs.stage }}-${{ github.run_id }}
+          path: venue-evidence/
+      - uses: actions/upload-artifact@v4
+        if: inputs.stage == 'prepare' && success()
+        with:
+          name: venue-candidate
+          path: venue-evidence/

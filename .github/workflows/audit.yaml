@@ -77,6 +77,9 @@ jobs:
       - name: Validate HeyGo automation
         run: python3 tools/skills/test_tools.py
 
+      - name: Validate configuration rollout safeguards
+        run: python3 -m unittest discover -s scripts -p test_configure_venue_partner.py
+
       - name: Run go vet
         run: go vet ./...
 

@@ -12,8 +12,13 @@ func stripCredentialQuery(c *gin.Context) {
 	if token := q.Get("access_token"); token != "" && strings.EqualFold(c.GetHeader("Upgrade"), "websocket") && c.GetHeader("Authorization") == "" {
 		c.Request.Header.Set("Authorization", "Bearer "+token)
 	}
-	for _, key := range []string{"access_token", "refresh_token", "token", "code"} {
+	for _, key := range []string{"access_token", "refresh_token", "token"} {
 		q.Del(key)
+	}
+	// Referral lookup uses a public code, not an authentication credential.
+	// Keep it only on the two routes that consume it.
+	if c.Request.URL.Path != "/driver/referrals/check" && c.Request.URL.Path != "/rider/referrals/check" {
+		q.Del("code")
 	}
 	c.Request.URL.RawQuery = q.Encode()
 	c.Next()

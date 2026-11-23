@@ -30,3 +30,28 @@ func TestCredentialQueryIsRemovedBeforeTelemetryAndSocketAuthPreserved(t *testin
 		t.Fatal(w.Code)
 	}
 }
+
+func TestReferralLookupCodeSurvivesCredentialCleanup(t *testing.T) {
+	for _, path := range []string{"/driver/referrals/check", "/rider/referrals/check"} {
+		t.Run(path, func(t *testing.T) {
+			r := gin.New()
+			r.Use(stripCredentialQuery)
+			r.GET(path, func(c *gin.Context) {
+				if c.Query("code") != "H123456789" {
+					t.Error("public referral code lost")
+				}
+				for _, key := range []string{"access_token", "refresh_token", "token"} {
+					if c.Query(key) != "" {
+						t.Errorf("credential %s retained", key)
+					}
+				}
+				c.Status(204)
+			})
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest("GET", path+"?code=H123456789&access_token=secret&refresh_token=secret&token=secret", nil))
+			if w.Code != 204 {
+				t.Fatal(w.Code)
+			}
+		})
+	}
+}

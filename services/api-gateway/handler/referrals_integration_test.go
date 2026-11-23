@@ -16,6 +16,7 @@ import (
 )
 
 func TestReferralRegistrationAndDisabledLink(t *testing.T) {
+	t.Setenv("REFERRAL_PUBLIC_URL", "")
 	url := os.Getenv("REFERRAL_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("Disposable referral database required")
@@ -76,9 +77,22 @@ func TestReferralRegistrationAndDisabledLink(t *testing.T) {
 		r.ServeHTTP(w, req)
 		return w
 	}
+	if w := call("GET", "/ref/"+code, ""); w.Code != 200 || !strings.Contains(w.Body.String(), code) {
+		t.Fatalf("/ref invite page: %d", w.Code)
+	}
 	if w := call("GET", "/r/"+code, ""); w.Code != 200 || !strings.Contains(w.Body.String(), code) {
 		t.Fatalf("invite page: %d %s", w.Code, w.Body.String())
 	}
+	userID = driver
+	if w := call("GET", "/driver/referrals", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "https://example.com/ref/"+code) {
+		t.Fatalf("default referral link must use serving API host: %d %s", w.Code, w.Body.String())
+	}
+	t.Setenv("REFERRAL_PUBLIC_URL", "https://referrals.example.test/")
+	if w := call("GET", "/driver/referrals", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "https://referrals.example.test/ref/"+code) {
+		t.Fatalf("configured referral origin: %d %s", w.Code, w.Body.String())
+	}
+	t.Setenv("REFERRAL_PUBLIC_URL", "")
+	userID = fresh
 	// Exercise a Hero claim through the production query-cleanup middleware.
 	hero, heroDriver := uuid.NewString(), uuid.NewString()
 	heroCode := "H" + strings.ReplaceAll(hero, "-", "")[:9]

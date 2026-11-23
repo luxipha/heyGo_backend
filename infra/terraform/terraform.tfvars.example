@@ -32,6 +32,7 @@ cloud_sql_tier                      = "db-f1-micro"
 # r2_secret_version = "1"
 # fcm_project_id    = "heygo-c5ae1"
 # heroes_public_url = "https://hero.heygo.ng"
+# referral_public_url = "https://heygo.ng" # Only after /ref/<code> routes to the API.
 
 # Venue partner activation is separate from creating empty secret containers.
 # Supply external secret versions privately before enabling either direction.

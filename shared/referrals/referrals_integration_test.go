@@ -222,8 +222,14 @@ func TestProgrammeRulesAndAtomicApprovals(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = Lookup(ctx, pool, riderCode, "driver"); !errors.Is(e, ErrInvalid) {
+	if _, e = Lookup(ctx, pool, riderCode, "driver"); !errors.Is(e, ErrInvalid) || !errors.Is(e, ErrWrongRole) {
 		t.Fatal("rider invited driver", e)
+	}
+	if _, e = Lookup(ctx, pool, "GO-DOES-NOT-EXIST", "driver"); !errors.Is(e, ErrInvalid) || errors.Is(e, ErrWrongRole) || errors.Is(e, ErrBadFormat) {
+		t.Fatal("unknown code must stay generic", e)
+	}
+	if _, e = Lookup(ctx, pool, "https://heygo.ng/ref/"+riderCode, "rider"); !errors.Is(e, ErrBadFormat) {
+		t.Fatal("pasted link must be bad format", e)
 	}
 }
 func TestValidateSettings(t *testing.T) {

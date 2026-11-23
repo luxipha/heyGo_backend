@@ -10,6 +10,56 @@ The image workflow builds every service on pull requests. After a protected
 `main` merge, GitHub authenticates through Workload Identity Federation and
 pushes the exact commit SHA. It never publishes a mutable `latest` tag.
 
+## Choose the change path before deploying
+
+| Change | Existing path | Terraform apply? |
+| --- | --- | --- |
+| Backend code or database migrations | Audited SHA, published images, `Deploy Cloud Run` workflow | No |
+| Venue URL or the two venue key references | `Configure venue partner`: prepare, test, promote | No |
+| Cloud SQL, networking, Pub/Sub, runtime IAM, or other foundation resources | Explicit infrastructure review and a fresh Terraform plan | Only after that specific plan is approved |
+
+Terraform has been used to provision the foundation. It is not executed by routine
+application releases. `GCP foundation` validates Terraform and verifies cloud
+access; it does not plan or apply infrastructure. The configuration workflow adds
+only its named settings, while Terraform may reconcile the entire foundation.
+Do not choose a full apply simply because a feature needs an environment variable.
+
+Before any future infrastructure apply, inspect the live service configuration,
+secret names/versions, current remote state and the exact production inputs.
+Never use the initial-provisioning defaults on an existing deployment:
+`deploy_services=false` can propose removing services, and empty feature settings
+can propose removing live environment entries. Preserve the enabled R2 storage,
+FCM, Heroes URL and venue configuration. Keep actual key values out of source,
+plan summaries, workflow inputs and logs. Add or update existing settings rather
+than replace the complete environment/secret list.
+
+Review every proposed deletion, replacement, environment removal, image/traffic
+change and unrelated IAM change. Stop when the plan contains unexplained drift.
+Do not use `-target` or blanket `ignore_changes` to hide unexplained differences.
+Creating existing Secret Manager containers through Terraform requires deliberate
+state reconciliation/import, not another create attempt. In particular, venue
+secret containers may have been provisioned independently by the configuration
+rollout. Recheck them and their access bindings before any later infrastructure
+apply.
+
+### Local Terraform work from 23 November 2026
+
+The five edited files under `infra/terraform` are reconciliation work, not a
+prerequisite for the venue configuration rollout. Their edits preserve existing
+R2/FCM/Heroes settings, define the two venue directions, correct the partner URL
+contract and keep workflow-owned images/revision names separate. They remain
+uncommitted and unapplied until reviewed as a separate infrastructure change.
+Do not delete them, include them in an application release merely to clear Source
+Control, or apply their old saved plan. Preserve the work and reassess it against
+live infrastructure before deciding to commit/import/apply it.
+
+The review-only plan generated on that date preserved existing API environment
+entries but also proposed restoring 29 absent Pub/Sub subscriptions and associated
+bindings, adding the venue secret containers/bindings, and changing Payment
+configuration. Those findings are historical evidence, not an approved or current
+apply plan. The venue secrets were subsequently provisioned separately. The local
+`QA_REVIEW_PHONE_CLEANUP.md` is unrelated QA work and remains outside this release.
+
 ## Runtime contract
 
 All five services prefer Cloud Run's injected `PORT` and listen on every

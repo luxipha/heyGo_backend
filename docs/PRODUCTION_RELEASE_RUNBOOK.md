@@ -1,5 +1,14 @@
 # Production release runbook
 
+## Select the deployment path first
+
+Read [the change-path guide](CLOUD_RUN_DEPLOYMENT.md#choose-the-change-path-before-deploying)
+before changing production. Application releases use `Deploy Cloud Run`; venue
+configuration uses `Configure venue partner` with prepare/test/promote stages.
+Neither requires a full Terraform apply. Foundation changes require a separate,
+reviewed fresh plan against live configuration and current state. Do not apply
+initial-provisioning defaults or unreviewed local Terraform reconciliation edits.
+
 ## Targets and private configuration
 
 - Google Cloud project: `heygo-ng`; region: `europe-west1`.

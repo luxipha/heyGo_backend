@@ -20,7 +20,7 @@ func QueueStagePayout(ctx context.Context, tx pgx.Tx, stage string, staff *strin
 	var bank *string
 	var amount int64
 	var eligible bool
-	err := tx.QueryRow(ctx, `SELECT h.payout_account_id::text,s.reward_kobo,s.credited_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM hero_stage_payment_allocations pa WHERE pa.stage_id=s.id AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=pa.payment_id)) FROM hero_referral_stages s JOIN heroes_accounts h ON h.id=$2::uuid WHERE s.id=$1::uuid FOR UPDATE OF s`, stage, hero).Scan(&bank, &amount, &eligible)
+	err := tx.QueryRow(ctx, `SELECT h.payout_account_id::text,hero_stage_amount(s.id),s.credited_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM hero_stage_payment_allocations pa WHERE pa.stage_id=s.id AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=pa.payment_id)) FROM hero_referral_stages s JOIN heroes_accounts h ON h.id=$2::uuid WHERE s.id=$1::uuid FOR UPDATE OF s`, stage, hero).Scan(&bank, &amount, &eligible)
 	if err != nil {
 		return "", err
 	}

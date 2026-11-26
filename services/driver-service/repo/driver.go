@@ -73,7 +73,15 @@ func NewPostgresDriverRepository(pool *pgxpool.Pool) DriverRepo {
 }
 
 func (r *postgresDriverRepo) UpsertOnline(ctx context.Context, d *pb.Driver) (*pb.Driver, error) {
-	result, err := r.pool.Exec(ctx, `INSERT INTO drivers(id,name,profile_pic,car_plate,package_slug,status,available,online_requested,location,online_market_code,last_seen_at)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('referral-settings'))`); err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO drivers(id,name,profile_pic,car_plate,package_slug,status,available,online_requested,location,online_market_code,last_seen_at)
 	SELECT p.driver_id,p.display_name,p.photo_url,v.plate,v.package_slug,'available',TRUE,TRUE,l.location,driver_market_at(l.location),NOW()
 	FROM driver_profiles p JOIN driver_vehicles v ON v.driver_id=p.driver_id
 	JOIN driver_eligibility e ON e.driver_id=p.driver_id
@@ -90,6 +98,16 @@ func (r *postgresDriverRepo) UpsertOnline(ctx context.Context, d *pb.Driver) (*p
 	}
 	if result.RowsAffected() == 0 {
 		return nil, fmt.Errorf("driver is not eligible to go online or package does not match")
+	}
+	// Only a successful server-accepted online transition is activation evidence.
+	if _, err = tx.Exec(ctx, `INSERT INTO driver_first_online(driver_id)
+ SELECT u.id FROM users u WHERE u.id=$1::uuid AND u.active AND u.phone_verified_at IS NOT NULL AND COALESCE(u.phone_e164,'')<>''
+ AND NOT EXISTS(SELECT 1 FROM simulation_participants sp WHERE sp.actor_user_id=u.id)
+ ON CONFLICT DO NOTHING`, d.Id); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return r.get(ctx, d.Id)
 }

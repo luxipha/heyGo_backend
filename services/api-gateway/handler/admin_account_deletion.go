@@ -235,6 +235,7 @@ func anonymizeDriverAccount(ctx *gin.Context, tx pgx.Tx, requestID, driverID str
 		{`DELETE FROM driver_notification_preferences WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`UPDATE driver_identity_profiles SET residential_address='' WHERE driver_id=$1::uuid`, []any{driverID}},
 		{`DELETE FROM driver_home_destinations WHERE driver_id=$1::uuid`, []any{driverID}},
+		{`DELETE FROM driver_scheduled_outcomes WHERE driver_id=$1::uuid`, []any{driverID}},
 		{`DELETE FROM driver_ride_preferences WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_document_pins WHERE driver_id=$1::UUID`, []any{driverID}},
 		{`DELETE FROM driver_safety_contacts WHERE driver_id=$1::UUID`, []any{driverID}},

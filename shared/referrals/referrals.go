@@ -43,10 +43,11 @@ type Stage struct {
 }
 
 type Rule struct {
-	Stages       []Stage `json:"stages,omitempty"`
-	RewardKobo   int64   `json:"rewardKobo"`
-	TripTarget   int     `json:"tripTarget"`
-	DeadlineDays *int    `json:"deadlineDays"`
+	EarlyActivation bool    `json:"earlyActivation"`
+	Stages          []Stage `json:"stages,omitempty"`
+	RewardKobo      int64   `json:"rewardKobo"`
+	TripTarget      int     `json:"tripTarget"`
+	DeadlineDays    *int    `json:"deadlineDays"`
 }
 type Settings struct {
 	Version        int64           `json:"version"`
@@ -69,6 +70,9 @@ func (s Settings) Validate() error {
 		r, ok := s.Rules[key]
 		if !ok || r.RewardKobo < 0 || r.RewardKobo > 100000000 || r.TripTarget < 1 || r.TripTarget > 10000 || r.DeadlineDays != nil && (*r.DeadlineDays < 1 || *r.DeadlineDays > 3650) {
 			return fmt.Errorf("Invalid reward rule: %s", key)
+		}
+		if r.EarlyActivation && (key != "hero_driver" || len(r.Stages) == 0 || r.Stages[0].RewardKobo <= 200000) {
+			return errors.New("Early activation requires Hero stages with a first reward greater than NGN 2,000")
 		}
 		if len(r.Stages) > 0 {
 			if key != "hero_driver" || len(r.Stages) > 20 {
@@ -126,6 +130,13 @@ func Save(ctx context.Context, tx pgx.Tx, s Settings, staff string) (Settings, e
 	}
 	if old.Version != s.Version {
 		return Settings{}, ErrStale
+	}
+	// Qualify already-earned activation before changing the live allocation.
+	if err = ProcessStages(ctx, tx); err != nil {
+		return Settings{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT sync_hero_activation($1)`, s.Rules["hero_driver"].EarlyActivation); err != nil {
+		return Settings{}, err
 	}
 	raw, _ := json.Marshal(s.Rules)
 	err = tx.QueryRow(ctx, `INSERT INTO referral_settings(enabled,disabled_notice,driver_headline,driver_body,rider_headline,rider_body,rules,created_by)VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::uuid)RETURNING version`, s.Enabled, s.DisabledNotice, s.DriverHeadline, s.DriverBody, s.RiderHeadline, s.RiderBody, string(raw), staff).Scan(&s.Version)
@@ -258,7 +269,10 @@ func Claim(ctx context.Context, tx pgx.Tx, userID, code, target string) error {
 			return err
 		}
 	}
-	return nil
+	if rule.EarlyActivation {
+		_, err = tx.Exec(ctx, `SELECT sync_hero_activation(TRUE,$1::uuid)`, referralID)
+	}
+	return err
 }
 func OwnCode(ctx context.Context, pool *pgxpool.Pool, user, role string) (string, error) {
 	if role != "driver" && role != "rider" {

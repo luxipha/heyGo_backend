@@ -101,6 +101,14 @@ func TestScheduledLocalBookingAndRecovery(t *testing.T) {
 	group.POST("/test/no-show/:tripID", driverAPI.submitNoShowClaim)
 	admin := &adminAPI{pool: pool}
 	group.PUT("/test/scheduling/settings", func(c *gin.Context) { c.Set("admin", adminIdentity{ID: staff}); admin.saveSchedulePolicy(c) })
+	outcomeCount := func(booking, driver, outcome string) int {
+		t.Helper()
+		var n int
+		if e := pool.QueryRow(ctx, `SELECT count(*) FROM driver_scheduled_outcomes WHERE booking_id=$1::uuid AND driver_id=$2::uuid AND outcome=$3`, booking, driver, outcome).Scan(&n); e != nil {
+			t.Fatal(e)
+		}
+		return n
+	}
 	call := func(who, method, path, body string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -284,6 +292,9 @@ func TestScheduledLocalBookingAndRecovery(t *testing.T) {
 	if w = call(winner, "POST", "/test/"+booking+"/ready", `{}`); w.Code != 200 {
 		t.Fatal("readiness", w.Body.String())
 	}
+	if n := outcomeCount(booking, winner, "checked_in"); n != 1 {
+		t.Fatal("check-in outcome", n)
+	}
 	immediate, e := repository.GetRideFareByID(ctx, makeFare(rider))
 	if e != nil {
 		t.Fatal(e)
@@ -374,6 +385,9 @@ func TestScheduledLocalBookingAndRecovery(t *testing.T) {
 	if e = pool.QueryRow(ctx, `SELECT status,driver_id::text FROM scheduled_rides WHERE id=$1::uuid`, fallback).Scan(&state, &driverAfter); e != nil || state != "dispatched" || driverAfter != nil {
 		t.Fatal("unready reservation was not released", state, driverAfter, e)
 	}
+	if n := outcomeCount(fallback, winner, "missed_check_in"); n != 1 {
+		t.Fatal("missed check-in outcome", n)
+	}
 	var replacementEvents int
 	if e = pool.QueryRow(ctx, `SELECT count(*) FROM user_events WHERE recipient_id=$1::uuid AND type='scheduled.event.replacement_required' AND data->>'bookingId'=$2`, other, fallback).Scan(&replacementEvents); e != nil || replacementEvents != 1 {
 		t.Fatal("replacement notice", replacementEvents, e)
@@ -453,6 +467,9 @@ func TestScheduledLocalBookingAndRecovery(t *testing.T) {
 	var editedFare string
 	if e = pool.QueryRow(ctx, `SELECT status,driver_id::text,fare_id::text,version FROM scheduled_rides WHERE id=$1::uuid`, editID).Scan(&state, &driverAfter, &editedFare, &editVersion); e != nil || state != "open" || driverAfter != nil || editedFare != newFare {
 		t.Fatal("edited state", e, state, driverAfter, editedFare)
+	}
+	if n := outcomeCount(editID, winner, "released"); n != 0 {
+		t.Fatal("rider edit counted against the driver", n)
 	}
 	if w = call(other, "GET", "/rider/scheduled-rides/"+editID, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"fareKobo":20000`) {
 		t.Fatal("replacement fare response", w.Body.String())

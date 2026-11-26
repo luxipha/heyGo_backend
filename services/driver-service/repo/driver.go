@@ -20,6 +20,11 @@ var ErrNoAvailableDriver = errors.New("no available driver")
 var ErrTripAlreadyMatched = errors.New("trip is already matched")
 var ErrNoActiveOffer = errors.New("trip has no active driver offer")
 
+// ErrAssignmentNotActive means the Driver has no offered assignment for the
+// trip: it expired, was accepted or declined already, or was reassigned.
+// It is a permanent condition, not a failure to retry.
+var ErrAssignmentNotActive = errors.New("active assignment not found")
+
 // trustDistanceAdvantageMeters is the maximum proximity advantage granted to
 // a higher-trust provider while dispatch has no driver-to-pickup ETA matrix.
 // A missing snapshot defaults to the neutral baseline of 100.
@@ -311,7 +316,7 @@ func (r *postgresDriverRepo) DeclineAssignment(ctx context.Context, tripID, driv
 	var payload []byte
 	err = tx.QueryRow(ctx, `UPDATE driver_assignments SET status='declined',responded_at=NOW() WHERE trip_id=$1::UUID AND driver_id=$2::UUID AND status='offered' RETURNING trip_payload`, tripID, driverID).Scan(&payload)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("active assignment not found")
+		return nil, ErrAssignmentNotActive
 	}
 	if err != nil {
 		return nil, err

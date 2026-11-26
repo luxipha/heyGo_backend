@@ -13,40 +13,42 @@ import (
 )
 
 type driverTripDetail struct {
-	ScheduledBookingID      *string         `json:"scheduledBookingId"`
-	ScheduledPickupAt       *time.Time      `json:"scheduledPickupAt"`
-	RidePreferences         json.RawMessage `json:"ridePreferences"`
-	PreferencesRevision     int64           `json:"preferencesRevision"`
-	GuestPhone              string          `json:"guestPhone,omitempty"`
-	GuestName               string          `json:"guestName"`
-	PickupNote              string          `json:"pickupNote"`
-	Stops                   json.RawMessage `json:"stops"`
-	RouteRevision           int64           `json:"routeRevision"`
-	Version                 int64           `json:"version"`
-	ID                      string          `json:"id"`
-	RiderID                 string          `json:"riderId"`
-	Status                  string          `json:"status"`
-	PackageSlug             string          `json:"packageSlug"`
-	FareKobo                int64           `json:"fareKobo"`
-	NoShowDebtKobo          int64           `json:"noShowDebtKobo"`
-	AmountDueKobo           int64           `json:"amountDueKobo"`
-	RideCreditKobo          int64           `json:"rideCreditKobo"`
-	Currency                string          `json:"currency"`
-	Route                   json.RawMessage `json:"route"`
-	PickupMetadata          json.RawMessage `json:"pickupMetadata"`
-	DestinationMetadata     json.RawMessage `json:"destinationMetadata"`
-	CreatedAt               time.Time       `json:"createdAt"`
-	StartedAt               *time.Time      `json:"startedAt"`
-	ArrivedAt               *time.Time      `json:"arrivedAt"`
-	CompletedAt             *time.Time      `json:"completedAt"`
-	CancelledAt             *time.Time      `json:"cancelledAt"`
-	CancellationReason      *string         `json:"cancellationReason"`
-	EarningsKobo            *int64          `json:"earningsKobo"`
-	MarketCode              *string         `json:"marketCode"`
-	OriginRegionCode        *string         `json:"originRegionCode"`
-	DestinationRegionCode   *string         `json:"destinationRegionCode"`
-	RegulatoryTags          []string        `json:"regulatoryTags"`
-	ClassificationGeofences json.RawMessage `json:"classificationGeofences"`
+	ScheduledBookingID      *string                 `json:"scheduledBookingId"`
+	ScheduledPickupAt       *time.Time              `json:"scheduledPickupAt"`
+	RidePreferences         json.RawMessage         `json:"ridePreferences"`
+	PreferencesRevision     int64                   `json:"preferencesRevision"`
+	GuestPhone              string                  `json:"guestPhone,omitempty"`
+	GuestName               string                  `json:"guestName"`
+	PickupNote              string                  `json:"pickupNote"`
+	Stops                   json.RawMessage         `json:"stops"`
+	RouteRevision           int64                   `json:"routeRevision"`
+	Version                 int64                   `json:"version"`
+	ID                      string                  `json:"id"`
+	RiderID                 string                  `json:"riderId"`
+	Status                  string                  `json:"status"`
+	PackageSlug             string                  `json:"packageSlug"`
+	FareKobo                int64                   `json:"fareKobo"`
+	NoShowDebtKobo          int64                   `json:"noShowDebtKobo"`
+	AmountDueKobo           int64                   `json:"amountDueKobo"`
+	RideCreditKobo          int64                   `json:"rideCreditKobo"`
+	Currency                string                  `json:"currency"`
+	Route                   json.RawMessage         `json:"route"`
+	PickupMetadata          json.RawMessage         `json:"pickupMetadata"`
+	DestinationMetadata     json.RawMessage         `json:"destinationMetadata"`
+	CreatedAt               time.Time               `json:"createdAt"`
+	StartedAt               *time.Time              `json:"startedAt"`
+	ArrivedAt               *time.Time              `json:"arrivedAt"`
+	CompletedAt             *time.Time              `json:"completedAt"`
+	CancelledAt             *time.Time              `json:"cancelledAt"`
+	CancellationReason      *string                 `json:"cancellationReason"`
+	EarningsKobo            *int64                  `json:"earningsKobo"`
+	MarketCode              *string                 `json:"marketCode"`
+	OriginRegionCode        *string                 `json:"originRegionCode"`
+	DestinationRegionCode   *string                 `json:"destinationRegionCode"`
+	RegulatoryTags          []string                `json:"regulatoryTags"`
+	ClassificationGeofences json.RawMessage         `json:"classificationGeofences"`
+	StatutoryCharges        []driverStatutoryCharge `json:"statutoryCharges"`
+	Rider                   *driverTripRider        `json:"rider"`
 }
 
 func (a *driverAPI) tripDetail(ctx *gin.Context) {
@@ -78,6 +80,16 @@ func (a *driverAPI) tripDetail(ctx *gin.Context) {
 		return
 	}
 	trip.Currency = "NGN"
+	charges, err := readDriverStatutoryCharges(ctx.Request.Context(), a.pool, driverID(ctx), trip.ID)
+	if err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "trip_unavailable", "Trip is unavailable")
+		return
+	}
+	trip.StatutoryCharges = charges
+	if trip.Rider, err = readDriverTripRider(ctx.Request.Context(), a.pool, driverID(ctx), trip.ID); err != nil {
+		driverError(ctx, http.StatusServiceUnavailable, "trip_unavailable", "Trip is unavailable")
+		return
+	}
 	if err := a.pool.QueryRow(ctx.Request.Context(), `SELECT ride_preferences,preferences_revision,guest_name,CASE WHEN status IN ('accepted','arrived','started') THEN guest_phone ELSE '' END,pickup_note,stops,route_revision,version FROM trips WHERE id=$1::uuid AND assigned_driver_id=$2::uuid`, trip.ID, driverID(ctx)).Scan(&trip.RidePreferences, &trip.PreferencesRevision, &trip.GuestName, &trip.GuestPhone, &trip.PickupNote, &trip.Stops, &trip.RouteRevision, &trip.Version); err != nil {
 		accountError(ctx)
 		return

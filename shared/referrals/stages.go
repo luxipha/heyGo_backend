@@ -12,6 +12,10 @@ import (
 
 // StageProgress is shared by Finance and Heroes. All monetary values are kobo.
 type StageProgress struct {
+	Kind             string     `json:"kind"`
+	DriverID         string     `json:"driverId,omitempty"`
+	DriverPhone      string     `json:"driverPhone,omitempty"`
+	DriverNameSource string     `json:"driverNameSource,omitempty"`
 	PayoutMode       string     `json:"payoutMode"`
 	PayoutStatus     *string    `json:"payoutStatus"`
 	PayoutID         *string    `json:"payoutId"`
@@ -38,11 +42,21 @@ type stageQuerier interface {
 }
 
 func ListStages(ctx context.Context, q stageQuerier, hero string, offset int) ([]StageProgress, error) {
-	rows, err := q.Query(ctx, `SELECT s.id::text,a.id::text,a.hero_id::text,h.name,COALESCE(NULLIF(dp.display_name,''),'Driver'),s.position,s.trip_target,s.reward_kobo,s.approval_mode,`+ProgressSQL+`,s.qualified_at,s.credited_at,s.approved_by::text,p.paid_at,p.reference,a.deadline_at,s.payout_mode,po.status,po.id::text
- FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id JOIN heroes_accounts h ON h.id=a.hero_id LEFT JOIN driver_profiles dp ON dp.driver_id=a.invitee_id
+	return ListStagePage(ctx, q, hero, offset, "all")
+}
+
+// Filtering happens before pagination so current targets cannot disappear at page boundaries.
+func ListStagePage(ctx context.Context, q stageQuerier, hero string, offset int, view string) ([]StageProgress, error) {
+	rows, err := q.Query(ctx, `SELECT s.id::text,a.id::text,a.hero_id::text,h.name,COALESCE(NULLIF(dp.display_name,''),CASE WHEN $3<>'public' THEN NULLIF(lead.name,'') END,'Driver'),s.position,s.trip_target,CASE WHEN $3='public' THEN s.reward_kobo ELSE hero_stage_amount(s.id) END,s.approval_mode,`+ProgressSQL+`,s.qualified_at,CASE WHEN $3='public' AND s.position=1 AND EXISTS(SELECT 1 FROM hero_referral_stages act WHERE act.referral_id=s.referral_id AND act.position=0 AND act.enabled AND act.credited_at IS NULL) THEN NULL ELSE s.credited_at END,s.approved_by::text,CASE WHEN $3='public' AND s.position=1 AND EXISTS(SELECT 1 FROM hero_referral_stages act WHERE act.referral_id=s.referral_id AND act.position=0 AND act.enabled AND NOT EXISTS(SELECT 1 FROM hero_stage_payment_allocations ap WHERE ap.stage_id=act.id AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals ar WHERE ar.payment_id=ap.payment_id))) THEN NULL ELSE p.paid_at END,p.reference,a.deadline_at,s.payout_mode,po.status,po.id::text,CASE WHEN s.position=0 THEN 'activation' ELSE 'trips' END,a.invitee_id::text,COALESCE(u.phone_e164,''),CASE WHEN NULLIF(dp.display_name,'') IS NOT NULL THEN 'profile' WHEN NULLIF(lead.name,'') IS NOT NULL THEN 'hero_lead' ELSE 'missing' END
+ FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id JOIN heroes_accounts h ON h.id=a.hero_id LEFT JOIN driver_profiles dp ON dp.driver_id=a.invitee_id JOIN users u ON u.id=a.invitee_id
+ LEFT JOIN LATERAL(SELECT l.name FROM heroes_driver_leads l WHERE l.hero_id=a.hero_id AND l.phone=u.phone_e164 ORDER BY l.created_at DESC LIMIT 1)lead ON true
  LEFT JOIN LATERAL(SELECT p.paid_at,p.reference FROM hero_stage_payment_allocations pa JOIN heroes_manual_payments p ON p.id=pa.payment_id WHERE pa.stage_id=s.id AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=p.id) ORDER BY p.created_at DESC LIMIT 1)p ON true
  LEFT JOIN LATERAL(SELECT status,id FROM hero_stage_payouts WHERE stage_id=s.id ORDER BY created_at DESC,id DESC LIMIT 1)po ON true
- WHERE ($1='' OR a.hero_id::text=$1) ORDER BY a.linked_at DESC,a.id,s.position LIMIT 201 OFFSET $2`, hero, offset)
+ WHERE s.enabled AND ($1='' OR a.hero_id::text=$1)
+ AND ($3<>'public' OR s.position>0)
+ AND ($3<>'current' OR (s.qualified_at IS NOT NULL AND p.paid_at IS NULL) OR
+ (s.qualified_at IS NULL AND NOT EXISTS(SELECT 1 FROM hero_referral_stages prev WHERE prev.referral_id=s.referral_id AND prev.enabled AND prev.position<s.position AND prev.qualified_at IS NULL)))
+ ORDER BY a.linked_at DESC,a.id,s.position LIMIT 201 OFFSET $2`, hero, offset, view)
 	if err != nil {
 		return nil, err
 	}
@@ -50,8 +64,13 @@ func ListStages(ctx context.Context, q stageQuerier, hero string, offset int) ([
 	items := []StageProgress{}
 	for rows.Next() {
 		var s StageProgress
-		if err = rows.Scan(&s.ID, &s.ReferralID, &s.HeroID, &s.Hero, &s.Driver, &s.Position, &s.TripTarget, &s.RewardKobo, &s.ApprovalMode, &s.CompletedTrips, &s.QualifiedAt, &s.CreditedAt, &s.ApprovedBy, &s.PaidAt, &s.PaymentReference, &s.DeadlineAt, &s.PayoutMode, &s.PayoutStatus, &s.PayoutID); err != nil {
+		if err = rows.Scan(&s.ID, &s.ReferralID, &s.HeroID, &s.Hero, &s.Driver, &s.Position, &s.TripTarget, &s.RewardKobo, &s.ApprovalMode, &s.CompletedTrips, &s.QualifiedAt, &s.CreditedAt, &s.ApprovedBy, &s.PaidAt, &s.PaymentReference, &s.DeadlineAt, &s.PayoutMode, &s.PayoutStatus, &s.PayoutID, &s.Kind, &s.DriverID, &s.DriverPhone, &s.DriverNameSource); err != nil {
 			return nil, err
+		}
+		if view == "public" {
+			s.DriverID = ""
+			s.DriverPhone = ""
+			s.DriverNameSource = ""
 		}
 		items = append(items, s)
 	}
@@ -59,16 +78,21 @@ func ListStages(ctx context.Context, q stageQuerier, hero string, offset int) ([
 }
 
 func ProcessStages(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('referral-settings'))`); err != nil {
+		return err
+	}
 	// A separate stage row is the qualification/credit idempotency boundary.
 	_, err := tx.Exec(ctx, `UPDATE hero_referral_stages SET qualified_at=now() WHERE id IN(
  SELECT s.id FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id JOIN users u ON u.id=a.invitee_id JOIN driver_eligibility e ON e.driver_id=u.id
- WHERE s.qualified_at IS NULL AND u.active AND 'driver'=ANY(u.roles) AND e.eligible_to_drive
+ WHERE s.enabled AND s.qualified_at IS NULL AND u.active AND 'driver'=ANY(u.roles)
  AND NOT EXISTS(SELECT 1 FROM simulation_participants sp WHERE sp.actor_user_id=u.id)
- AND `+ProgressSQL+`>=s.trip_target ORDER BY a.linked_at,s.position LIMIT 200 FOR UPDATE OF s SKIP LOCKED)`)
+ AND ((s.position>0 AND e.eligible_to_drive AND `+ProgressSQL+`>=s.trip_target) OR (s.position=0 AND EXISTS(
+ SELECT 1 FROM driver_first_online o WHERE o.driver_id=a.invitee_id AND o.first_online_at>=a.linked_at
+ AND (a.deadline_at IS NULL OR o.first_online_at<=a.deadline_at)))) ORDER BY a.linked_at,s.position LIMIT 200 FOR UPDATE OF s SKIP LOCKED)`)
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT s.id::text FROM hero_referral_stages s WHERE s.qualified_at IS NOT NULL AND s.credited_at IS NULL AND s.approval_mode='automatic' ORDER BY s.referral_id,s.position LIMIT 200 FOR UPDATE SKIP LOCKED`)
+	rows, err := tx.Query(ctx, `SELECT s.id::text FROM hero_referral_stages s WHERE s.enabled AND s.qualified_at IS NOT NULL AND s.credited_at IS NULL AND s.approval_mode='automatic' ORDER BY s.referral_id,s.position LIMIT 200 FOR UPDATE SKIP LOCKED`)
 	if err != nil {
 		return err
 	}
@@ -114,7 +138,7 @@ func creditStage(ctx context.Context, tx pgx.Tx, id string, staff *string) error
 	var hero, mode string
 	var amount int64
 	var qualified, credited *time.Time
-	err := tx.QueryRow(ctx, `SELECT a.hero_id::text,s.reward_kobo,s.approval_mode,s.qualified_at,s.credited_at FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE s.id=$1::uuid FOR UPDATE OF s`, id).Scan(&hero, &amount, &mode, &qualified, &credited)
+	err := tx.QueryRow(ctx, `SELECT a.hero_id::text,hero_stage_amount(s.id),s.approval_mode,s.qualified_at,s.credited_at FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE s.id=$1::uuid AND s.enabled FOR UPDATE OF s`, id).Scan(&hero, &amount, &mode, &qualified, &credited)
 	if err != nil {
 		return err
 	}
@@ -164,7 +188,7 @@ func AllocateStagePayment(ctx context.Context, tx pgx.Tx, hero, payment string, 
 		var reward int64
 		var credited *time.Time
 		var paid bool
-		err := tx.QueryRow(ctx, `SELECT s.reward_kobo,s.credited_at,EXISTS(SELECT 1 FROM hero_stage_payment_allocations pa WHERE pa.stage_id=s.id AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=pa.payment_id)) FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE s.id=$1::uuid AND a.hero_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM hero_stage_payouts po WHERE po.stage_id=s.id AND po.id<>$3::uuid AND po.status NOT IN ('FAILED','EXPIRED','REVERSED','CANCELLED')) FOR UPDATE OF s`, id, hero, payment).Scan(&reward, &credited, &paid)
+		err := tx.QueryRow(ctx, `SELECT hero_stage_amount(s.id),s.credited_at,EXISTS(SELECT 1 FROM hero_stage_payment_allocations pa WHERE pa.stage_id=s.id AND NOT EXISTS(SELECT 1 FROM heroes_payment_reversals v WHERE v.payment_id=pa.payment_id)) FROM hero_referral_stages s JOIN referral_attributions a ON a.id=s.referral_id WHERE s.id=$1::uuid AND a.hero_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM hero_stage_payouts po WHERE po.stage_id=s.id AND po.id<>$3::uuid AND po.status NOT IN ('FAILED','EXPIRED','REVERSED','CANCELLED')) FOR UPDATE OF s`, id, hero, payment).Scan(&reward, &credited, &paid)
 		if err != nil {
 			return err
 		}

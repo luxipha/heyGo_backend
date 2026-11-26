@@ -97,6 +97,13 @@ func scheduleEvent(ctx context.Context, tx pgx.Tx, id, kind string, extra ...str
 	}
 	return nil
 }
+
+// recordScheduledOutcome keeps one row per booking, driver and outcome for the
+// driver standing page. Repeats (claim, release, claim, release) count once.
+func recordScheduledOutcome(ctx context.Context, tx pgx.Tx, booking, driver, outcome string) error {
+	_, e := tx.Exec(ctx, `INSERT INTO driver_scheduled_outcomes(booking_id,driver_id,outcome,pickup_at) SELECT id,$2::uuid,$3,pickup_at FROM scheduled_rides WHERE id=$1::uuid ON CONFLICT DO NOTHING`, booking, driver, outcome)
+	return e
+}
 func registerScheduledRoutes(group *gin.RouterGroup, pool *pgxpool.Pool) {
 	a := &scheduledAPI{pool: pool, router: geo.DatabaseRoutes{Pool: pool}}
 	r := group.Group("/rider/scheduled-rides", gatewayauth.RequireRole("rider"))
@@ -418,6 +425,9 @@ func (a *scheduledAPI) transition(c *gin.Context, action string) {
 		}
 	case "release":
 		_, e = tx.Exec(ctx, `UPDATE scheduled_rides SET status='open',driver_id=NULL,ready_at=NULL,reminder_sent_at=NULL,version=version+1,updated_at=NOW() WHERE id=$1::uuid`, id)
+		if e == nil {
+			e = recordScheduledOutcome(ctx, tx, id, u.ID, "released")
+		}
 	case "cancel":
 		if !cancelUntil.After(time.Now()) {
 			driverError(c, 409, "scheduled_cancellation_closed", "The booking cancellation deadline has passed. Contact support or open the dispatched trip.")
@@ -481,6 +491,9 @@ func (a *scheduledAPI) ready(c *gin.Context) {
 			return
 		}
 		e = pgx.ErrNoRows
+	}
+	if e == nil {
+		e = recordScheduledOutcome(ctx, tx, id, u.ID, "checked_in")
 	}
 	if e == nil {
 		e = scheduleEvent(ctx, tx, id, "scheduled.event.ready")

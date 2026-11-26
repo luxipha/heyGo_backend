@@ -193,6 +193,13 @@ func maintainScheduledRide(ctx context.Context, pool *pgxpool.Pool, id string) e
 		if driver != nil && !viable {
 			_, e = tx.Exec(ctx, `UPDATE scheduled_rides SET status='open',driver_id=NULL,ready_at=NULL,version=version+1,updated_at=NOW() WHERE id=$1::uuid`, id)
 			if e == nil {
+				outcome := "missed_check_in"
+				if ready != nil {
+					outcome = "not_available"
+				}
+				e = recordScheduledOutcome(ctx, tx, id, *driver, outcome)
+			}
+			if e == nil {
 				e = scheduleEvent(ctx, tx, id, "scheduled.event.replacement_required", *driver)
 			}
 			if e != nil {

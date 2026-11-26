@@ -71,7 +71,7 @@ jobs:
           docker exec "${{ job.services.postgres.id }}" createdb -U heygo heygo_heroes_test
           docker exec "${{ job.services.postgres.id }}" createdb -U heygo heygo_monnify_test
           docker exec "${{ job.services.postgres.id }}" createdb -U heygo heygo_referrals_test
-          go test -race -v ./services/api-gateway/handler -run 'TestHeroStages|TestHeroRank|TestAdminMonnify'
+          go test -race -v ./services/api-gateway/handler -run 'TestHeroStages|TestHeroRank|TestHeroesActivation|TestAdminMonnify'
           go test -race -v ./shared/referrals
 
       - name: Validate HeyGo automation

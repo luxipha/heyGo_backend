@@ -14,7 +14,12 @@ func (a *adminAPI) heroStages(c *gin.Context) {
 		driverError(c, 400, "invalid_offset", "Invalid page")
 		return
 	}
-	items, err := referrals.ListStages(c.Request.Context(), a.pool, c.Query("heroId"), offset)
+	view := c.DefaultQuery("view", "all")
+	if view != "all" && view != "current" {
+		driverError(c, 400, "invalid_view", "Invalid stage view")
+		return
+	}
+	items, err := referrals.ListStagePage(c.Request.Context(), a.pool, c.Query("heroId"), offset, view)
 	if err != nil {
 		referralError(c, err)
 		return
@@ -60,7 +65,7 @@ func (a *heroesAPI) stages(c *gin.Context) {
 		driverError(c, 400, "invalid_offset", "Invalid page")
 		return
 	}
-	items, err := referrals.ListStages(c.Request.Context(), a.pool, heroID(c), offset)
+	items, err := referrals.ListStagePage(c.Request.Context(), a.pool, heroID(c), offset, "public")
 	if err != nil {
 		referralError(c, err)
 		return

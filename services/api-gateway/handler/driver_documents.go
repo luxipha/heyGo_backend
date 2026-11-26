@@ -106,6 +106,64 @@ type documentSubmission struct {
 	Type      string     `json:"type"`
 	UploadIDs []string   `json:"uploadIds"`
 	ExpiresAt *time.Time `json:"expiresAt"`
+	// Details are what the driver read off the document (numbers, class …).
+	// They help reviewers check the photo and are never used for decisions.
+	Details map[string]string `json:"details"`
+}
+
+// documentDetailKeys lists, per document type, the details a driver may send.
+var documentDetailKeys = map[string][]string{
+	"driver_license":  {"licenseNumber", "licenseClass"},
+	"vehicle_license": {"plateNumber", "holderName"},
+	"roadworthiness":  {"certificateNumber", "plateNumber"},
+	"auto_insurance":  {"insurer", "coverType", "policyNumber"},
+	"hackney_permit":  {"permitNumber", "plateNumber"},
+}
+
+// adminDocumentKeys renames the driver app's detail keys to the ones Admin
+// reads from `metadata.fields`. Keys without an Admin name keep their own.
+var adminDocumentKeys = map[string]string{
+	"licenseNumber": "licenceNumber",
+	"licenseClass":  "licenceClass",
+	"plateNumber":   "registrationNumber",
+	"insurer":       "insuranceProvider",
+}
+
+func adminDocumentFields(details map[string]string) map[string]string {
+	out := make(map[string]string, len(details))
+	for key, value := range details {
+		if renamed, ok := adminDocumentKeys[key]; ok {
+			key = renamed
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// cleanDocumentDetails trims the submitted details and rejects unknown keys,
+// empty values, overlong values and control characters.
+func cleanDocumentDetails(kind string, details map[string]string) (map[string]string, bool) {
+	if len(details) == 0 {
+		return nil, true
+	}
+	allowed := map[string]bool{}
+	for _, key := range documentDetailKeys[kind] {
+		allowed[key] = true
+	}
+	cleaned := make(map[string]string, len(details))
+	for key, value := range details {
+		value = strings.TrimSpace(value)
+		if !allowed[key] || value == "" || len([]rune(value)) > 120 {
+			return nil, false
+		}
+		for _, r := range value {
+			if r < 32 || r == 127 {
+				return nil, false
+			}
+		}
+		cleaned[key] = value
+	}
+	return cleaned, true
 }
 
 type uploadRecord struct {
@@ -122,6 +180,11 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 	var body documentSubmission
 	if ctx.ShouldBindJSON(&body) != nil || !validOperationalDocument(body.Type) || len(body.UploadIDs) == 0 || len(body.UploadIDs) > 2 || (body.ExpiresAt != nil && !body.ExpiresAt.After(time.Now())) {
 		driverError(ctx, http.StatusBadRequest, "invalid_document", "Document submission is invalid")
+		return
+	}
+	details, detailsOK := cleanDocumentDetails(body.Type, body.Details)
+	if !detailsOK {
+		driverError(ctx, http.StatusBadRequest, "invalid_document_details", "Document details are invalid")
 		return
 	}
 	if (body.Type == "driver_license" && len(body.UploadIDs) != 2) || (body.Type != "driver_license" && len(body.UploadIDs) != 1) {
@@ -190,7 +253,13 @@ func (a *driverAPI) submitDocument(ctx *gin.Context) {
 	for _, item := range uploads {
 		files = append(files, gin.H{"side": item.side, "storageKey": item.key, "contentType": item.contentType, "sizeBytes": item.size})
 	}
-	metadata, err := json.Marshal(gin.H{"files": files})
+	stored := gin.H{"files": files}
+	if len(details) > 0 {
+		// Same place and key names Admin's own entry form uses, so reviewers see
+		// driver-sent and staff-entered values in one list.
+		stored["fields"] = adminDocumentFields(details)
+	}
+	metadata, err := json.Marshal(stored)
 	if err != nil {
 		driverError(ctx, http.StatusInternalServerError, "document_encoding_failed", "Document could not be submitted")
 		return

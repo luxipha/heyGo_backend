@@ -90,6 +90,8 @@ func adminRoutePermission(method, path string) string {
 		return permissionSettings
 	case strings.HasPrefix(path, "/admin/gocoin/"):
 		return permissionSettings
+	case strings.HasPrefix(path, "/admin/driver-requirements"):
+		return permissionSettings
 	case strings.HasPrefix(path, "/admin/referrals/"):
 		if strings.HasSuffix(path, "/settings") {
 			return permissionSettings

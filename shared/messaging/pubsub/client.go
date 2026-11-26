@@ -169,8 +169,17 @@ type Consumer struct {
 	client *Client
 }
 
+// timingCritical lists the topics whose publish and consume latency is logged.
+// These are the commands a Driver or Rider is actively waiting on, so a slow
+// hop between publish and handler shows up in the logs as broker_age_ms.
 func timingCritical(topic string) bool {
-	return topic == contracts.DriverCmdTripRequest || topic == contracts.DriverCmdTripAccept
+	switch topic {
+	case contracts.DriverCmdTripRequest, contracts.DriverCmdTripAccept,
+		contracts.TripCmdArrive, contracts.TripCmdStart, contracts.TripCmdComplete,
+		contracts.TripCmdCancel, contracts.TripCmdRate:
+		return true
+	}
+	return false
 }
 
 func (c *Consumer) SubscribeAndConsume(ctx context.Context, topics []string, handler MessageHandler) error {

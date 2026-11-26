@@ -108,13 +108,14 @@ func TestVerificationFaceMatchReuploadAndQueue(t *testing.T) {
 	request(http.MethodPost, "/reupload", driver, licence, map[string]string{"reason": "Again"}, api.requestDocumentReupload, 409)
 
 	// Queue: oldest first by application time, with progress counts and appliedAt.
+	// Default requirements: identity, licence, vehicle licence and insurance.
 	list := request(http.MethodGet, "/admin/drivers?status=all&sort=oldest&progress=1&limit=100", "", "", nil, api.listPartners, 200)
 	order := []string{}
 	for _, raw := range list["data"].([]any) {
 		item := raw.(map[string]any)
 		if id := item["driverId"].(string); id == earlier || id == driver {
 			order = append(order, id)
-			if item["appliedAt"] == nil || item["requirementsRequired"] != float64(7) {
+			if item["appliedAt"] == nil || item["requirementsRequired"] != float64(4) {
 				t.Fatalf("queue item missing appliedAt or progress: %v", item)
 			}
 		}

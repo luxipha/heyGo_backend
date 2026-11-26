@@ -25,6 +25,11 @@ import (
 
 var vehiclePhotoAngles = []string{"front", "rear", "left", "right", "front_interior", "rear_interior", "vin", "walkaround"}
 
+// requiredVehiclePhotoAngles are the pictures a driver must send. The
+// walkaround video is still accepted (the inspection platform may upload one)
+// but is no longer required.
+var requiredVehiclePhotoAngles = []string{"front", "rear", "left", "right", "front_interior", "rear_interior", "vin"}
+
 const maxVehiclePhotoBytes int64 = 10 * 1024 * 1024
 
 func validateInspectionEvidence(ctx *gin.Context, tx pgx.Tx, driver, inspection string) error {
@@ -48,9 +53,14 @@ func validateInspectionEvidence(ctx *gin.Context, tx pgx.Tx, driver, inspection 
 			return fmt.Errorf("all safety checks must pass; %s is incomplete or failed", check)
 		}
 	}
+	if version >= 2 {
+		// Report-only evidence: the inspection report staff uploaded covers the car,
+		// so no driver photos or walkaround video are required.
+		return nil
+	}
 	var count int
-	if err := tx.QueryRow(ctx.Request.Context(), `SELECT COUNT(DISTINCT angle) FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL`, driver, revision).Scan(&count); err != nil || count != len(vehiclePhotoAngles) {
-		return fmt.Errorf("seven photos and a 1–2 minute walkaround video are required for this inspected vehicle revision")
+	if err := tx.QueryRow(ctx.Request.Context(), `SELECT COUNT(DISTINCT angle) FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL AND angle=ANY($3)`, driver, revision, requiredVehiclePhotoAngles).Scan(&count); err != nil || count != len(requiredVehiclePhotoAngles) {
+		return fmt.Errorf("seven photos are required for this inspected vehicle revision")
 	}
 	return nil
 }
@@ -233,16 +243,17 @@ func (a *adminAPI) submitVehiclePhoto(ctx *gin.Context) {
 	committed = true
 	ctx.JSON(200, contracts.APIResponse{Data: gin.H{"id": id, "angle": angle, "vehicleRevision": revision}})
 }
+
 // markVehicleEvidenceComplete opens driver-facing review once all required
-// angles and the walkaround video are present for this revision. The
+// angles are present for this revision. The
 // submitVehiclePhoto "frozen" check guards against a duplicate row: once
 // this exists, further uploads for the revision are rejected upstream.
 func markVehicleEvidenceComplete(ctx *gin.Context, tx pgx.Tx, driver string, revision int64) error {
 	var count int
-	if err := tx.QueryRow(ctx.Request.Context(), `SELECT COUNT(DISTINCT angle) FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL`, driver, revision).Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx.Request.Context(), `SELECT COUNT(DISTINCT angle) FROM driver_vehicle_photos WHERE driver_id=$1::uuid AND vehicle_revision=$2 AND superseded_at IS NULL AND angle=ANY($3)`, driver, revision, requiredVehiclePhotoAngles).Scan(&count); err != nil {
 		return err
 	}
-	if count != len(vehiclePhotoAngles) {
+	if count != len(requiredVehiclePhotoAngles) {
 		return nil
 	}
 	id := uuid.New()

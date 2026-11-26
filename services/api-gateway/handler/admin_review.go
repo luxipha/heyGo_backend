@@ -582,15 +582,15 @@ func (a *adminAPI) createReportUpload(ctx *gin.Context) {
 }
 func (a *adminAPI) submitReport(ctx *gin.Context) {
 	ctx.Set("vehicleEvidence", true)
-	if a.files == nil {
-		driverError(ctx, http.StatusServiceUnavailable, "document_storage_unavailable", "Document storage is unavailable")
-		return
-	}
 	driver, ok := reviewDriverID(ctx)
 	if !ok {
 		return
 	}
 	var body struct {
+		// Override records the inspection without a report file, for a reviewer
+		// who already has enough evidence. It is checked against the same roles
+		// as the review override, and the later review must also pass override.
+		Override         bool       `json:"override"`
 		UploadID         string     `json:"uploadId"`
 		PartnerName      string     `json:"partnerName"`
 		LocationName     string     `json:"locationName"`
@@ -601,31 +601,44 @@ func (a *adminAPI) submitReport(ctx *gin.Context) {
 		driverError(ctx, http.StatusBadRequest, "invalid_inspection_report", "Partner and inspection location are required")
 		return
 	}
-	uploadID, err := uuid.Parse(body.UploadID)
-	if err != nil {
-		driverError(ctx, http.StatusBadRequest, "invalid_upload_id", "Upload ID is invalid")
+	withoutReport := body.Override && strings.TrimSpace(body.UploadID) == ""
+	if withoutReport && !canOverrideInspection(currentAdmin(ctx)) {
+		driverError(ctx, http.StatusForbidden, "override_forbidden", "Only a compliance reviewer or super admin can override the inspection rule")
 		return
 	}
+	if !withoutReport && a.files == nil {
+		driverError(ctx, http.StatusServiceUnavailable, "document_storage_unavailable", "Document storage is unavailable")
+		return
+	}
+	var uploadID uuid.UUID
+	var err error
 	var key, contentType string
 	var size int64
 	var expiry time.Time
-	err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT storage_key,content_type,size_bytes,expires_at FROM admin_report_uploads WHERE id=$1 AND admin_id=$2::UUID AND driver_id=$3::UUID AND consumed_at IS NULL`, uploadID, currentAdmin(ctx).ID, driver).Scan(&key, &contentType, &size, &expiry)
-	if errors.Is(err, pgx.ErrNoRows) {
-		driverError(ctx, http.StatusBadRequest, "invalid_upload", "Report upload is missing or expired")
-		return
-	}
-	if err != nil {
-		reviewFailure(ctx)
-		return
-	}
-	if !expiry.After(time.Now()) {
-		driverError(ctx, http.StatusBadRequest, "invalid_upload", "Report upload is missing or expired")
-		return
-	}
-	info, err := a.files.Head(ctx.Request.Context(), key)
-	if err != nil || info.Size != size || !strings.EqualFold(info.ContentType, contentType) {
-		driverError(ctx, http.StatusBadRequest, "upload_incomplete", "Report file does not match its reservation")
-		return
+	if !withoutReport {
+		uploadID, err = uuid.Parse(body.UploadID)
+		if err != nil {
+			driverError(ctx, http.StatusBadRequest, "invalid_upload_id", "Upload ID is invalid")
+			return
+		}
+		err = a.vehicleDB(ctx).QueryRow(ctx.Request.Context(), `SELECT storage_key,content_type,size_bytes,expires_at FROM admin_report_uploads WHERE id=$1 AND admin_id=$2::UUID AND driver_id=$3::UUID AND consumed_at IS NULL`, uploadID, currentAdmin(ctx).ID, driver).Scan(&key, &contentType, &size, &expiry)
+		if errors.Is(err, pgx.ErrNoRows) {
+			driverError(ctx, http.StatusBadRequest, "invalid_upload", "Report upload is missing or expired")
+			return
+		}
+		if err != nil {
+			reviewFailure(ctx)
+			return
+		}
+		if !expiry.After(time.Now()) {
+			driverError(ctx, http.StatusBadRequest, "invalid_upload", "Report upload is missing or expired")
+			return
+		}
+		info, err := a.files.Head(ctx.Request.Context(), key)
+		if err != nil || info.Size != size || !strings.EqualFold(info.ContentType, contentType) {
+			driverError(ctx, http.StatusBadRequest, "upload_incomplete", "Report file does not match its reservation")
+			return
+		}
 	}
 	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
@@ -638,13 +651,19 @@ func (a *adminAPI) submitReport(ctx *gin.Context) {
 		driverError(ctx, 409, "vehicle_required", "Save inspected vehicle details before submitting a report")
 		return
 	}
-	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE admin_report_uploads SET consumed_at=NOW() WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW()`, uploadID)
-	if err != nil || tag.RowsAffected() != 1 {
-		driverError(ctx, http.StatusConflict, "upload_already_used", "Report upload is unavailable")
-		return
+	if !withoutReport {
+		tag, err := tx.Exec(ctx.Request.Context(), `UPDATE admin_report_uploads SET consumed_at=NOW() WHERE id=$1 AND consumed_at IS NULL AND expires_at>NOW()`, uploadID)
+		if err != nil || tag.RowsAffected() != 1 {
+			driverError(ctx, http.StatusConflict, "upload_already_used", "Report upload is unavailable")
+			return
+		}
+	}
+	var storageKey any = key
+	if withoutReport {
+		storageKey = nil
 	}
 	id := uuid.New()
-	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_inspections(id,driver_id,partner_name,location_name,partner_reference,report_storage_key,report_received_at,status,inspected_at,vehicle_revision,vehicle_snapshot,evidence_version) VALUES($1,$2::UUID,$3,$4,$5,$6,NOW(),'report_received',$7,COALESCE((SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$2::UUID),0),(SELECT to_jsonb(v) FROM driver_vehicles v WHERE driver_id=$2::UUID),1)`, id, driver, strings.TrimSpace(body.PartnerName), strings.TrimSpace(body.LocationName), strings.TrimSpace(body.PartnerReference), key, body.InspectedAt)
+	_, err = tx.Exec(ctx.Request.Context(), `INSERT INTO driver_inspections(id,driver_id,partner_name,location_name,partner_reference,report_storage_key,report_received_at,status,inspected_at,vehicle_revision,vehicle_snapshot,evidence_version) VALUES($1,$2::UUID,$3,$4,$5,$6,NOW(),'report_received',$7,COALESCE((SELECT inspection_revision FROM driver_vehicles WHERE driver_id=$2::UUID),0),(SELECT to_jsonb(v) FROM driver_vehicles v WHERE driver_id=$2::UUID),2)`, id, driver, strings.TrimSpace(body.PartnerName), strings.TrimSpace(body.LocationName), strings.TrimSpace(body.PartnerReference), storageKey, body.InspectedAt)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -653,7 +672,7 @@ func (a *adminAPI) submitReport(ctx *gin.Context) {
 		reviewFailure(ctx)
 		return
 	}
-	if err = adminAudit(ctx, tx, "inspection.report_received", driver, gin.H{"inspectionId": id, "partnerName": body.PartnerName, "locationName": body.LocationName}); err != nil {
+	if err = adminAudit(ctx, tx, "inspection.report_received", driver, gin.H{"inspectionId": id, "partnerName": body.PartnerName, "locationName": body.LocationName, "withoutReport": withoutReport}); err != nil {
 		reviewFailure(ctx)
 		return
 	}
@@ -698,6 +717,13 @@ func (a *adminAPI) inspectionReport(ctx *gin.Context) {
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"url": url, "expiresInSeconds": 300}})
 }
+
+// canOverrideInspection limits the "pass without a report" override to the
+// roles that already decide driver onboarding.
+func canOverrideInspection(admin adminIdentity) bool {
+	return hasStaffRole(admin.effectiveRoles(), "super_admin") || hasStaffRole(admin.effectiveRoles(), "compliance")
+}
+
 func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 	ctx.Set("vehicleEvidence", true)
 	driver, ok := reviewDriverID(ctx)
@@ -711,10 +737,24 @@ func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 	var body struct {
 		Status string `json:"status"`
 		Reason string `json:"reason"`
+		// Override passes the inspection without an attached report, for a
+		// reviewer who already has enough evidence (e.g. vehicle licence and
+		// the driver's pictures).
+		Override bool `json:"override"`
 	}
 	if ctx.ShouldBindJSON(&body) != nil || (body.Status != "completed" && body.Status != "failed") || (body.Status == "failed" && strings.TrimSpace(body.Reason) == "") || len(body.Reason) > 1000 {
 		driverError(ctx, http.StatusBadRequest, "invalid_review", "Valid outcome and failure reason are required")
 		return
+	}
+	if body.Override {
+		if body.Status != "completed" || strings.TrimSpace(body.Reason) == "" {
+			driverError(ctx, http.StatusBadRequest, "invalid_override", "An override must pass the inspection and give a reason")
+			return
+		}
+		if !canOverrideInspection(currentAdmin(ctx)) {
+			driverError(ctx, http.StatusForbidden, "override_forbidden", "Only a compliance reviewer or super admin can override the inspection rule")
+			return
+		}
 	}
 	tx, err := a.vehicleDB(ctx).Begin(ctx.Request.Context())
 	if err != nil {
@@ -728,11 +768,13 @@ func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 		return
 	}
 
-	if body.Status == "completed" {
+	if body.Status == "completed" && !body.Override {
 		if err := validateInspectionEvidence(ctx, tx, driver, inspection); err != nil {
 			driverError(ctx, 409, "inspection_evidence_incomplete", err.Error())
 			return
 		}
+	}
+	if body.Status == "completed" {
 		var valid bool
 		err = tx.QueryRow(ctx.Request.Context(), `SELECT EXISTS(SELECT 1 FROM driver_inspections i JOIN driver_vehicles v ON v.driver_id=i.driver_id WHERE i.id=$1::UUID AND i.driver_id=$2::UUID AND i.vehicle_revision=v.inspection_revision AND (v.catalogue_model_id IS NULL OR EXISTS(SELECT 1 FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug))))`, inspection, driver).Scan(&valid)
 		if err != nil {
@@ -744,7 +786,7 @@ func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 			return
 		}
 	}
-	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_inspections SET status=$1,outcome_reason=$2,reviewed_by=$3::UUID,updated_at=NOW() WHERE id=$4::UUID AND driver_id=$5::UUID AND status='report_received' AND report_storage_key IS NOT NULL AND id=(SELECT id FROM driver_inspections WHERE driver_id=$5::UUID ORDER BY created_at DESC,id DESC LIMIT 1)`, body.Status, body.Reason, currentAdmin(ctx).ID, inspection, driver)
+	tag, err := tx.Exec(ctx.Request.Context(), `UPDATE driver_inspections SET status=$1,outcome_reason=$2,reviewed_by=$3::UUID,updated_at=NOW() WHERE id=$4::UUID AND driver_id=$5::UUID AND status='report_received' AND (report_storage_key IS NOT NULL OR $6) AND id=(SELECT id FROM driver_inspections WHERE driver_id=$5::UUID ORDER BY created_at DESC,id DESC LIMIT 1)`, body.Status, body.Reason, currentAdmin(ctx).ID, inspection, driver, body.Override)
 	if err != nil {
 		reviewFailure(ctx)
 		return
@@ -759,7 +801,7 @@ func (a *adminAPI) reviewInspection(ctx *gin.Context) {
 			return
 		}
 	}
-	if err = adminAudit(ctx, tx, "inspection.review", driver, gin.H{"inspectionId": inspection, "status": body.Status, "reason": body.Reason}); err != nil {
+	if err = adminAudit(ctx, tx, "inspection.review", driver, gin.H{"inspectionId": inspection, "status": body.Status, "reason": body.Reason, "override": body.Override}); err != nil {
 		reviewFailure(ctx)
 		return
 	}
@@ -807,16 +849,16 @@ func (a *adminAPI) reviewDriver(ctx *gin.Context) {
 	if body.Status == "approved" {
 		var ready bool
 		err = tx.QueryRow(ctx.Request.Context(), `SELECT (u.phone_verified_at IS NOT NULL OR u.email_verified) AND p.manual_verification_status='approved' AND NOT EXISTS(SELECT 1 FROM driver_vehicles v WHERE v.driver_id=u.id AND v.catalogue_model_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ride_categories c WHERE driver_category_eligible(v.driver_id,c.slug)))
-	   AND COALESCE((SELECT status='completed' AND vehicle_revision=COALESCE((SELECT inspection_revision FROM driver_vehicles WHERE driver_id=u.id),0) FROM driver_inspections WHERE driver_id=u.id ORDER BY created_at DESC,id DESC LIMIT 1),FALSE)
+	   AND (NOT requirement_enforced(u.id,'vehicle_inspection') OR COALESCE((SELECT status='completed' AND vehicle_revision=COALESCE((SELECT inspection_revision FROM driver_vehicles WHERE driver_id=u.id),0) FROM driver_inspections WHERE driver_id=u.id ORDER BY created_at DESC,id DESC LIMIT 1),FALSE))
    AND NOT EXISTS(SELECT 1 FROM (VALUES('driver_license'),('vehicle_license'),('roadworthiness'),('auto_insurance'),('hackney_permit')) required(type)
-    WHERE NOT COALESCE((SELECT status='approved' AND (expires_at IS NULL OR expires_at>NOW()) FROM driver_documents d WHERE d.driver_id=u.id AND d.type=required.type ORDER BY submitted_at DESC,id DESC LIMIT 1),FALSE))
+    WHERE (required.type='driver_license' OR requirement_enforced(u.id,required.type)) AND NOT COALESCE((SELECT status='approved' AND (expires_at IS NULL OR expires_at>NOW()) FROM driver_documents d WHERE d.driver_id=u.id AND d.type=required.type ORDER BY submitted_at DESC,id DESC LIMIT 1),FALSE))
 	   FROM users u JOIN driver_profiles p ON p.driver_id=u.id WHERE u.id=$1::UUID AND 'driver'=ANY(u.roles)`, driver).Scan(&ready)
 		if err != nil {
 			reviewFailure(ctx)
 			return
 		}
 		if !ready {
-			driverError(ctx, http.StatusConflict, "requirements_incomplete", "All seven requirements must be complete before approval")
+			driverError(ctx, http.StatusConflict, "requirements_incomplete", "All required items must be complete before approval")
 			return
 		}
 	}

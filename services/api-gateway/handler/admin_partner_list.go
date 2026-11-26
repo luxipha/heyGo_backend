@@ -222,7 +222,7 @@ func (a *adminAPI) listPartners(ctx *gin.Context) {
 		next = &value
 	}
 	if withProgress {
-		// The same seven requirements the review page shows, per listed driver.
+		// The same requirements the review page shows, per listed driver.
 		for _, item := range items {
 			state, err := driverstate.Read(ctx.Request.Context(), a.pool, item["driverId"].(string))
 			if err != nil {

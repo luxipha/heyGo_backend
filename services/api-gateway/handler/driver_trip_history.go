@@ -76,27 +76,29 @@ func parseDriverTripHistoryTime(value string) (*time.Time, error) {
 }
 
 type driverTripHistoryItem struct {
-	ID                 string          `json:"id"`
-	Status             string          `json:"status"`
-	PackageSlug        string          `json:"packageSlug"`
-	Route              json.RawMessage `json:"route"`
-	Currency           string          `json:"currency"`
-	FareKobo           int64           `json:"fareKobo"`
-	NoShowDebtKobo     int64           `json:"noShowDebtKobo"`
-	AmountDueKobo      int64           `json:"amountDueKobo"`
-	CreatedAt          time.Time       `json:"createdAt"`
-	OccurredAt         time.Time       `json:"occurredAt"`
-	StartedAt          *time.Time      `json:"startedAt,omitempty"`
-	CompletedAt        *time.Time      `json:"completedAt,omitempty"`
-	CancelledAt        *time.Time      `json:"cancelledAt,omitempty"`
-	CancellationReason *string         `json:"cancellationReason,omitempty"`
-	CancelledBy        *string         `json:"cancelledBy,omitempty"`
-	SettlementStatus   *string         `json:"settlementStatus,omitempty"`
-	NoShowClaimStatus  *string         `json:"noShowClaimStatus,omitempty"`
-	NoShowFeeKobo      *int64          `json:"noShowFeeKobo,omitempty"`
-	Rating             *int            `json:"rating,omitempty"`
-	FeedbackTags       []string        `json:"feedbackTags"`
-	ReceiptReference   *string         `json:"receiptReference,omitempty"`
+	ID                 string           `json:"id"`
+	Status             string           `json:"status"`
+	PackageSlug        string           `json:"packageSlug"`
+	Route              json.RawMessage  `json:"route"`
+	Pickup             *driverTripPlace `json:"pickup"`
+	Destination        *driverTripPlace `json:"destination"`
+	Currency           string           `json:"currency"`
+	FareKobo           int64            `json:"fareKobo"`
+	NoShowDebtKobo     int64            `json:"noShowDebtKobo"`
+	AmountDueKobo      int64            `json:"amountDueKobo"`
+	CreatedAt          time.Time        `json:"createdAt"`
+	OccurredAt         time.Time        `json:"occurredAt"`
+	StartedAt          *time.Time       `json:"startedAt,omitempty"`
+	CompletedAt        *time.Time       `json:"completedAt,omitempty"`
+	CancelledAt        *time.Time       `json:"cancelledAt,omitempty"`
+	CancellationReason *string          `json:"cancellationReason,omitempty"`
+	CancelledBy        *string          `json:"cancelledBy,omitempty"`
+	SettlementStatus   *string          `json:"settlementStatus,omitempty"`
+	NoShowClaimStatus  *string          `json:"noShowClaimStatus,omitempty"`
+	NoShowFeeKobo      *int64           `json:"noShowFeeKobo,omitempty"`
+	Rating             *int             `json:"rating,omitempty"`
+	FeedbackTags       []string         `json:"feedbackTags"`
+	ReceiptReference   *string          `json:"receiptReference,omitempty"`
 }
 
 func readDriverTripHistory(ctx *gin.Context, pool *pgxpool.Pool, driver string, limit int, cursor *driverTripHistoryCursor, from, to *time.Time, status string) ([]driverTripHistoryItem, error) {
@@ -105,7 +107,7 @@ func readDriverTripHistory(ctx *gin.Context, pool *pgxpool.Pool, driver string, 
 	if cursor != nil {
 		cursorTime, cursorID = cursor.OccurredAt, cursor.ID
 	}
-	rows, err := pool.Query(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,f.package_slug,f.route,
+	rows, err := pool.Query(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,f.package_slug,f.route,f.pickup_metadata,f.destination_metadata,
 		ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,
 		t.created_at,COALESCE(t.completed_at,t.cancelled_at,t.updated_at,t.created_at),t.started_at,t.completed_at,t.cancelled_at,
 		t.cancellation_reason,CASE WHEN t.cancellation_actor_id=t.assigned_driver_id THEN 'driver' WHEN t.cancellation_actor_id=t.rider_id THEN 'rider' ELSE NULL END,
@@ -131,9 +133,12 @@ func readDriverTripHistory(ctx *gin.Context, pool *pgxpool.Pool, driver string, 
 	for rows.Next() {
 		var item driverTripHistoryItem
 		var fare, debt int64
-		if err := rows.Scan(&item.ID, &item.Status, &item.PackageSlug, &item.Route, &fare, &debt, &item.AmountDueKobo, &item.CreatedAt, &item.OccurredAt, &item.StartedAt, &item.CompletedAt, &item.CancelledAt, &item.CancellationReason, &item.CancelledBy, &item.SettlementStatus, &item.NoShowClaimStatus, &item.NoShowFeeKobo, &item.Rating, &item.FeedbackTags, &item.ReceiptReference); err != nil {
+		var pickupMeta, destinationMeta []byte
+		if err := rows.Scan(&item.ID, &item.Status, &item.PackageSlug, &item.Route, &pickupMeta, &destinationMeta, &fare, &debt, &item.AmountDueKobo, &item.CreatedAt, &item.OccurredAt, &item.StartedAt, &item.CompletedAt, &item.CancelledAt, &item.CancellationReason, &item.CancelledBy, &item.SettlementStatus, &item.NoShowClaimStatus, &item.NoShowFeeKobo, &item.Rating, &item.FeedbackTags, &item.ReceiptReference); err != nil {
 			return nil, err
 		}
+		item.Pickup = driverTripPlaceFromMetadata(pickupMeta)
+		item.Destination = driverTripPlaceFromMetadata(destinationMeta)
 		item.Currency = "NGN"
 		item.FareKobo = fare
 		item.NoShowDebtKobo = debt
@@ -207,19 +212,22 @@ func (a *driverAPI) tripHistory(ctx *gin.Context) {
 }
 
 type driverTripReceipt struct {
-	ReceiptReference   string          `json:"receiptReference"`
-	TripID             string          `json:"tripId"`
-	Status             string          `json:"status"`
-	Currency           string          `json:"currency"`
-	FareKobo           int64           `json:"fareKobo"`
-	NoShowDebtKobo     int64           `json:"noShowDebtKobo"`
-	AmountDueKobo      int64           `json:"amountDueKobo"`
-	PaymentStatus      string          `json:"paymentStatus"`
-	ConfirmationSource string          `json:"confirmationSource"`
-	Route              json.RawMessage `json:"route"`
-	CreatedAt          time.Time       `json:"createdAt"`
-	CompletedAt        time.Time       `json:"completedAt"`
-	ConfirmedAt        *time.Time      `json:"confirmedAt,omitempty"`
+	ReceiptReference   string                  `json:"receiptReference"`
+	TripID             string                  `json:"tripId"`
+	Status             string                  `json:"status"`
+	Currency           string                  `json:"currency"`
+	FareKobo           int64                   `json:"fareKobo"`
+	NoShowDebtKobo     int64                   `json:"noShowDebtKobo"`
+	AmountDueKobo      int64                   `json:"amountDueKobo"`
+	PaymentStatus      string                  `json:"paymentStatus"`
+	ConfirmationSource string                  `json:"confirmationSource"`
+	Route              json.RawMessage         `json:"route"`
+	Pickup             *driverTripPlace        `json:"pickup"`
+	Destination        *driverTripPlace        `json:"destination"`
+	StatutoryCharges   []driverStatutoryCharge `json:"statutoryCharges"`
+	CreatedAt          time.Time               `json:"createdAt"`
+	CompletedAt        time.Time               `json:"completedAt"`
+	ConfirmedAt        *time.Time              `json:"confirmedAt,omitempty"`
 }
 
 func readDriverTripReceipt(ctx *gin.Context, pool *pgxpool.Pool, driver, tripID string) (driverTripReceipt, error) {
@@ -227,11 +235,12 @@ func readDriverTripReceipt(ctx *gin.Context, pool *pgxpool.Pool, driver, tripID 
 	var paymentStatus string
 	var resolvedAt *time.Time
 	var completedAt *time.Time
+	var pickupMeta, destinationMeta []byte
 	err := pool.QueryRow(ctx.Request.Context(), `SELECT t.id::TEXT,t.status,ROUND(f.total_fare_minor)::BIGINT,t.no_show_debt_kobo,
-		ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,COALESCE(s.status,'not_recorded'),s.resolved_at,f.route,t.created_at,t.completed_at
+		ROUND(f.total_fare_minor)::BIGINT+t.no_show_debt_kobo,COALESCE(s.status,'not_recorded'),s.resolved_at,f.route,f.pickup_metadata,f.destination_metadata,t.created_at,t.completed_at
 		FROM trips t JOIN ride_fares f ON f.id=t.ride_fare_id LEFT JOIN trip_settlements s ON s.trip_id=t.id
 		WHERE t.id=$1::UUID AND t.assigned_driver_id=$2::UUID`, tripID, driver).
-		Scan(&receipt.TripID, &receipt.Status, &receipt.FareKobo, &receipt.NoShowDebtKobo, &receipt.AmountDueKobo, &paymentStatus, &resolvedAt, &receipt.Route, &receipt.CreatedAt, &completedAt)
+		Scan(&receipt.TripID, &receipt.Status, &receipt.FareKobo, &receipt.NoShowDebtKobo, &receipt.AmountDueKobo, &paymentStatus, &resolvedAt, &receipt.Route, &pickupMeta, &destinationMeta, &receipt.CreatedAt, &completedAt)
 	if err != nil {
 		return driverTripReceipt{}, err
 	}
@@ -241,6 +250,13 @@ func readDriverTripReceipt(ctx *gin.Context, pool *pgxpool.Pool, driver, tripID 
 	if completedAt == nil {
 		return driverTripReceipt{}, errors.New("receipt is not available until the trip is completed")
 	}
+	receipt.Pickup = driverTripPlaceFromMetadata(pickupMeta)
+	receipt.Destination = driverTripPlaceFromMetadata(destinationMeta)
+	charges, err := readDriverStatutoryCharges(ctx.Request.Context(), pool, driver, tripID)
+	if err != nil {
+		return driverTripReceipt{}, err
+	}
+	receipt.StatutoryCharges = charges
 	receipt.ReceiptReference = "trip:" + receipt.TripID
 	receipt.Currency = "NGN"
 	receipt.PaymentStatus = paymentStatus

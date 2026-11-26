@@ -63,6 +63,9 @@ func adminAuditTarget(action, driverID string, details any) (string, string) {
 			return "support_topic", code
 		}
 	}
+	if strings.HasPrefix(action, "driver.requirement.") {
+		return "settings", "driver-requirements"
+	}
 	if strings.HasPrefix(action, "sms.settings") {
 		return "settings", "sms"
 	}

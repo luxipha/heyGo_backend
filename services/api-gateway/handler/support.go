@@ -517,6 +517,7 @@ func (a *supportAPI) listCases(ctx *gin.Context, owner string, staff bool) {
 	rows, err := a.pool.Query(ctx.Request.Context(), `SELECT c.id::TEXT,c.case_number,c.topic_code,t.label,c.trip_id::TEXT,c.subject,c.status,c.priority,
 		c.created_at,c.updated_at,c.last_message_at,c.assigned_admin_id::TEXT,
 		c.opened_by::TEXT,u.human_id,
+		COALESCE((SELECT m.body FROM support_case_messages m WHERE m.case_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1),''),
 		COALESCE((SELECT COUNT(*) FROM support_case_messages m LEFT JOIN support_case_reads r ON r.case_id=c.id AND r.reader_kind=$2 AND r.reader_id=$3::UUID
 			WHERE m.case_id=c.id AND m.sender_kind<>$2 AND m.created_at>COALESCE(r.read_at,'epoch'::TIMESTAMPTZ)),0)::INT
 		FROM support_cases c JOIN support_topics t ON t.code=c.topic_code JOIN users u ON u.id=c.opened_by
@@ -539,11 +540,12 @@ func (a *supportAPI) listCases(ctx *gin.Context, owner string, staff bool) {
 		var number int64
 		var created, updated, last time.Time
 		var unread int
-		if err := rows.Scan(&id, &number, &topic, &label, &trip, &subject, &state, &priority, &created, &updated, &last, &assigned, &requester, &humanID, &unread); err != nil {
+		var preview string
+		if err := rows.Scan(&id, &number, &topic, &label, &trip, &subject, &state, &priority, &created, &updated, &last, &assigned, &requester, &humanID, &preview, &unread); err != nil {
 			driverError(ctx, http.StatusServiceUnavailable, "support_unavailable", "Support cases are unavailable")
 			return
 		}
-		item := gin.H{"id": id, "reference": fmt.Sprintf("HG-%08d", number), "topicCode": topic, "topicLabel": label, "tripId": trip, "subject": subject, "status": state, "priority": priority, "assignedAdminId": assigned, "createdAt": created, "updatedAt": updated, "lastMessageAt": last, "unreadCount": unread}
+		item := gin.H{"id": id, "reference": fmt.Sprintf("HG-%08d", number), "topicCode": topic, "topicLabel": label, "tripId": trip, "subject": subject, "status": state, "priority": priority, "assignedAdminId": assigned, "createdAt": created, "updatedAt": updated, "lastMessageAt": last, "lastMessagePreview": supportPreview(preview), "unreadCount": unread}
 		if staff {
 			item["requesterId"] = requester
 			item["requesterHumanId"] = humanID
@@ -854,8 +856,8 @@ func (a *supportAPI) appendMessage(ctx *gin.Context, caseID, senderID, kind stri
 		return err
 	}
 	defer tx.Rollback(ctx.Request.Context())
-	var owner, caseStatus string
-	err = tx.QueryRow(ctx.Request.Context(), `SELECT opened_by::TEXT,status FROM support_cases WHERE id=$1::UUID FOR UPDATE`, caseID).Scan(&owner, &caseStatus)
+	var owner, caseStatus, caseAudience string
+	err = tx.QueryRow(ctx.Request.Context(), `SELECT opened_by::TEXT,status,audience FROM support_cases WHERE id=$1::UUID FOR UPDATE`, caseID).Scan(&owner, &caseStatus, &caseAudience)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("support case not found")
 	}
@@ -909,7 +911,7 @@ func (a *supportAPI) appendMessage(ctx *gin.Context, caseID, senderID, kind stri
 				return err
 			}
 		}
-		payload, _ := json.Marshal(gin.H{"caseId": caseID, "messageId": returnedID, "senderKind": kind, "body": strings.TrimSpace(body.Body)})
+		payload, _ := json.Marshal(gin.H{"caseId": caseID, "messageId": returnedID, "senderKind": kind, "audience": caseAudience, "body": strings.TrimSpace(body.Body)})
 		if kind == "staff" {
 			if _, err = messaging.AppendEventTx(ctx.Request.Context(), tx, owner, "support-message:"+returnedID, "support.message.created", payload); err != nil {
 				return err
@@ -1282,4 +1284,13 @@ func (a *supportAPI) updateCase(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, contracts.APIResponse{Data: gin.H{"caseId": caseID, "status": status, "assignedAdminId": assigned}})
+}
+
+// supportPreview trims a message to a one-line list preview.
+func supportPreview(body string) string {
+	line := strings.Join(strings.Fields(body), " ")
+	if r := []rune(line); len(r) > 120 {
+		return string(r[:120]) + "…"
+	}
+	return line
 }

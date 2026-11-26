@@ -51,6 +51,14 @@ func (c *TripConsumer) Handle(ctx context.Context, msg *pubsub.Message) error {
 			return err
 		}
 		_, err := c.svc.Decline(ctx, response.TripID, envelope.EntityID)
+		if errors.Is(err, repo.ErrAssignmentNotActive) {
+			// The offer already expired, was accepted elsewhere, or this decline was
+			// already applied. There is nothing left to undo and a retry can never
+			// succeed, so acknowledge it. Returning the error made Pub/Sub redeliver
+			// the same message endlessly.
+			logs.L().Infow("Ignoring decline for an assignment that is no longer offered", "tripID", response.TripID, "driverID", envelope.EntityID)
+			return nil
+		}
 		return err // Trigger queues the acknowledgement and durable retry.
 	case contracts.DriverCmdLocation:
 		var location messaging.DriverLocationData

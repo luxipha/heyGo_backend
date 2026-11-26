@@ -23,3 +23,15 @@ func TestNotificationForDriverBusinessEvents(t *testing.T) {
 		t.Fatal("command acknowledgements must not create inbox notifications")
 	}
 }
+
+func TestNotificationForSupportReply(t *testing.T) {
+	got := notificationForDriverEvent("support.message.created", json.RawMessage(`{"caseId":"c","senderKind":"staff","audience":"driver"}`))
+	if got == nil || got.Type != "support" || got.Title != "New reply from HeyGo Support" {
+		t.Fatalf("support reply notification=%+v", got)
+	}
+	for _, raw := range []string{`{"senderKind":"staff","audience":"rider"}`, `{"senderKind":"user","audience":"driver"}`} {
+		if notificationForDriverEvent("support.message.created", json.RawMessage(raw)) != nil {
+			t.Fatalf("%s must not notify the driver", raw)
+		}
+	}
+}

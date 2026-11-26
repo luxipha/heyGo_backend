@@ -137,6 +137,7 @@ func main() {
 		handler.StartHeroStagePayoutJobs(ctx, pool)
 		handler.StartNotificationPushJobs(ctx, pool)
 		handler.StartDriverDocumentReminderJobs(ctx, pool)
+		handler.StartDriverRequirementReminderJobs(ctx, pool)
 		handler.StartPushBroadcastJobs(ctx, pool)
 		go func() {
 			if err := topicConsumer.Consume(ctx); err != nil && ctx.Err() == nil {

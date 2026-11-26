@@ -75,6 +75,11 @@ func notificationForDriverEvent(kind string, raw json.RawMessage) *InboxNotifica
 			body += " " + reason
 		}
 		return makeMessage("verification", "Document status updated", body)
+	case "support.message.created":
+		if str("audience") != "driver" || str("senderKind") != "staff" {
+			return nil
+		}
+		return makeMessage("support", "New reply from HeyGo Support", "Open Support to read the reply.")
 	case "driver.inspection.updated":
 		status := humanizeNotificationValue(str("status"))
 		if status == "" {

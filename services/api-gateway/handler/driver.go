@@ -483,7 +483,7 @@ func (a *driverAPI) availability(ctx *gin.Context) {
 		return
 	}
 	if *body.Available && !state.EligibleToDrive {
-		driverError(ctx, http.StatusForbidden, "driver_not_eligible", "Complete all seven requirements and obtain admin approval before going online")
+		driverError(ctx, http.StatusForbidden, "driver_not_eligible", "Complete all required items and obtain admin approval before going online")
 		return
 	}
 	if *body.Available {

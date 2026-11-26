@@ -92,6 +92,8 @@ func registerAdminRoutes(router *gin.Engine, pool *pgxpool.Pool, files storage.O
 	admin.GET("/scheduling/settings", api.getSchedulePolicy)
 	admin.PUT("/scheduling/settings", api.requireCSRF, api.saveSchedulePolicy)
 	admin.PUT("/gocoin/settings", api.requireCSRF, api.saveCoinPolicy)
+	admin.GET("/driver-requirements", api.driverRequirements)
+	admin.PUT("/driver-requirements/:type", api.requireCSRF, api.saveDriverRequirement)
 	admin.PUT("/referrals/settings", api.requireCSRF, api.saveReferralSettings)
 	admin.POST("/referrals/stages/payout", api.requireCSRF, api.queueHeroPayout)
 	admin.POST("/referrals/stages/payouts/:id/cancel", api.requireCSRF, api.cancelQueuedHeroPayout)

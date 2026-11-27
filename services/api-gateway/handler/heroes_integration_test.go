@@ -253,3 +253,72 @@ func TestHeroesPolicyValidation(t *testing.T) {
 		t.Fatal("Non-increasing ranks accepted")
 	}
 }
+
+// An email-only referred Driver must not prevent a Hero from loading their list.
+func TestHeroesDriversMissingPhone(t *testing.T) {
+	database := os.Getenv("HEROES_TEST_DATABASE_URL")
+	if database == "" {
+		database = os.Getenv("TEST_DATABASE_URL")
+	}
+	if database == "" {
+		t.Skip("Disposable PostgreSQL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	pool, err := shareddb.NewPostgresPool(ctx, shareddb.Config{URL: database, MaxConns: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = shareddb.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hero, driver, referral, token := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	exec(`INSERT INTO heroes_accounts(id,email,name,password_hash,referral_code) VALUES($1,$2,'Phone regression Hero','unused',$3)`, hero, hero+"@example.test", "PHONE"+hero)
+	exec(`INSERT INTO heroes_sessions(token_hash,hero_id,expires_at) VALUES($1,$2,now()+interval '1 hour')`, heroesHash(token), hero)
+	exec(`INSERT INTO users(id,roles,email) VALUES($1,ARRAY['driver'],$2)`, driver, driver+"@example.test")
+	exec(`INSERT INTO heroes_referrals(id,hero_id,driver_id,policy_id) SELECT $1,$2,$3,id FROM heroes_policies ORDER BY version DESC LIMIT 1`, referral, hero, driver)
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	registerHeroesRoutes(router, pool)
+	check := func(wantPhone string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/heroes/drivers", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		if response.Code != 200 {
+			t.Fatalf("driver list: HTTP %d: %s", response.Code, response.Body.String())
+		}
+		var result struct {
+			Data struct {
+				Items []struct {
+					ID     string `json:"id"`
+					Phone  string `json:"phone"`
+					Linked bool   `json:"linked"`
+				} `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Data.Items) != 1 {
+			t.Fatalf("expected one referred Driver, got %s", response.Body.String())
+		}
+		item := result.Data.Items[0]
+		if item.ID != referral || !item.Linked || item.Phone != wantPhone {
+			t.Fatalf("unexpected referred Driver: %+v", item)
+		}
+	}
+	t.Run("missing phone", func(t *testing.T) { check("••••") })
+	exec(`UPDATE users SET phone_e164=$2 WHERE id=$1`, driver, "+2348000000001")
+	t.Run("phone added later", func(t *testing.T) { check("•••• 0001") })
+	exec(`UPDATE users SET phone_e164=NULL WHERE id=$1`, driver)
+	t.Run("phone missing again", func(t *testing.T) { check("••••") })
+}
